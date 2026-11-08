@@ -1,0 +1,17 @@
+# A thrown blast charge: lands by a dirt mound in front of a stone wall,
+# explodes, throws debris and knocks the witch back.
+scene empty
+spawn 900 1100
+ticks 220
+zoom 3
+at 0 fill stone 600 1100 1500 1160
+at 0 circle dirt 985 1100 22
+at 0 fill stone 1020 1040 1032 1100
+at 0 fill sand 1100 1070 1180 1100
+at 10 tool 2
+at 10 aim 945 1090
+at 20 tap primary
+at 60 shot charge_resting
+at 119 shot explosion
+at 132 shot knocked_back
+at 200 shot after

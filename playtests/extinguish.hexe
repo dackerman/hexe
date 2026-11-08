@@ -1,0 +1,30 @@
+# Burning wooden planks in a shallow stone basin: the water spray fills the
+# basin and puts the fire out; a burning walker is doused by the jet.
+scene empty
+spawn 860 1100
+ticks 420
+zoom 3
+at 0 fill stone 600 1100 1500 1160
+at 0 fill stone 936 1090 940 1100
+at 0 fill stone 1080 1090 1084 1100
+at 0 fill wood 940 1098 1080 1099
+at 0 fill wood 950 1093 951 1098
+at 0 fill wood 975 1093 976 1098
+at 0 fill wood 1000 1093 1001 1098
+at 0 fill wood 1025 1093 1026 1098
+at 0 fill wood 1050 1093 1051 1098
+at 0 fill wood 1060 1095 1075 1096
+at 5 ignite 1010 1095 80
+at 10 tool 3
+at 10 aim 960 1050
+at 60 census 936 1080 150 20
+at 60 shot burning
+at 70 hold primary
+at 120 aim 1000 1040
+at 140 shot spraying
+at 160 aim 1050 1030
+at 220 aim 1010 1040
+at 300 release primary
+at 310 census 936 1080 150 20
+at 410 census 936 1080 150 20
+at 410 shot extinguished

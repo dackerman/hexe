@@ -1,0 +1,19 @@
+# The default play scene (the render test cave) with its two enemies and
+# the --spawn-enemies extras, as the windowed app starts.
+scene lighting
+spawn 1060 1180
+ticks 400
+zoom 3
+at 0 enemy walker 1245 1180
+at 0 enemy flyer 860 1010
+at 10 aimrel 80 -10
+at 60 shot start
+at 61 help
+at 62 shot help
+at 63 help
+at 100 hold right
+at 100 tool 1
+at 130 tap primary
+at 150 release right
+at 170 shot fight
+at 390 shot later

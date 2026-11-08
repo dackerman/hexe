@@ -1,0 +1,21 @@
+# The witch wades into a deep pool, floats, dives and holds her breath until
+# she starts drowning, then swims up.
+scene empty
+spawn 860 1100
+ticks 700
+zoom 3
+liquid off
+at 0 fill stone 600 1100 1500 1220
+at 0 fill air 900 1100 1100 1180
+at 0 fill water 900 1112 1100 1180
+at 10 aimrel 60 0
+at 20 hold right
+at 60 release right
+at 100 shot floating
+at 110 hold down
+at 300 shot diving
+at 470 shot drowning
+at 480 release down
+at 480 hold jump
+at 560 release jump
+at 600 shot surfaced

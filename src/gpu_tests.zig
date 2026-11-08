@@ -103,6 +103,7 @@ fn mirrorMatchesReadback(gpa: std.mem.Allocator, engine: *Engine, table: *const 
             const c = cells[cell.index(@intCast(x), @intCast(y))];
             const want: u8 = @intCast(cell.material(c));
             if ((mirror.material(x, y) orelse 255) != want) region_bad += 1;
+            if ((mirror.info(x, y) orelse 255) != readback.cellInfo(c, table.tables)) region_bad += 1;
             if (mirror.isSolid(x, y) != (table.tables.materials[want].phase == 0)) region_bad += 1;
         }
     }
@@ -112,9 +113,10 @@ fn mirrorMatchesReadback(gpa: std.mem.Allocator, engine: *Engine, table: *const 
         while (x < 20) : (x += 1) {
             const c = cells[cell.index(cell.wrap(x), cell.wrap(y))];
             if ((mirror.material(x, y) orelse 255) != cell.material(c)) region_bad += 1;
+            if ((mirror.info(x, y) orelse 255) != readback.cellInfo(c, table.tables)) region_bad += 1;
         }
     }
-    try check(region_bad == 0, "{d} region/isSolid lookups differ", .{region_bad});
+    try check(region_bad == 0, "{d} region material/info/isSolid lookups differ", .{region_bad});
     try check(mirror.material(500, 500) == null, "material outside regions must be null", .{});
     std.debug.print("      tick {d}: {d} solid bits, {d} liquid bits, 2 regions, {d} particles live\n", .{ mirror.tick, solid_bits, liquid_bits, mirror.particles.live });
 }

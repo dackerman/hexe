@@ -1,0 +1,15 @@
+# A flyer hovers and spits; a blast beside it throws it across the arena.
+scene empty
+spawn 880 1100
+ticks 200
+zoom 3
+at 0 fill stone 600 1100 1500 1160
+at 0 fill stone 600 900 620 1100
+at 0 fill stone 1480 900 1500 1100
+at 0 enemy flyer 1000 1030
+at 10 tool 2
+at 100 shot hovering
+at 119 aimenemy -22 6
+at 120 tap secondary
+at 126 shot blown
+at 140 shot blown_later

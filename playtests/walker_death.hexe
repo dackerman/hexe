@@ -1,0 +1,23 @@
+# A walker chases the witch, is burnt by fire bolts and dies into a flesh
+# and bone body that bleeds.
+scene empty
+spawn 860 1100
+ticks 400
+zoom 3
+at 0 fill stone 600 1100 1500 1160
+at 0 fill stone 600 960 620 1100
+at 0 enemy walker 1060 1100
+at 10 tool 1
+at 10 aimrel 120 -6
+at 40 shot chase
+at 40 tap primary
+at 60 tap primary
+at 80 tap primary
+at 100 tap primary
+at 120 tap primary
+at 140 tap primary
+at 109 shot died
+at 140 center 930 1085
+at 140 shot corpse
+at 390 shot corpse_later
+at 140 census 900 1060 70 40
