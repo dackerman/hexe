@@ -5,5 +5,5 @@ real. Written in Zig, simulated on the GPU with Vulkan.
 
 Start with [docs/README.md](docs/README.md).
 
-Status: design complete, implementation not started. See
+Status: engine foundation (M0–M2) merged; sim layers in progress. See
 [docs/05-milestones.md](docs/05-milestones.md) for the build order.

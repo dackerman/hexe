@@ -8,6 +8,10 @@
             .url = "https://github.com/erincatto/box2d/archive/refs/tags/v3.2.0.tar.gz",
             .hash = "box2d-3.2.0-C17qGOHCFwB_HQTlWO3xsKYk6nWkKlqtVMMPng4XYv8w",
         },
+        .vulkan = .{
+            .url = "git+https://github.com/Snektron/vulkan-zig.git#8a0bc54894ed546ad1ecc4c072e0070cef022ee4",
+            .hash = "vulkan-0.0.0-r7Ytx_KJAwA4dG8cx7pUBhfdqz80XWCV7xsCFHCA1upR",
+        },
     },
     .paths = .{
         "build.zig",

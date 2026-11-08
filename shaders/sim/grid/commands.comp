@@ -1,0 +1,58 @@
+#version 460
+// Apply one command (fill circle / fill rect) over its bounding box. The CPU
+// records one dispatch per command, in list order, with a barrier between
+// them, and aligns the box origin to 16 so each workgroup lies inside one
+// activity tile. Changed tiles are marked active (with neighbors).
+#include "common.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PC {
+    ivec2 origin; // unwrapped world pixel of the box's top-left, multiple of 16
+    uvec2 size; // box size in pixels
+    uint index; // command index in COMMANDS
+    uint mark_tiles; // nonzero: mark changed tiles in TILE_MARKS
+} pc;
+
+shared bool s_changed;
+
+bool inside_shape(Command c, ivec2 p) {
+    if (c.kind == CMD_FILL_CIRCLE) {
+        ivec2 d = p - ivec2(c.x0, c.y0);
+        return d.x * d.x + d.y * d.y <= c.x1 * c.x1;
+    }
+    if (c.kind == CMD_FILL_RECT) {
+        return all(greaterThanEqual(p, ivec2(c.x0, c.y0))) && all(lessThan(p, ivec2(c.x1, c.y1)));
+    }
+    return false;
+}
+
+void main() {
+    if (gl_LocalInvocationIndex == 0u) s_changed = false;
+    barrier();
+
+    Command c = COMMANDS[pc.index];
+    ivec2 p = pc.origin + ivec2(gl_GlobalInvocationID.xy);
+    if (all(lessThan(gl_GlobalInvocationID.xy, pc.size)) && inside_shape(c, p)) {
+        ivec2 w = wrap_coord(p);
+        uint old = imageLoad(CELLS, w).x;
+        uint h = hash_salt(uint(w.x), uint(w.y), c.seed, SALT_SPAWN_VARIANT);
+        uint coverage = (c.flags >> CMD_COVERAGE_SHIFT) & 0xffu;
+        bool replace = (c.flags & CMD_FLAG_ONLY_AIR) == 0u || cell_material(old) == MATERIAL_AIR;
+        if (coverage != 0u && (h & 0xffu) >= coverage) replace = false;
+        if (replace) {
+            uint variant = h >> 28;
+            uint cell = spawn_cell(c.material, variant);
+            if (cell != old) {
+                imageStore(CELLS, w, uvec4(cell, 0u, 0u, 0u));
+                s_changed = true;
+            }
+        }
+    }
+
+    barrier();
+    if (gl_LocalInvocationIndex == 0u && s_changed && pc.mark_tiles != 0u) {
+        ivec2 corner = wrap_coord(pc.origin + ivec2(gl_WorkGroupID.xy * 16u));
+        mark_tile_and_neighbors(uvec2(corner) >> TILE_SHIFT);
+    }
+}

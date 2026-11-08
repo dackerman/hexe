@@ -1,0 +1,105 @@
+#version 460
+// Margolus movement, one substep. One workgroup per active tile (indirect
+// dispatch over TILE_LIST), one thread per 2x2 block, in place: blocks are
+// disjoint, so there are no races and the result is independent of order.
+// Rule order inside a block: vertical (both columns), diagonal down (powders,
+// liquids), diagonal up (gases), lateral (liquids, gases). Static solids
+// never move. Mirrored exactly by src/sim/reference/grid.zig.
+#include "common.glsl"
+#include "sim/grid/block.glsl"
+#include "sim/grid/powder.glsl"
+#include "sim/grid/liquid.glsl"
+#include "sim/grid/gas.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PC {
+    uint tick;
+    uint substep;
+    uint mark_tiles; // nonzero: mark tiles whose blocks moved
+} pc;
+
+shared bool s_moved;
+
+// `from` is a top cell, `to` the opposite bottom cell, `side` the cell beside
+// `from` in its row.
+void diagonal_down(inout Block b, int from, int to, int side, uint rnd8) {
+    uint p = block_phase(b, from);
+    if (p != PHASE_POWDER && p != PHASE_LIQUID) return;
+    if (!block_is_fluid(b, side) || !block_can_sink(b, from, to)) return;
+    uint chance = p == PHASE_POWDER ? powder_diagonal_chance(b.move[from]) : liquid_diagonal_chance(b.move[from]);
+    if (chance8(rnd8, chance)) block_swap(b, from, to);
+}
+
+void lateral(inout Block b, int l, int r, uint rnd8) {
+    if (b.moved[l] || b.moved[r]) return;
+    // Both moved last substep (persisted CELL_FLAG_MOVED): they most likely
+    // just swapped with each other; swapping back would only jitter.
+    if (cell_has(b.cell[l], CELL_FLAG_MOVED) && cell_has(b.cell[r], CELL_FLAG_MOVED)) return;
+    if (!liquid_lateral(b, l, r, rnd8)) gas_lateral(b, l, r, rnd8);
+}
+
+void main() {
+    if (gl_LocalInvocationIndex == 0u) s_moved = false;
+    barrier();
+
+    uint packed = TILE_LIST.tiles[gl_WorkGroupID.x];
+    uvec2 tile = uvec2(packed & 0xffffu, packed >> 16);
+    uvec2 origin = (tile * TILE_SIZE + gl_LocalInvocationID.xy * 2u + margolus_offset(pc.substep)) & uvec2(WORLD_MASK);
+    ivec2 p[4];
+    p[0] = ivec2(origin);
+    p[1] = ivec2(uvec2(origin.x + 1u, origin.y) & uvec2(WORLD_MASK));
+    p[2] = ivec2(uvec2(origin.x, origin.y + 1u) & uvec2(WORLD_MASK));
+    p[3] = ivec2(uvec2(origin.x + 1u, origin.y + 1u) & uvec2(WORLD_MASK));
+
+    Block b;
+    uint orig[4];
+    for (int i = 0; i < 4; i++) {
+        orig[i] = imageLoad(CELLS, p[i]).x;
+        b.cell[i] = orig[i];
+        b.moved[i] = false;
+    }
+
+    uint m0 = cell_material(orig[0]);
+    bool uniform_block = m0 == cell_material(orig[1]) && m0 == cell_material(orig[2]) && m0 == cell_material(orig[3]);
+    if (!uniform_block) {
+        for (int i = 0; i < 4; i++) block_cache(b, i);
+        uint h = hash(origin.x, origin.y, pc.tick, pc.substep);
+        uint h2 = hash_u32(h ^ 0x5bd1e995u);
+
+        rule_vertical(b, 0, 2, h & 0xffu);
+        rule_vertical(b, 1, 3, (h >> 8) & 0xffu);
+
+        uint rd = (h >> 16) & 0xffu;
+        if ((h & 0x01000000u) != 0u) {
+            diagonal_down(b, 0, 3, 1, rd);
+            diagonal_down(b, 1, 2, 0, rd);
+        } else {
+            diagonal_down(b, 1, 2, 0, rd);
+            diagonal_down(b, 0, 3, 1, rd);
+        }
+
+        uint ru = (h2 >> 16) & 0xffu;
+        if ((h & 0x02000000u) != 0u) {
+            gas_diagonal_up(b, 2, 1, 3, ru);
+            gas_diagonal_up(b, 3, 0, 2, ru);
+        } else {
+            gas_diagonal_up(b, 3, 0, 2, ru);
+            gas_diagonal_up(b, 2, 1, 3, ru);
+        }
+
+        lateral(b, 0, 1, h2 & 0xffu);
+        lateral(b, 2, 3, (h2 >> 8) & 0xffu);
+    }
+
+    bool any_moved = false;
+    for (int i = 0; i < 4; i++) {
+        uint c = cell_with_flag(b.cell[i], CELL_FLAG_MOVED, b.moved[i]);
+        any_moved = any_moved || b.moved[i];
+        if (c != orig[i]) imageStore(CELLS, p[i], uvec4(c, 0u, 0u, 0u));
+    }
+    if (any_moved) s_moved = true;
+
+    barrier();
+    if (gl_LocalInvocationIndex == 0u && s_moved && pc.mark_tiles != 0u) mark_tile_and_neighbors(tile);
+}
