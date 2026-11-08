@@ -5,6 +5,7 @@
 //!        [--scene name] [--seed n] [--profile out.csv] [--no-sleep]
 //!   hexe --headless --bench                (zig build bench)
 //!   hexe --headless --verify-determinism   (zig build verify-determinism)
+//!   hexe --world [--seed N] [--save DIR]   endless streamed world (windowed or --headless)
 const std = @import("std");
 const builtin = @import("builtin");
 const Engine = @import("engine.zig").Engine;
@@ -17,6 +18,7 @@ const cell = @import("sim/cell.zig");
 const View = @import("render/world.zig").View;
 const bench = @import("bench.zig");
 const verify = @import("verify.zig");
+const world_mode = @import("world_mode.zig");
 
 pub const std_options: std.Options = .{
     .log_level = if (builtin.mode == .debug) .info else .info,
@@ -42,6 +44,20 @@ pub const Cli = struct {
     zoom: u32 = 2,
     /// World pixel at the center of the view (default: world center).
     center: ?[2]i32 = null,
+    // ---- world streaming (M4) ----
+    /// Endless procedural world instead of a scene.
+    world: bool = false,
+    save_dir: ?[]const u8 = null,
+    /// Headless: scripted camera center path.
+    cam_path: ?world_mode.CamPath = null,
+    /// Headless: fill a circle "X,Y,R,MATERIAL" (world cells) at tick 0.
+    world_edit: ?[]const u8 = null,
+    /// Headless: print the cell at world "X,Y" after the run.
+    probe: ?[2]i32 = null,
+    /// GPU round-trip test of the stream sink (zig build stream-test).
+    world_selftest: bool = false,
+    stream_ops: u32 = 2,
+    // ---- end world streaming ----
 };
 
 fn usage() void {
@@ -63,6 +79,13 @@ fn usage() void {
         \\  --size WxH              window size (default 1600x900)
         \\  --bench                 run the benchmark scenes (with --headless)
         \\  --verify-determinism    CPU reference vs GPU, bit for bit
+        \\  --world                 endless procedural world (WASD pan, F5 save)
+        \\  --save DIR              world save directory (loaded if present, written on quit/F5)
+        \\  --cam-path "X,Y -> X,Y over N ticks"   headless world camera path (centers)
+        \\  --world-edit X,Y,R,MAT  headless world: fill a circle at tick 0
+        \\  --probe X,Y             headless world: print the cell at a world position
+        \\  --stream-ops N          chunks streamed per tick when ready (default 2)
+        \\  --world-selftest        GPU dirty-bit / upload / download / save round trip
         \\
     , .{});
 }
@@ -122,6 +145,25 @@ fn parseCli(args: []const [:0]const u8) !Cli {
             cli.bench = true;
         } else if (std.mem.eql(u8, a, "--verify-determinism")) {
             cli.verify = true;
+        } else if (std.mem.eql(u8, a, "--world")) {
+            cli.world = true;
+        } else if (std.mem.eql(u8, a, "--save")) {
+            cli.save_dir = try next(args, &i);
+        } else if (std.mem.eql(u8, a, "--cam-path")) {
+            cli.cam_path = try world_mode.CamPath.parse(try next(args, &i));
+        } else if (std.mem.eql(u8, a, "--world-edit")) {
+            cli.world_edit = try next(args, &i);
+        } else if (std.mem.eql(u8, a, "--probe")) {
+            var it = std.mem.splitScalar(u8, try next(args, &i), ',');
+            const x = try std.fmt.parseInt(i32, it.next() orelse return error.BadProbe, 10);
+            const y = try std.fmt.parseInt(i32, it.next() orelse return error.BadProbe, 10);
+            cli.probe = .{ x, y };
+        } else if (std.mem.eql(u8, a, "--world-selftest")) {
+            cli.world_selftest = true;
+            cli.world = true;
+            cli.headless = true;
+        } else if (std.mem.eql(u8, a, "--stream-ops")) {
+            cli.stream_ops = @max(1, try std.fmt.parseInt(u32, try next(args, &i), 10));
         } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
             usage();
             std.process.exit(0);
@@ -142,6 +184,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     if (cli.verify) return verify.run(gpa, io, cli);
     if (cli.bench) return bench.run(gpa, io, cli);
+    if (cli.world and cli.headless) return world_mode.runHeadless(gpa, io, cli);
     if (!cli.headless) return app.run(gpa, io, cli);
     return runHeadless(gpa, io, cli);
 }
@@ -215,4 +258,5 @@ test {
     _ = @import("sim/reference/grid.zig");
     _ = @import("render/font.zig");
     _ = @import("util/png.zig");
+    _ = @import("world_mode.zig");
 }

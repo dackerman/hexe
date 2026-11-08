@@ -13,6 +13,7 @@ const chunk = @import("chunk.zig");
 const window = @import("window.zig");
 const store_mod = @import("store.zig");
 const Store = store_mod.Store;
+const Prefetcher = @import("prefetch.zig").Prefetcher;
 
 /// Implemented by the GPU side. Slots are window chunk slots, 0..7 each.
 pub const UploadSink = struct {
@@ -54,6 +55,11 @@ pub const Config = struct {
     /// still finishes a column in 8 ticks, far faster than the camera can
     /// cross the ≥ 768-cell margin the window keeps.
     ops_per_tick: u32 = 1,
+    /// Evict the whole outgoing row or column in the first tick of a move,
+    /// so the GPU side can download every dirty chunk of it in one
+    /// synchronous copy instead of one per slot. Slots of the move are then
+    /// empty (not resident) until their new chunk loads.
+    batch_evict: bool = false,
 };
 
 pub const Stats = struct {
@@ -63,6 +69,10 @@ pub const Stats = struct {
     uploads: u64 = 0,
     downloads: u64 = 0,
     moves: u64 = 0,
+    /// Chunks taken ready-made from the prefetcher.
+    prefetched: u64 = 0,
+    /// Ticks a move waited because its next chunk was still generating.
+    stalls: u64 = 0,
 };
 
 pub const TickReport = struct {
@@ -89,6 +99,13 @@ pub const Streaming = struct {
     move_next: u32,
     buf: *chunk.Cells,
     stats: Stats,
+    /// Optional background generator (`attachPrefetcher`). With one, the
+    /// main thread never runs procgen in `tick`: a move waits for its next
+    /// chunk instead, and the camera's direction steers what gets generated.
+    prefetch: ?*Prefetcher = null,
+    /// Last camera position and smoothed velocity (cells per tick, ×16).
+    cam: [2]i32 = .{ 0, 0 },
+    vel16: [2]i32 = .{ 0, 0 },
 
     /// Sets up the window centered on the camera. Call `loadAll` next.
     pub fn init(alloc: std.mem.Allocator, st: *Store, sink: UploadSink, cfg: Config, cam_x: i32, cam_y: i32) !Streaming {
@@ -113,26 +130,59 @@ pub const Streaming = struct {
     /// Fills every slot for the current origin. Blocking; for startup and
     /// after `teleport`.
     pub fn loadAll(s: *Streaming) !void {
+        if (s.prefetch) |p| {
+            // Queue everything first so all workers generate in parallel.
+            for (0..window.slot_count) |i| {
+                const c = window.chunkAtSlot(window.Slot.fromIndex(@intCast(i)), s.origin);
+                if (!s.store.isParked(c)) p.request(c, 0);
+            }
+            for (0..window.slot_count) |i| {
+                const slot = window.Slot.fromIndex(@intCast(i));
+                const c = window.chunkAtSlot(slot, s.origin);
+                if (s.store.isParked(c)) {
+                    try s.loadSlot(slot, c);
+                } else {
+                    const cells = try p.wait(c);
+                    s.uploadGenerated(slot, c, cells);
+                }
+            }
+            return;
+        }
         for (0..window.slot_count) |i| {
             const slot = window.Slot.fromIndex(@intCast(i));
             try s.loadSlot(slot, window.chunkAtSlot(slot, s.origin));
         }
     }
 
+    /// Attaches a background generator; see `prefetch`.
+    pub fn attachPrefetcher(s: *Streaming, p: *Prefetcher) void {
+        s.prefetch = p;
+    }
+
     /// Advances streaming by one tick for the camera at world cell (x, y).
     pub fn tick(s: *Streaming, cam_x: i32, cam_y: i32) !TickReport {
+        s.trackCamera(cam_x, cam_y);
+        defer if (s.prefetch != null) s.planPrefetch();
         if (s.move == null) {
             const target = window.desiredOrigin(s.origin, cam_x, cam_y, s.cfg.hysteresis);
             s.move = window.nextMove(s.origin, target) orelse return .{ .moving = false, .ops = 0 };
             s.move_next = 0;
             s.stats.moves += 1;
+            if (s.cfg.batch_evict) {
+                const m = &s.move.?;
+                for (0..window.chunks) |k| try s.evictSlot(m.slots[k], m.evict[k]);
+            }
         }
         const m = &s.move.?;
         var ops: u32 = 0;
         while (s.move_next < window.chunks and ops < s.cfg.ops_per_tick) {
             const k = s.move_next;
-            try s.evictSlot(m.slots[k], m.evict[k]);
-            try s.loadSlot(m.slots[k], m.load[k]);
+            if (!s.canLoadNow(m.load[k])) {
+                s.stats.stalls += 1;
+                break;
+            }
+            if (!s.cfg.batch_evict) try s.evictSlot(m.slots[k], m.evict[k]);
+            try s.loadSlotNow(m.slots[k], m.load[k]);
             s.move_next += 1;
             ops += 1;
         }
@@ -141,6 +191,83 @@ pub const Streaming = struct {
             s.move = null;
         }
         return .{ .moving = s.move != null, .ops = ops };
+    }
+
+    fn trackCamera(s: *Streaming, cam_x: i32, cam_y: i32) void {
+        const d = [2]i32{ cam_x - s.cam[0], cam_y - s.cam[1] };
+        for (0..2) |k| {
+            // Ignore jumps (teleports, first tick); smooth over ~8 ticks.
+            const dk = std.math.clamp(d[k], -256, 256) * 16;
+            s.vel16[k] += @divTrunc(dk - s.vel16[k], 8);
+        }
+        s.cam = .{ cam_x, cam_y };
+    }
+
+    /// Whether chunk `c` can be loaded without running procgen here.
+    fn canLoadNow(s: *Streaming, c: chunk.Coord) bool {
+        const p = s.prefetch orelse return true;
+        if (s.store.isParked(c)) return true;
+        if (p.isReady(c)) return true;
+        p.request(c, 0);
+        return false;
+    }
+
+    fn loadSlotNow(s: *Streaming, slot: window.Slot, c: chunk.Coord) !void {
+        if (s.prefetch) |p| if (!s.store.isParked(c)) {
+            const cells = p.acquire(c) orelse unreachable; // canLoadNow checked
+            s.uploadGenerated(slot, c, cells);
+            return;
+        };
+        try s.loadSlot(slot, c);
+    }
+
+    fn uploadGenerated(s: *Streaming, slot: window.Slot, c: chunk.Coord, cells: *const chunk.Cells) void {
+        s.sink.uploadChunk(slot.x, slot.y, cells);
+        s.prefetch.?.release(c);
+        s.stats.generated += 1;
+        s.stats.prefetched += 1;
+        s.stats.uploads += 1;
+        s.slots[slot.index()] = .{ .coord = c, .valid = true };
+    }
+
+    /// Queues the chunks the next moves will need: the current move's
+    /// remaining loads first, then the ring just outside the window on the
+    /// sides the camera is heading to, then the rest of the ring.
+    fn planPrefetch(s: *Streaming) void {
+        const p = s.prefetch.?;
+        var o = s.origin;
+        if (s.move) |m| {
+            for (s.move_next..window.chunks) |k| s.want(p, m.load[k], 0);
+            o = m.new_origin;
+        }
+        const n: i32 = @intCast(window.chunks);
+        // Axis-aligned direction of travel, with a dead zone of ~1 cell/tick.
+        const dir = [2]i32{
+            if (s.vel16[0] > 12) 1 else if (s.vel16[0] < -12) -1 else 0,
+            if (s.vel16[1] > 12) 1 else if (s.vel16[1] < -12) -1 else 0,
+        };
+        for ([_]u8{ 1, 2 }) |prio| {
+            inline for (0..2) |axis| {
+                for ([_]i32{ -1, 1 }) |side| {
+                    const ahead = dir[axis] == side;
+                    if ((prio == 1) != ahead) continue;
+                    var i: i32 = -1;
+                    while (i <= n) : (i += 1) {
+                        const edge = if (side > 0) n else -1;
+                        const c: chunk.Coord = if (axis == 0)
+                            .{ .x = o.x + edge, .y = o.y + i }
+                        else
+                            .{ .x = o.x + i, .y = o.y + edge };
+                        s.want(p, c, prio);
+                    }
+                }
+            }
+        }
+    }
+
+    fn want(s: *Streaming, p: *Prefetcher, c: chunk.Coord, prio: u8) void {
+        if (s.store.isParked(c) or s.isResident(c)) return;
+        p.request(c, prio);
     }
 
     fn evictSlot(s: *Streaming, slot: window.Slot, expect: chunk.Coord) !void {
@@ -190,6 +317,7 @@ pub const Streaming = struct {
     /// Jumps the window to a new camera position: parks dirty chunks,
     /// recenters and reloads everything. Blocking.
     pub fn teleport(s: *Streaming, cam_x: i32, cam_y: i32) !void {
+        // Slots a batched move already evicted are empty and skipped.
         try s.flush();
         s.move = null;
         s.origin = window.centeredOrigin(cam_x, cam_y);
@@ -454,4 +582,40 @@ test "flush parks dirty resident chunks for saving" {
     try testing.expectEqual(@as(u32, 1), f.tsink.downloads);
     try f.st.flush(); // bit was taken; nothing new
     try testing.expectEqual(@as(u32, 1), f.tsink.downloads);
+}
+
+test "batched eviction with a prefetcher: no procgen in tick, edits survive" {
+    const a = testing.allocator;
+    const pf = @import("prefetch.zig");
+    const cy = sky_y - @mod(sky_y, 256);
+    var store = try Store.init(a, 42, .{ .ids = procgen.test_ids }, .{ .parked_bytes = 4 << 20, .max_parked_chunks = 64 });
+    defer store.deinit();
+    var tsink = try TestSink.init(a);
+    defer tsink.deinit(a);
+    var p = try pf.Prefetcher.create(a, testing.io, 42, .{ .ids = procgen.test_ids }, .{ .workers = 2, .capacity = 48 });
+    defer p.destroy();
+    var st = try Streaming.init(a, &store, tsink.sink(), .{ .ops_per_tick = 8, .batch_evict = true }, 0, cy);
+    defer st.deinit(a);
+    st.attachPrefetcher(p);
+    try st.loadAll();
+    try testing.expectEqual(@as(u64, 64), st.stats.prefetched);
+    // Edit the leftmost column, then move right until the column swaps.
+    const w = window.toWindow(-4 * 256 + 3, cy + 7);
+    const wood = cell.pack(procgen.test_ids.wood, cell.ambient_temperature, 120, 0, 3);
+    tsink.edit(w[0], w[1], wood);
+    var ticks: u32 = 0;
+    while (st.origin.x == -4) : (ticks += 1) {
+        _ = try st.tick(200, cy);
+        try testing.expect(ticks < 10_000);
+    }
+    try testing.expect(store.isParked(chunk.coordOfCell(-4 * 256 + 3, cy + 7)));
+    try testing.expectEqual(@as(u32, 1), tsink.downloads);
+    try testing.expectEqual(@as(u64, 72), st.stats.prefetched);
+    // Moving right, the ring to the right (x = 5 after the move) is queued first.
+    while (!p.isReady(.{ .x = 5, .y = st.origin.y })) {
+        _ = try st.tick(200, cy);
+    }
+    // Back left: the edited chunk comes from the parked copy.
+    while (st.origin.x != -4) _ = try st.tick(-100, cy);
+    try testing.expectEqual(wood, tsink.at(w[0], w[1]));
 }

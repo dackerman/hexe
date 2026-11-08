@@ -1,0 +1,22 @@
+#version 460
+// Dirty bits from activity marks (docs/decisions/61-stream-dirty-bits.md).
+// Runs after commands, before compaction: a tile whose wake countdown is
+// exactly TILE_WAKE_TICKS was marked by a change since the last compaction
+// (any pass that changes cells calls mark_tile_and_neighbors), so its
+// chunk slot is dirty. One thread per tile.
+#include "common.glsl"
+#include "sim/stream/stream.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PC {
+    uint dirty_buffer;
+} pc;
+
+void main() {
+    uvec2 t = gl_GlobalInvocationID.xy;
+    if (uint(TILE_MARKS[tile_index(t)]) == TILE_WAKE_TICKS) {
+        uvec2 s = t / STREAM_TILES_PER_CHUNK;
+        g_stream_dirty[pc.dirty_buffer].bits[s.y * STREAM_CHUNKS_PER_SIDE + s.x] = 1u;
+    }
+}

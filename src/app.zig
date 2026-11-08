@@ -7,7 +7,7 @@
 //!   = / -          zoom in / out (integer)         space         pause
 //!   .              single tick while paused        F1            toggle HUD
 //!   F2             activity tile overlay           F12           screenshot
-//!   Esc            quit
+//!   F5             save (--world --save DIR)    Esc           quit
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("sdl");
@@ -22,6 +22,7 @@ const materials_builtin = @import("sim/materials_builtin.zig");
 const materials = @import("sim/materials.zig");
 const max_ticks_per_frame = @import("sim/pipeline.zig").max_ticks_per_frame;
 const Profile = @import("profile.zig").Profile;
+const world_mode = @import("world_mode.zig");
 
 const tick_ns: i96 = std.time.ns_per_s / 60;
 
@@ -42,10 +43,26 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
     var profile: Profile = .{};
     engine.profile = &profile;
 
+    // World mode (--world): streamed endless world, camera in world cells.
+    var session: ?*world_mode.Session = null;
+    defer if (session) |s| {
+        if (s.save_path != null) _ = s.save() catch |err| std.log.err("save: {s}", .{@errorName(err)});
+        s.deinit();
+        gpa.destroy(s);
+    };
+    if (cli.world) {
+        const s = try gpa.create(world_mode.Session);
+        errdefer gpa.destroy(s);
+        try s.init(gpa, io, engine, &table, .{ .seed = cli.seed, .save_dir = cli.save_dir, .ops_per_tick = cli.stream_ops }, cli.center);
+        session = s;
+    }
+    const scene = if (cli.world) .empty else cli.scene;
+
     const win_w, const win_h = window.pixelSize();
     var view: View = .{ .scale = 2 };
-    view.camera_x = @as(i32, cell.world_size / 2) - @as(i32, @intCast(win_w / 2 / view.scale));
-    view.camera_y = @as(i32, cell.world_size / 2) - @as(i32, @intCast(win_h / 2 / view.scale));
+    const start = if (session) |s| (cli.center orelse s.spawn()) else [2]i32{ cell.world_size / 2, cell.world_size / 2 };
+    view.camera_x = start[0] - @as(i32, @intCast(win_w / 2 / view.scale));
+    view.camera_y = start[1] - @as(i32, @intCast(win_h / 2 / view.scale));
 
     var material: u8 = materials_builtin.sand;
     var radius: i32 = 8;
@@ -118,8 +135,10 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
             pan_frac[k] -= whole;
             if (k == 0) view.camera_x += @intFromFloat(whole) else view.camera_y += @intFromFloat(whole);
         }
-        view.camera_x = @mod(view.camera_x, cell.world_size);
-        view.camera_y = @mod(view.camera_y, cell.world_size);
+        if (session == null) {
+            view.camera_x = @mod(view.camera_x, cell.world_size);
+            view.camera_y = @mod(view.camera_y, cell.world_size);
+        }
 
         // Painting: circles along the cursor path since last frame.
         const scale: i32 = @intCast(view.scale);
@@ -137,6 +156,9 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
             const name = try std.fmt.bufPrint(&name_buf, "hexe-{d}.png", .{engine.tick});
             engine.screenshot(io, name, null) catch |err| std.log.err("screenshot: {s}", .{@errorName(err)});
         }
+        if (session) |s| if (input.wasPressed(c.SDL_SCANCODE_F5)) {
+            _ = s.save() catch |err| std.log.err("save: {s}", .{@errorName(err)});
+        };
 
         // HUD.
         engine.hud.clear();
@@ -146,12 +168,23 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
             .material = table.names[material],
             .radius = radius,
             .view = view,
-            .cursor = .{ @mod(mwx, cell.world_size), @mod(mwy, cell.world_size) },
+            .cursor = if (session != null) .{ mwx, mwy } else .{ @mod(mwx, cell.world_size), @mod(mwy, cell.world_size) },
             .material_count = table.len,
+            .world = session,
         });
 
+        // Streaming runs once per tick, before the ticks are recorded.
+        if (session) |s| {
+            const ww, const wh = window.pixelSize();
+            const cam = [2]i32{
+                view.camera_x + @as(i32, @intCast(ww / 2 / view.scale)),
+                view.camera_y + @as(i32, @intCast(wh / 2 / view.scale)),
+            };
+            for (0..ticks) |_| try s.tick(cam);
+        }
+
         const src: @import("engine.zig").TickSource = .{
-            .scene = cli.scene,
+            .scene = scene,
             .seed = cli.seed,
             .extra = if (ticks > 0) pending.slice() else &.{},
         };
@@ -160,6 +193,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         frames += 1;
     }
     try engine.finish();
+    if (session) |s| s.report();
     const secs = @as(f64, @floatFromInt(run_start.untilNow(io, .awake).nanoseconds)) / 1e9;
     std.log.info("{d} frames in {d:.2} s ({d:.1} fps), {d} ticks ({d:.1}/s), grid {d:.3} ms", .{
         frames, secs, @as(f64, @floatFromInt(frames)) / secs, engine.tick, @as(f64, @floatFromInt(engine.tick)) / secs, profile.gridSmooth(&engine.names),
@@ -175,6 +209,8 @@ pub const HudInfo = struct {
     view: View = .{},
     cursor: [2]i32 = .{ 0, 0 },
     material_count: u32 = 0,
+    /// World mode: streaming lines.
+    world: ?*const world_mode.Session = null,
 };
 
 /// The HUD text: frame time, grid time, per-pass GPU ms, tool state.
@@ -189,6 +225,7 @@ pub fn fillHud(engine: *Engine, profile: *const Profile, info: HudInfo) void {
     for (0..names.count) |i| w.print("  {s} {d:.3}", .{ names.get(i), profile.smooth[i] }) catch {};
     hud.print("{s}", .{w.buffered()});
     hud.print("brush {s} r{d}  zoom {d}x  cam {d},{d}  cursor {d},{d}", .{ info.material, info.radius, info.view.scale, info.view.camera_x, info.view.camera_y, info.cursor[0], info.cursor[1] });
+    if (info.world) |s| s.hudLines(hud);
     hud.print("1-{d} material  LMB paint  RMB erase  wheel size  WASD pan  =/- zoom  space pause  F2 tiles", .{info.material_count -| 1});
 }
 

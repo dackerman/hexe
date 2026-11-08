@@ -849,7 +849,8 @@ pub const Generator = struct {
         for (out, g.mat, 0..) |*dst, m, i| {
             const lx: i32 = @intCast(i & (chunk.size - 1));
             const ly: i32 = @intCast(i >> chunk.size_log2);
-            const temp = if (m == ids.lava) lava_t else cell.ambient_temperature;
+            // A table without lava maps it to stone; keep that stone cold.
+            const temp = if (m == ids.lava and ids.lava != ids.stone) lava_t else cell.ambient_temperature;
             const st: u8 = if (m == ids.stone) ss.stone else if (m == ids.wood) ss.wood else if (m == ids.steel)
                 ss.steel
             else if (m == ids.concrete) ss.concrete else 0;

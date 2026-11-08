@@ -13,6 +13,10 @@ const shader_sources = [_][]const u8{
     "sim/grid/commands.comp",
     "sim/grid/activity.comp",
     "sim/grid/movement.comp",
+    // ---- world streaming (M4) ----
+    "sim/stream/upload.comp",
+    "sim/stream/dirty.comp",
+    // ---- end world streaming ----
     // ---- render ----
     "render/fullscreen.vert",
     "render/world.frag",
@@ -191,6 +195,13 @@ pub fn build(b: *std.Build) void {
     verify_run.addPassthruArgs();
     b.step("verify-determinism", "Run the seeded scenario on GPU and CPU reference and compare every cell").dependOn(&verify_run.step);
     if (gpu_tests) test_step.dependOn(&verify_run.step);
+
+    // ---- world streaming: GPU sink round trip (M4) ----
+    const stream_run = b.addRunArtifact(verify_exe.compile);
+    stream_run.addArgs(&.{ "--world-selftest", "--validation" });
+    stream_run.has_side_effects = true;
+    b.step("stream-test", "GPU world streaming self-test: upload, dirty bits, download, save, reload").dependOn(&stream_run.step);
+    // ---- end world streaming ----
 
     // ---- bench: always ReleaseFast ----
     const bench_exe = addHexe(b, .{
