@@ -13,6 +13,7 @@ const shaders = @import("shaders");
 pub const tile_list_bytes = 16 + cell.tile_count * 4;
 
 pub const Grid = struct {
+    ctx: *gpu.Context,
     cells: gpu.Image,
     owner: gpu.Image,
     materials: gpu.Buffer,
@@ -21,8 +22,11 @@ pub const Grid = struct {
     activity_pipeline: vk.Pipeline,
     movement_pipeline: vk.Pipeline,
 
-    pub fn init(ctx: *gpu.Context) !Grid {
+    pub fn init(ctx: *gpu.Context, cfg: pipeline_mod.Config, alloc: std.mem.Allocator) !Grid {
+        _ = cfg;
+        _ = alloc;
         var self: Grid = undefined;
+        self.ctx = ctx;
         const world_image = gpu.memory.ImageDesc{
             .width = cell.world_size,
             .height = cell.world_size,
@@ -63,7 +67,8 @@ pub const Grid = struct {
         ctx.vkd.cmdFillBuffer(cmd, self.tile_list.handle, 0, vk.WHOLE_SIZE, 0);
     }
 
-    pub fn deinit(self: *Grid, ctx: *gpu.Context) void {
+    pub fn deinit(self: *Grid) void {
+        const ctx = self.ctx;
         gpu.pipelines.destroy(ctx, self.movement_pipeline);
         gpu.pipelines.destroy(ctx, self.activity_pipeline);
         self.tile_list.deinit(ctx);
@@ -85,7 +90,8 @@ pub const Grid = struct {
 
     /// Replace the GPU material table. Waits for the GPU to go idle; call
     /// between frames (hot reload).
-    pub fn uploadMaterials(self: *Grid, ctx: *gpu.Context, table: *const materials.Table) !void {
+    pub fn uploadMaterials(self: *Grid, table: *const materials.Table) !void {
+        const ctx = self.ctx;
         ctx.waitIdle();
         var staging = try gpu.Buffer.init(ctx, self.materials.size, .{ .transfer_src = true }, .cpu_to_gpu);
         defer staging.deinit(ctx);

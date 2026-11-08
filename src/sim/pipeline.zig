@@ -3,12 +3,13 @@
 //! interface").
 //!
 //! A subsystem is a struct with
-//!     pub fn init(ctx: *gpu.Context, ...) !Self
+//!     pub fn init(ctx: *gpu.Context, cfg: Config, alloc: Allocator) !Self
 //!     pub fn record(self: *Self, frame: *Frame) void          (once per tick)
-//!   or
+//!   and/or
 //!     pub fn recordSubstep(self: *Self, frame: *Frame) void   (once per substep)
-//!     pub fn deinit(self: *Self, ctx: *gpu.Context) void
-//! It owns the GPU resources it creates. It records compute work into
+//!     pub fn deinit(self: *Self) void
+//! It keeps `ctx` and owns the GPU resources it creates (allocate at init,
+//! never in record). It records compute work into
 //! `frame.cmd`, wraps it in `frame.timed("name", ...)` so it shows in the HUD,
 //! `--profile` and `zig build bench`, and ends with `frame.barrier()` when the
 //! next pass reads what it wrote. The descriptor set is already bound.
@@ -128,25 +129,25 @@ pub const Pipeline = struct {
     // ---- end subsystems ----
 
     /// In place: `shared` points into `self`.
-    pub fn init(self: *Pipeline, ctx: *gpu.Context, config: Config, table: *const materials.Table) !void {
+    pub fn init(self: *Pipeline, ctx: *gpu.Context, config: Config, alloc: std.mem.Allocator, table: *const materials.Table) !void {
         self.config = config;
         // ---- subsystem init (order: grid first, it owns the shared images) ----
-        self.grid = try Grid.init(ctx);
-        errdefer self.grid.deinit(ctx);
-        try self.grid.uploadMaterials(ctx, table);
-        self.applier = try commands.Applier.init(ctx);
-        errdefer self.applier.deinit(ctx);
-        self.noise = try Noise.init(ctx);
-        errdefer self.noise.deinit(ctx);
+        self.grid = try Grid.init(ctx, config, alloc);
+        errdefer self.grid.deinit();
+        try self.grid.uploadMaterials(table);
+        self.applier = try commands.Applier.init(ctx, config, alloc);
+        errdefer self.applier.deinit();
+        self.noise = try Noise.init(ctx, config, alloc);
+        errdefer self.noise.deinit();
         // ---- end subsystem init ----
         self.shared = self.grid.shared();
     }
 
-    pub fn deinit(self: *Pipeline, ctx: *gpu.Context) void {
+    pub fn deinit(self: *Pipeline) void {
         // ---- subsystem deinit (reverse order) ----
-        self.noise.deinit(ctx);
-        self.applier.deinit(ctx);
-        self.grid.deinit(ctx);
+        self.noise.deinit();
+        self.applier.deinit();
+        self.grid.deinit();
         // ---- end subsystem deinit ----
     }
 

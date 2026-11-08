@@ -122,8 +122,8 @@ pub const Engine = struct {
         errdefer self.ctx.deinit();
         const ctx = &self.ctx;
 
-        try self.pipeline.init(ctx, opts.pipeline, opts.table);
-        errdefer self.pipeline.deinit(ctx);
+        try self.pipeline.init(ctx, opts.pipeline, gpa, opts.table);
+        errdefer self.pipeline.deinit();
 
         const timeline_info = vk.SemaphoreTypeCreateInfo{ .semaphore_type = .timeline, .initial_value = 0 };
         self.timeline = try ctx.vkd.createSemaphore(ctx.device, &.{ .p_next = &timeline_info }, null);
@@ -169,7 +169,7 @@ pub const Engine = struct {
         self.capture_image.deinit(ctx);
         for (&self.slots) |*s| destroySlot(ctx, s);
         ctx.vkd.destroySemaphore(ctx.device, self.timeline, null);
-        self.pipeline.deinit(ctx);
+        self.pipeline.deinit();
         ctx.deinit();
     }
 

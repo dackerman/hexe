@@ -168,22 +168,25 @@ pub fn insideShape(c: CommandGpu, x: i32, y: i32) bool {
 /// Applies the uploaded commands. Owns the upload ring at SLOT_BUF_COMMANDS:
 /// frames_in_flight x max_ticks_per_frame regions of `capacity` commands.
 pub const Applier = struct {
+    ctx: *gpu.Context,
     pipeline: vk.Pipeline,
     ring: gpu.Buffer,
 
     const regions = pipeline_mod.frames_in_flight * pipeline_mod.max_ticks_per_frame;
 
-    pub fn init(ctx: *gpu.Context) !Applier {
+    pub fn init(ctx: *gpu.Context, cfg: pipeline_mod.Config, alloc: std.mem.Allocator) !Applier {
+        _ = cfg;
+        _ = alloc;
         var ring = try gpu.Buffer.init(ctx, regions * capacity * @sizeOf(CommandGpu), .{ .storage_buffer = true }, .cpu_to_gpu);
         errdefer ring.deinit(ctx);
         ring.register(ctx, gpu.constants.slot_buf_commands);
         const pipeline = try gpu.pipelines.createCompute(ctx, &shaders.sim_grid_commands_comp);
-        return .{ .pipeline = pipeline, .ring = ring };
+        return .{ .ctx = ctx, .pipeline = pipeline, .ring = ring };
     }
 
-    pub fn deinit(self: *Applier, ctx: *gpu.Context) void {
-        gpu.pipelines.destroy(ctx, self.pipeline);
-        self.ring.deinit(ctx);
+    pub fn deinit(self: *Applier) void {
+        gpu.pipelines.destroy(self.ctx, self.pipeline);
+        self.ring.deinit(self.ctx);
     }
 
     /// Copy `list` into region (slot, tick_in_frame); returns the index of

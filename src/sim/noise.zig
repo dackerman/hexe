@@ -6,16 +6,21 @@ const cell = @import("cell.zig");
 const Frame = @import("pipeline.zig").Frame;
 const shaders = @import("shaders");
 const builtin_materials = @import("materials_builtin.zig");
+const Config = @import("pipeline.zig").Config;
+const Allocator = @import("std").mem.Allocator;
 
 pub const Noise = struct {
+    ctx: *gpu.Context,
     pipeline: vk.Pipeline,
 
-    pub fn init(ctx: *gpu.Context) !Noise {
-        return .{ .pipeline = try gpu.pipelines.createCompute(ctx, &shaders.debug_noise_comp) };
+    pub fn init(ctx: *gpu.Context, cfg: Config, alloc: Allocator) !Noise {
+        _ = cfg;
+        _ = alloc;
+        return .{ .ctx = ctx, .pipeline = try gpu.pipelines.createCompute(ctx, &shaders.debug_noise_comp) };
     }
 
-    pub fn deinit(self: *Noise, ctx: *gpu.Context) void {
-        gpu.pipelines.destroy(ctx, self.pipeline);
+    pub fn deinit(self: *Noise) void {
+        gpu.pipelines.destroy(self.ctx, self.pipeline);
     }
 
     pub fn record(self: *Noise, frame: *Frame) void {
