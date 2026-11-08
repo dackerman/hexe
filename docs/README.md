@@ -14,6 +14,7 @@ check before changing anything structural.
 | [06-decisions.md](06-decisions.md) | why each major choice was made and what would reopen it |
 | [07-tech-demo.md](07-tech-demo.md) | the first playable level: zones, tools, controls, enemies, what must be visible |
 | [08-engineering.md](08-engineering.md) | toolchain, build targets, code and shader conventions, testing, decision recording, git |
+| [09-decision-review.md](09-decision-review.md) | review of every implementation decision made during M0-M8 and integration: departures, tuning knobs, open items |
 | [decisions/](decisions/) | implementation-time decisions, one file each |
 
 `materials.md` is generated from the ZON files in `materials/` by
