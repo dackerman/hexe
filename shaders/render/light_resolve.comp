@@ -31,7 +31,9 @@ vec3 simple_lights(vec2 origin) {
         if (dist >= L.radius) continue;
         vec2 dir = v / max(dist, 1e-4);
         float T = 1.0;
-        for (float t = 2.0; t < dist - 2.0; t += 2.0) {
+        // Stop short of the light's own source disc in the scene.
+        float stop = dist - light_source_radius(L.radius) - 1.0;
+        for (float t = 2.0; t < stop; t += 2.0) {
             vec2 pos = origin + dir * t;
             if (any(lessThan(pos, vec2(0.0))) || any(greaterThanEqual(pos, region))) break;
             T *= 1.0 - imageLoad(g_img_rgba16f[img], ivec2(pos) >> 1).a;

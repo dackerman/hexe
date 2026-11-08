@@ -101,9 +101,11 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
     }
 
     // Overlap: the same frames with the sim overlapping the render and
-    // strictly serial, on a busy simulation.
-    std.debug.print("\n== sim/render overlap (bench_mixed sim, lighting view, zoom 2, {d} frames)\n", .{frames});
-    for ([_]bool{ true, false }) |overlap| {
+    // strictly serial. GPU-bound on purpose: 4 ticks of the fully active
+    // mixing scene per frame and a zoom-1 view (the largest light region).
+    const sim_ticks = 4;
+    std.debug.print("\n== sim/render overlap: bench_mixed, {d} ticks per frame, zoom 1, {d} frames\n", .{ sim_ticks, frames });
+    for ([_]bool{ false, true, false, true }) |overlap| {
         engine.overlap = overlap;
         demo.configure(.lighting, &engine.renderer.settings);
         engine.renderer.settings.light_mode = .cascades;
@@ -111,21 +113,26 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         engine.renderer.settings.bloom = true;
         var profile: Profile = .{ .skip_frames = 20 };
         engine.profile = &profile;
-        const view = viewAt(center, 2, w, h);
-        // A fully active world: re-emit the mixing scene at tick 0 semantics.
+        const view = viewAt(center, 1, w, h);
+        // Re-run the mixing scene from its first tick (fills the world).
         engine.tick = 0;
-        const start = std.Io.Timestamp.now(io, .awake);
-        for (0..frames) |_| {
+        var start = std.Io.Timestamp.now(io, .awake);
+        for (0..frames + 20) |f| {
+            if (f == 20) start = std.Io.Timestamp.now(io, .awake);
             engine.hud.clear();
-            try engine.frame(1, .{ .scene = .bench_mixed, .seed = cli.seed }, view);
+            try engine.frame(sim_ticks, .{ .scene = .bench_mixed, .seed = cli.seed }, view);
         }
         try engine.finish();
         const wall = @as(f64, @floatFromInt(start.untilNow(io, .awake).nanoseconds)) / 1e6 / @as(f64, @floatFromInt(frames));
         var render_ms: f64 = 0;
+        var snap_ms: f64 = 0;
         for (0..engine.names.count) |i| {
             if (std.mem.eql(u8, engine.names.get(i), "render")) render_ms = profile.mean(i);
+            if (std.mem.eql(u8, engine.names.get(i), "snapshot")) snap_ms = profile.mean(i);
         }
-        std.debug.print("  overlap {s:<3}  wall {d:7.3} ms/frame   grid {d:.3} ms   render {d:.3} ms\n", .{ if (overlap) "on" else "off", wall, profile.gridMean(), render_ms });
+        std.debug.print("  overlap {s:<3}  wall {d:7.3} ms/frame   sim (grid, {d} ticks) {d:.3} ms   render {d:.3} ms   snapshot {d:.3} ms   serial sum {d:.3} ms\n", .{
+            if (overlap) "on" else "off", wall, sim_ticks, profile.gridMean(), render_ms, snap_ms, profile.gridMean() + render_ms + snap_ms,
+        });
         engine.profile = null;
     }
     return if (failed) 1 else 0;

@@ -238,7 +238,7 @@ pub fn fillHud(engine: *Engine, profile: *const Profile, info: HudInfo) void {
             }
         }
     }
-    hud.print("render {d:.3} ms:{s}", .{ total, rw.buffered() });
+    if (total > 0) hud.print("render {d:.3} ms:{s}", .{ total, rw.buffered() }) else hud.print("render ms: not timed (capture)", .{});
     hud.print("light {s}  spacing {d}px  cascades {d}  region {d}x{d}  lights {d}  bloom {s}  vignette {s}", .{
         @tagName(r.settings.light_mode), plan.spacing, plan.count, plan.size[0], plan.size[1], r.light_count, if (r.settings.bloom) "on" else "off", if (r.settings.vignette) "on" else "off",
     });

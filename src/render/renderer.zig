@@ -119,7 +119,7 @@ pub const RenderFrame = extern struct {
     skyline_slot: u32,
     irradiance_tex: u32,
     scene_img: [scene_mips]u32,
-    pad0: u32 = 0,
+    pad: [3]u32 = @splat(0),
     sky: [4]f32,
     ambient_surface: [4]f32,
     ambient_cave: [4]f32,
@@ -129,8 +129,8 @@ pub const RenderFrame = extern struct {
 };
 
 comptime {
-    std.debug.assert(@offsetOf(RenderFrame, "sky") == 128);
-    std.debug.assert(@sizeOf(RenderFrame) == 224);
+    std.debug.assert(@offsetOf(RenderFrame, "sky") == 144);
+    std.debug.assert(@sizeOf(RenderFrame) == 240);
 }
 
 /// Where the render reads the world from: a snapshot (overlapped with the

@@ -66,7 +66,7 @@ HEXE_BUFFER(RenderMaterialBlock, readonly, RenderMaterial m[];, g_render_materia
 
 #define MAX_LIGHTS 256u
 #define MAX_CASCADES 6u
-#define SCENE_MIPS 5u
+#define SCENE_MIPS 7u
 
 struct RenderFrame {
     ivec2 camera;        // world pixel at the scene image's (0,0)
@@ -93,6 +93,8 @@ struct RenderFrame {
     uint irradiance_tex; // sampled: final irradiance at probe resolution
     uint scene_img[SCENE_MIPS]; // rgba16f emission/opacity mips (storage)
     uint pad0;
+    uint pad1;
+    uint pad2;
     vec4 sky;            // rgb sky radiance, a = sky ambient strength
     vec4 ambient_surface; // rgb ambient near the surface, a = fade depth (px)
     vec4 ambient_cave;   // rgb ambient deep in caves, a = exposure
@@ -112,6 +114,10 @@ struct LightGpu {
     vec4 color;
 };
 HEXE_BUFFER(LightBlock, readonly, LightGpu l[];, g_lights);
+
+// Point lights are drawn into the light scene as small emitting discs of
+// this radius (world pixels).
+float light_source_radius(float radius) { return clamp(radius / 12.0, 2.0, 6.0); }
 
 // Sprite / debug primitive batch (src/render/sprites.zig), drawn at world
 // pixel scale into the scene image after the world pass.

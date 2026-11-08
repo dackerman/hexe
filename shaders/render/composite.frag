@@ -52,5 +52,9 @@ void main() {
         float v = 1.0 - FR.tuning.w * smoothstep(0.25, 0.75, length(q * vec2(1.0, float(pc.extent.y) / float(pc.extent.x)) * 1.6));
         c *= v;
     }
-    o_color = vec4(linear_to_srgb(c), 1.0);
+    // Triangular dither of +-1 LSB hides 8-bit banding in smooth gradients
+    // (sky, vignette, light falloff).
+    uint h = hash_u32(uint(fp.x) * 0x9e3779b9u ^ uint(fp.y) * 0x85ebca6bu);
+    float dither = (float(h & 0xffffu) + float(h >> 16)) / 65535.0 - 1.0;
+    o_color = vec4(linear_to_srgb(c) + dither / 255.0, 1.0);
 }

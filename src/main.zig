@@ -61,6 +61,8 @@ pub const Cli = struct {
     vignette: bool = true,
     /// Windowed: quit after this many frames (0 = never).
     frames: u32 = 0,
+    /// Headless view screenshot without the HUD text block (signs stay).
+    hud: bool = true,
     scene_set: bool = false,
 };
 
@@ -90,6 +92,7 @@ fn usage() void {
         \\  --overlay NAME          none|tiles|air_pressure|air_velocity|liquid_particles|bodies|temperature|particle_cells|light
         \\  --no-overlap            render waits for the next tick (serial sim/render)
         \\  --no-bloom, --no-vignette
+        \\  --no-hud                view screenshot without the HUD block (world signs stay)
         \\  --frames N              windowed: quit after N frames and print frame timing
         \\
     , .{});
@@ -144,6 +147,8 @@ fn parseCli(args: []const [:0]const u8) !Cli {
             cli.overlay = std.meta.stringToEnum(overlay.Mode, try next(args, &i)) orelse return error.UnknownOverlay;
         } else if (std.mem.eql(u8, a, "--no-overlap")) {
             cli.overlap = false;
+        } else if (std.mem.eql(u8, a, "--no-hud")) {
+            cli.hud = false;
         } else if (std.mem.eql(u8, a, "--no-bloom")) {
             cli.bloom = false;
         } else if (std.mem.eql(u8, a, "--no-vignette")) {
@@ -255,7 +260,7 @@ fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         };
         engine.hud.clear();
         demo.decorate(cli.scene, engine.tick, &engine.renderer, &engine.hud);
-        app.fillHud(engine, &profile, .{
+        if (cli.hud) app.fillHud(engine, &profile, .{
             .frame_ms = elapsed_ms / @as(f64, @floatFromInt(@max(cli.ticks, 1))),
             .material = "sand",
             .radius = 8,

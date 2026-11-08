@@ -27,10 +27,16 @@ vec3 irradiance_at(ivec2 wu) {
     return textureLod(sampler2D(g_textures[FR.irradiance_tex], g_samplers[SAMPLER_LINEAR_CLAMP]), rp / size, 0.0).rgb * FR.tuning2.z;
 }
 
-// Ambient light: the surface value near and above the skyline, fading to
-// the cave value with depth below it.
+// Terrain surface height: the skyline here and 24 px to either side, so a
+// narrow shaft does not carry the surface down into the rock.
+int surface_at(int wx) {
+    return min(skyline_at(wx), min(skyline_at(wx - 24), skyline_at(wx + 24)));
+}
+
+// Ambient light: the surface value near and above the terrain surface,
+// fading to the cave value with depth below it.
 vec3 ambient_at(ivec2 wu) {
-    float depth = float(wu.y - skyline_at(wu.x));
+    float depth = float(wu.y - surface_at(wu.x));
     float t = smoothstep(0.0, max(FR.ambient_surface.a, 1.0), depth);
     return mix(FR.ambient_surface.rgb, FR.ambient_cave.rgb, t);
 }

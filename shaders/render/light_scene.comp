@@ -16,10 +16,10 @@ layout(push_constant) uniform PC {
 
 #define FR g_render_frames[pc.frame_slot].f
 
-// Point lights are drawn as small emitting discs; radiance cascades give a
-// disc of radius a at distance d an irradiance of about L * a / (pi * d), so
-// L is chosen to give 1/4 of `color` at d = radius.
-float source_radius(float radius) { return clamp(radius / 12.0, 2.0, 6.0); }
+// Point lights are drawn as small emitting discs (light_source_radius);
+// radiance cascades give a disc of radius a at distance d an irradiance of
+// about L * a / (pi * d), so L is chosen to give 1/4 of `color` at
+// d = radius.
 
 void main() {
     uvec2 p = gl_GlobalInvocationID.xy;
@@ -39,7 +39,7 @@ void main() {
         LightGpu L = g_lights[FR.lights_slot].l[i];
         vec2 d = wp - L.pos;
         d -= round(d / float(WORLD_SIZE)) * float(WORLD_SIZE);
-        float r = source_radius(L.radius);
+        float r = light_source_radius(L.radius);
         if (dot(d, d) <= r * r) {
             // Opaque enough to stop rays inside the disc, below the 0.9
             // "solid" threshold so the wall dilation leaves it alone.

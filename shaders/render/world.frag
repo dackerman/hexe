@@ -68,7 +68,7 @@ vec3 sky_color(ivec2 wu) {
 // 24 px to either side, so narrow shafts show the back wall (they still let
 // sky light in through the cascades).
 vec3 background(ivec2 wu, vec3 light) {
-    if (under_open_sky(wu) && wu.y < skyline_at(wu.x - 24) && wu.y < skyline_at(wu.x + 24)) return sky_color(wu);
+    if ((FR.flags & RFRAME_SKY) != 0u && wu.y < surface_at(wu.x)) return sky_color(wu);
     return back_wall(wu) * light * FR.tuning2.x;
 }
 

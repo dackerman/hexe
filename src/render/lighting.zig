@@ -10,7 +10,7 @@
 const std = @import("std");
 
 pub const max_cascades = 6;
-pub const scene_mips = 5;
+pub const scene_mips = 7;
 /// Light scene mip 0 capacity (world pixels) and cascade-0 probe capacity.
 pub const max_region = 2048;
 pub const max_probes = 1536;
