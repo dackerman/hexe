@@ -16,13 +16,14 @@ rejects unknown names, cycles in phase-change chains, and missing ramps.
 ```zig
 .{
     .name = "water",
+    .id = 29,                    // optional explicit id 1–255; see decisions/01
     .phase = .liquid,            // .static, .powder, .liquid, .gas
     .solver = .flip,             // .cellular (default) or .flip; liquids only
     .density = 100,              // integer ordering; heavier displaces lighter
     .dispersion = 5,             // liquid/gas sideways spread per substep, 0–8
     .slide = 0,                  // powder diagonal-slide chance, 0–255
     .health = 0,                 // 0 = indestructible by damage; else initial state byte
-    .lifetime = 0,               // ticks until decay, 0 = never; uses state byte
+    .lifetime = 0,               // ticks until decay, 0 = never; uses state byte (count × period, decisions/05)
     .decays_to = null,           // material on lifetime expiry
     .temperature = 20,           // spawn temperature, °C
     .conductivity = 40,          // heat diffusion rate, 0–255
@@ -30,16 +31,23 @@ rejects unknown names, cycles in phase-change chains, and missing ramps.
     .melt = null,                // .{ .at = 1200, .to = "molten_glass" }
     .freeze = null,              // .{ .at = 0, .to = "ice" }
     .boil = .{ .at = 100, .to = "steam" },
-    .flammable = null,           // .{ .ignite_at = 300, .burn_ticks = 600, .to = "charcoal", .smoke = "smoke" }
+    .flammable = null,           // .{ .ignite_at = 300, .burn_ticks = 600, .to = "charcoal", .smoke = "smoke", .heat = 24, .event = .none }
     .conductive = true,          // carries electricity
     .impact = .splash,           // .none, .splash, .spray, .chip, .dent, .ricochet
+    .ricochet = false,           // also ricochets, for .dent materials (steel)
     .blast_threshold = 10,       // pressure gradient that moves/breaks it; 0 = immune
-    .blast_response = .fly,      // .fly, .chip, .break
+    .blast_response = .fly,      // .fly, .chip, .@"break" (break is a Zig keyword)
+    .rubble = null,              // material chips and breakage land as; null = itself
     .drag = 200,                 // how strongly ballistic particles of it follow air, 0–255
+    .pressure_event = 0,         // pressure that appends a pressure event; 0 = never (04-fluids)
     .on_contact = .{ .slow = 0.5, .drown = true },
     .emissive = 0,               // 0–255 light emission
     .glow = null,                // .{ .from = 500, .to = 1200 } temperature glow range
     .translucent = true,
+    .blocks_light = false,       // non-solid that blocks light (smoke)
+    .extinguishes = true,        // puts out burning neighbors
+    .feeds_air = false,          // creation injects mass into the air field (steam)
+    .anchor = false,             // connectivity anchor (bedrock)
     .ramp = .{ 0x1a3a6b, 0x215091, 0x2a66b5, 0x3a7ad0 },
     .reactions = .{
         .{ .with = "lava", .self = "steam", .other = "stone", .chance = 255 },
@@ -58,7 +66,9 @@ append when it fires). `.self` and `.other` may be `null` to mean unchanged
 or `"air"` to mean consumed.
 
 **Phase changes** are reactions with the cell's own temperature as the
-condition and are listed separately only for readability.
+condition and are listed separately only for readability. Melt and boil
+fire strictly above `.at`, freeze strictly below it, so a melt and a
+freeze at the same temperature are stable there (decisions/04).
 
 **Color ramp**: four to eight colors. The variant bits pick one at spawn
 and keep it as the pixel moves. Temperature glow blends toward the hot end
