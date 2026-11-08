@@ -1,0 +1,17 @@
+// Translucent, fragile; raises a pressure event when the blast breaks it.
+.{
+    .name = "glass",
+    .id = 13,
+    .phase = .static,
+    .density = 250,
+    .health = 40,
+    .conductivity = 30,
+    .melt = .{ .at = 1200, .to = "molten_glass" },
+    .impact = .chip,
+    .blast_threshold = 30,
+    .blast_response = .@"break",
+    .pressure_event = 30,
+    .drag = 40,
+    .translucent = true,
+    .ramp = .{ 0xa8d8e8, 0xbce4f0, 0x94ccdf, 0xd2eef6 },
+}

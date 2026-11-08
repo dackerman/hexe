@@ -1,0 +1,20 @@
+// Cools to steel below 1300 C. Emissive, conducts.
+.{
+    .name = "molten_steel",
+    .id = 19,
+    .phase = .liquid,
+    .density = 780,
+    .dispersion = 1,
+    .temperature = 1500,
+    .conductivity = 200,
+    .freeze = .{ .at = 1300, .to = "steel" },
+    .conductive = true,
+    .impact = .splash,
+    .blast_threshold = 60,
+    .blast_response = .fly,
+    .drag = 20,
+    .emissive = 200,
+    .glow = .{ .from = 1000, .to = 1500 },
+    .on_contact = .{ .burn = 50, .ignite = true },
+    .ramp = .{ 0xffc85a, 0xfff0a0, 0xffe07a, 0xf0a040 },
+}

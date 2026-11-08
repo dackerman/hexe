@@ -1,0 +1,15 @@
+// Dried blood. Chips to ash.
+.{
+    .name = "blood_crust",
+    .id = 6,
+    .phase = .static,
+    .density = 100,
+    .health = 20,
+    .conductivity = 15,
+    .impact = .chip,
+    .blast_threshold = 10,
+    .blast_response = .@"break",
+    .rubble = "ash",
+    .drag = 150,
+    .ramp = .{ 0x3a0c0e, 0x4a1214, 0x2e090b, 0x55181a },
+}

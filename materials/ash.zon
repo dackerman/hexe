@@ -1,0 +1,14 @@
+// Byproduct of burning. Light; drifts in air.
+.{
+    .name = "ash",
+    .id = 3,
+    .phase = .powder,
+    .density = 30,
+    .slide = 220,
+    .conductivity = 10,
+    .impact = .spray,
+    .blast_threshold = 5,
+    .blast_response = .fly,
+    .drag = 240,
+    .ramp = .{ 0x5a5652, 0x6e6a65, 0x85807a, 0x9c968f, 0x4a4744 },
+}

@@ -1,0 +1,26 @@
+// FLIP-solved liquid. Boils, freezes, conducts, extinguishes, drowns.
+.{
+    .name = "water",
+    .id = 29,
+    .phase = .liquid,
+    .solver = .flip,
+    .density = 100,
+    .dispersion = 5,
+    .conductivity = 60,
+    .freeze = .{ .at = 0, .to = "ice" },
+    .boil = .{ .at = 100, .to = "steam" },
+    .conductive = true,
+    .extinguishes = true,
+    .impact = .splash,
+    .blast_threshold = 10,
+    .blast_response = .fly,
+    .drag = 200,
+    .translucent = true,
+    .on_contact = .{ .slow = 0.5, .drown = true, .buoyant = true, .extinguish = true, .wet = true },
+    .ramp = .{ 0x1a3a6b, 0x215091, 0x2a66b5, 0x3a7ad0, 0x2459a0 },
+    .reactions = .{
+        .{ .with = "lava", .self = "steam", .other = "stone", .chance = 255 },
+        .{ .with = "dirt", .self = "mud", .other = "mud", .chance = 20 },
+        .{ .with = "flame", .self = "steam", .other = "air", .chance = 60 },
+    },
+}

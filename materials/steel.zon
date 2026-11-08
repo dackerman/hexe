@@ -1,0 +1,17 @@
+// Conductive, conducts heat fast. Dents and ricochets; immune to blast.
+.{
+    .name = "steel",
+    .id = 27,
+    .phase = .static,
+    .density = 800,
+    .health = 255,
+    .conductivity = 220,
+    .melt = .{ .at = 1500, .to = "molten_steel" },
+    .conductive = true,
+    .impact = .dent,
+    .ricochet = true,
+    .blast_threshold = 0,
+    .drag = 5,
+    .glow = .{ .from = 500, .to = 1500 },
+    .ramp = .{ 0x6e7782, 0x828c98, 0x5c646e, 0x98a2ae, 0x4e555e },
+}

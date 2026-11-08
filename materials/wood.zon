@@ -1,0 +1,15 @@
+// Burns to charcoal with smoke. Floats as rubble.
+.{
+    .name = "wood",
+    .id = 30,
+    .phase = .static,
+    .density = 60,
+    .health = 120,
+    .conductivity = 10,
+    .flammable = .{ .ignite_at = 300, .burn_ticks = 600, .to = "charcoal", .smoke = "smoke", .heat = 24 },
+    .impact = .chip,
+    .blast_threshold = 80,
+    .blast_response = .@"break",
+    .drag = 80,
+    .ramp = .{ 0x6b4423, 0x7d522c, 0x5a3a1e, 0x8f6236, 0x4e3219 },
+}

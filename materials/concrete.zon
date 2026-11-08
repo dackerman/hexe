@@ -1,0 +1,15 @@
+// Shatters into rubble; loose chunks fall as bodies.
+.{
+    .name = "concrete",
+    .id = 9,
+    .phase = .static,
+    .density = 280,
+    .health = 180,
+    .conductivity = 30,
+    .impact = .chip,
+    .blast_threshold = 150,
+    .blast_response = .@"break",
+    .rubble = "rubble",
+    .drag = 20,
+    .ramp = .{ 0x8a8a86, 0x9a9a95, 0x7c7c78, 0xa8a8a2, 0x6e6e6a },
+}

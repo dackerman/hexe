@@ -1,0 +1,17 @@
+// Default cave rock. Blasts to gravel, melts to lava.
+.{
+    .name = "stone",
+    .id = 28,
+    .phase = .static,
+    .density = 300,
+    .health = 200,
+    .conductivity = 40,
+    .melt = .{ .at = 1300, .to = "lava" },
+    .impact = .chip,
+    .blast_threshold = 200,
+    .blast_response = .@"break",
+    .rubble = "gravel",
+    .drag = 20,
+    .glow = .{ .from = 600, .to = 1300 },
+    .ramp = .{ 0x5e5a56, 0x6c6762, 0x7a746e, 0x524e4a, 0x87807a, 0x45423f },
+}

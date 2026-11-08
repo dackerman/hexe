@@ -1,0 +1,13 @@
+// World floor and connectivity anchor. Unbreakable, inert.
+.{
+    .name = "bedrock",
+    .id = 4,
+    .phase = .static,
+    .density = 1000,
+    .conductivity = 30,
+    .impact = .ricochet,
+    .blast_threshold = 0,
+    .anchor = true,
+    .drag = 0,
+    .ramp = .{ 0x1c1b22, 0x26252e, 0x302e3a, 0x3a3846, 0x221f29 },
+}

@@ -1,0 +1,15 @@
+// Corpse material. Chips; immune to fire; dissolved slowly by acid.
+.{
+    .name = "bone",
+    .id = 7,
+    .phase = .static,
+    .density = 180,
+    .health = 150,
+    .temperature = 37,
+    .conductivity = 20,
+    .impact = .chip,
+    .blast_threshold = 80,
+    .blast_response = .@"break",
+    .drag = 30,
+    .ramp = .{ 0xd8d0b8, 0xe6dfc8, 0xc9bfa4, 0xf0ead8 },
+}

@@ -1,0 +1,14 @@
+// Byproduct of concrete. Inert.
+.{
+    .name = "rubble",
+    .id = 23,
+    .phase = .powder,
+    .density = 170,
+    .slide = 100,
+    .conductivity = 25,
+    .impact = .spray,
+    .blast_threshold = 40,
+    .blast_response = .fly,
+    .drag = 25,
+    .ramp = .{ 0x7a756e, 0x8c867e, 0x66615b, 0x9e978e, 0x58534e },
+}

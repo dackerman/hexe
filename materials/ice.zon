@@ -1,0 +1,18 @@
+// Melts to water above 0 C. Slippery.
+.{
+    .name = "ice",
+    .id = 16,
+    .phase = .static,
+    .density = 90,
+    .health = 80,
+    .temperature = -10,
+    .conductivity = 60,
+    .melt = .{ .at = 0, .to = "water" },
+    .impact = .chip,
+    .blast_threshold = 60,
+    .blast_response = .@"break",
+    .drag = 40,
+    .translucent = true,
+    .on_contact = .{ .slippery = true },
+    .ramp = .{ 0xb8e2f2, 0xa4d6ec, 0xcdeef8, 0x90c8e2, 0xe2f6fc },
+}

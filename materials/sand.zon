@@ -1,0 +1,18 @@
+// Melts to molten glass; turns to molten glass on lava contact.
+.{
+    .name = "sand",
+    .id = 24,
+    .phase = .powder,
+    .density = 150,
+    .slide = 200,
+    .conductivity = 25,
+    .melt = .{ .at = 1200, .to = "molten_glass" },
+    .impact = .spray,
+    .blast_threshold = 20,
+    .blast_response = .fly,
+    .drag = 60,
+    .ramp = .{ 0xd9b464, 0xe6c47a, 0xc9a052, 0xf0d48e, 0xbd9446 },
+    .reactions = .{
+        .{ .with = "lava", .self = "molten_glass", .other = null, .chance = 16 },
+    },
+}

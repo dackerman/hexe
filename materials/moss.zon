@@ -1,0 +1,18 @@
+// Grows onto stone next to water with low chance. Burns fast to ash.
+.{
+    .name = "moss",
+    .id = 20,
+    .phase = .static,
+    .density = 40,
+    .health = 10,
+    .conductivity = 15,
+    .flammable = .{ .ignite_at = 250, .burn_ticks = 40, .to = "ash", .smoke = "smoke", .heat = 16 },
+    .impact = .chip,
+    .blast_threshold = 20,
+    .blast_response = .@"break",
+    .drag = 150,
+    .ramp = .{ 0x3a5a1e, 0x4a6e26, 0x5c8430, 0x2e4a18 },
+    .reactions = .{
+        .{ .with = "stone", .self = null, .other = "moss", .chance = 1, .catalyst = "water" },
+    },
+}
