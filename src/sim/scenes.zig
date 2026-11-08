@@ -21,6 +21,12 @@ pub const Scene = enum {
     /// Bench: sand, water and smoke scattered over the whole torus; they
     /// fall, sink, rise and spread forever (divergent rules, all tiles).
     bench_mixed,
+    /// Bench: lava, water, oil and burning wood scattered over the whole
+    /// torus (every reaction rule busy, all tiles active).
+    bench_fire,
+    /// Reactions showcase around the world center: lava meeting water, a
+    /// burning wood hut, oil burning on a pond, sand pouring into lava.
+    fire_demo,
     /// Debug noise (pipeline Config.noise); emits nothing.
     noise,
 };
@@ -33,6 +39,8 @@ pub fn emit(scene: Scene, tick: u32, seed: u32, m: *const Ids, list: *commands.C
         .determinism => determinism(tick, seed, m, list),
         .bench_static => if (tick == 0) benchStatic(m, list),
         .bench_active => if (tick == 0) list.fillRect(0, 0, cell.world_size, cell.world_size, m.sand, .{ .coverage = 128 }),
+        .bench_fire => benchFire(tick, m, list),
+        .fire_demo => fireDemo(tick, m, list),
         .bench_mixed => if (tick == 0) {
             list.fillRect(0, 0, W, W, m.water, .{ .coverage = 80 });
             list.fillRect(0, 0, W, W, m.sand, .{ .coverage = 80, .only_air = true });
@@ -160,6 +168,46 @@ fn reactionArena(tick: u32, m: *const Ids, list: *commands.CommandList) void {
     if (tick == 40) list.fillCircle(ax + 140, ay + 112, 3, m.flame, .{ .only_air = true });
     if (tick == 60) list.heatCircle(ax + 170, ay + 150, 4, 40); // 280 C: boils
     if (tick % 10 == 0) list.chargeCircle(ax + 101, ay + 178, 1);
+}
+
+fn benchFire(tick: u32, m: *const Ids, list: *commands.CommandList) void {
+    if (tick == 0) {
+        list.fillRect(0, 0, W, W, m.wood, .{ .coverage = 40 });
+        list.fillRect(0, 0, W, W, m.lava, .{ .coverage = 30, .only_air = true });
+        list.fillRect(0, 0, W, W, m.water, .{ .coverage = 30, .only_air = true });
+        list.fillRect(0, 0, W, W, m.oil, .{ .coverage = 30, .only_air = true });
+    }
+    if (tick == 1) list.igniteRect(0, 0, W, W);
+}
+
+fn fireDemo(tick: u32, m: *const Ids, list: *commands.CommandList) void {
+    const cx: i32 = 1024;
+    const cy: i32 = 1024;
+    if (tick == 0) {
+        // Ground and a basin on the left for the lava, a pond on the right.
+        list.fillRect(cx - 300, cy + 120, cx + 300, cy + 160, m.stone, .{});
+        list.fillRect(cx - 300, cy + 40, cx - 290, cy + 120, m.stone, .{});
+        list.fillRect(cx + 290, cy + 40, cx + 300, cy + 120, m.stone, .{});
+        list.fillRect(cx - 40, cy + 70, cx - 30, cy + 120, m.stone, .{});
+        list.fillRect(cx - 290, cy + 85, cx - 40, cy + 120, m.lava, .{});
+        list.fillRect(cx + 120, cy + 70, cx + 130, cy + 120, m.stone, .{});
+        list.fillRect(cx + 130, cy + 80, cx + 290, cy + 120, m.water, .{});
+        list.fillRect(cx + 150, cy + 70, cx + 270, cy + 76, m.oil, .{});
+        // A wood hut between them, on the ground.
+        list.fillRect(cx - 10, cy + 40, cx + 100, cy + 46, m.wood, .{});
+        list.fillRect(cx - 10, cy + 46, cx - 2, cy + 120, m.wood, .{});
+        list.fillRect(cx + 92, cy + 46, cx + 100, cy + 120, m.wood, .{});
+        list.fillRect(cx + 20, cy + 100, cx + 70, cy + 120, m.wood, .{});
+        // A steel rod into the pond and an ice block on a ledge.
+        list.fillRect(cx + 130, cy + 116, cx + 290, cy + 118, m.steel, .{});
+        list.fillRect(cx - 200, cy - 20, cx - 140, cy - 14, m.stone, .{});
+        list.fillRect(cx - 190, cy - 40, cx - 150, cy - 20, m.ice, .{});
+    }
+    if (tick == 10) list.igniteRect(cx + 20, cy + 100, cx + 70, cy + 104);
+    if (tick == 30) list.igniteRect(cx + 150, cy + 60, cx + 160, cy + 80); // oil on the pond
+    if (tick >= 20 and tick < 200 and tick % 2 == 0) list.fillCircle(cx - 120, cy - 60, 4, m.water, .{ .only_air = true });
+    if (tick >= 20 and tick < 300 and tick % 3 == 0) list.fillCircle(cx - 230, cy - 60, 3, m.sand, .{ .only_air = true });
+    if (tick % 30 == 0) list.chargeCircle(cx + 131, cy + 117, 1);
 }
 
 fn benchStatic(m: *const Ids, list: *commands.CommandList) void {

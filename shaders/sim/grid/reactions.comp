@@ -17,7 +17,8 @@
 //                  8 substeps); emission and burn heat once per tick
 //                  (substep 0), emission only into solids and liquids
 //   burning        extinguish, fuel, burn out (substep 0), ignition
-//   phase change   boil, melt, freeze on the new temperature
+//   phase change   boil (with latent heat), melt, freeze on the new
+//                  temperature
 //   lifetime       decay once per lifetime period (substep 0)
 //   fire products  air next to a burning cell becomes flame or smoke
 //   charge         pulse propagation in conductive materials
@@ -175,10 +176,21 @@ uint react_cell(ivec2 p, uint c) {
     }
 
     // ---- phase change (keeps temperature and variant) ----
+    // Boiling takes latent heat, as time: a cell above its boil point is
+    // held there, counting ticks in its state byte, and boils after
+    // BOIL_LATENT of them.
     uint to = m;
-    if (tu > MATERIALS[m].boil_at) to = MATERIALS[m].boil_to;
-    else if (tu > MATERIALS[m].melt_at) to = MATERIALS[m].melt_to;
-    else if (tu < MATERIALS[m].freeze_at) to = MATERIALS[m].freeze_to;
+    if (tu > MATERIALS[m].boil_at) {
+        if (tick_step) life += 1u;
+        if (life >= BOIL_LATENT) to = MATERIALS[m].boil_to;
+        else tu = MATERIALS[m].boil_at;
+    } else if (tu > MATERIALS[m].melt_at) {
+        to = MATERIALS[m].melt_to;
+    } else if (tu < MATERIALS[m].freeze_at) {
+        to = MATERIALS[m].freeze_to;
+    } else if ((mflags & MATERIAL_FLAG_BOILS) != 0u && tu < MATERIALS[m].boil_at) {
+        life = 0u;
+    }
     if (to != m) return cell_make(to, tu, MATERIALS[to].state_init, 0u, variant);
 
     // ---- lifetime ----

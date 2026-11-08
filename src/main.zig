@@ -64,7 +64,7 @@ fn usage() void {
         \\  --view-screenshot PATH  headless: write the window view with HUD (--size, --zoom, --center)
         \\  --zoom N                integer zoom (default 2)
         \\  --center X,Y            world pixel at the view center
-        \\  --scene NAME            empty|sandbox|determinism|bench_static|bench_active|bench_mixed|noise
+        \\  --scene NAME            empty|sandbox|determinism|fire_demo|bench_static|bench_active|bench_mixed|bench_fire|noise
         \\  --seed N                scene seed (default 1)
         \\  --profile PATH          per-tick per-pass GPU ms as CSV (tick,pass,ms)
         \\  --no-sleep              disable activity tiles (simulate every tile)

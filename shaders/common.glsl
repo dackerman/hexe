@@ -426,6 +426,8 @@ uint cell_ignite(uint c, uint material) {
 //   EMIT_GAP_SHIFT      emission per tick moves at most gap >> 3 bytes, into
 //                       solids and liquids only
 //   EMIT_DRAIN_SHIFT    the emitter loses a quarter of what it gives
+//   BOIL_LATENT         ticks a cell is held at its boil point (counted in
+//                       the state byte) before it boils: latent heat
 //   BURN_TEMP           burning cells heat themselves up to this byte (900 C)
 //   IGNITE_CONTACT_CHANCE  per tick, a flammable cell next to fire ignites
 //   FLAME_CHANCE, SMOKE_CHANCE  per tick, air next to a burning cell becomes
@@ -437,6 +439,7 @@ uint cell_ignite(uint c, uint material) {
 #define EMIT_GAP_SHIFT 3u
 #define EMIT_DRAIN_SHIFT 2u
 #define BURN_TEMP 118u
+#define BOIL_LATENT 40u
 #define IGNITE_CONTACT_CHANCE 24u
 #define FLAME_CHANCE 40u
 #define SMOKE_CHANCE 10u

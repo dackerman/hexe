@@ -527,6 +527,8 @@ fn validateDef(set: *const MaterialSet, m: *const Material, diag: *Diagnostics) 
         try c.fail("boil.at", "{d} °C is the top of the range and can never be exceeded", .{pc.at});
     if (d.freeze) |pc| if (temperature.toByte(pc.at) == 0)
         try c.fail("freeze.at", "{d} °C is the bottom of the range and can never be undercut", .{pc.at});
+    if (d.boil != null and (d.health > 0 or d.lifetime > 0))
+        try c.fail("boil", "boiling keeps its progress (latent heat) in the state byte, which .health or .lifetime already uses", .{});
     if (d.melt != null and d.boil != null and
         temperature.toByte(d.boil.?.at) <= temperature.toByte(d.melt.?.at))
         try c.fail("boil.at", "must be above .melt.at", .{});

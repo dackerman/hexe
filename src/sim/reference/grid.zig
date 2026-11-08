@@ -410,11 +410,16 @@ pub const World = struct {
         // ---- phase change ----
         var to = m;
         if (tu > mt.boil_at) {
-            to = mt.boil_to;
+            if (tick_step) life += 1;
+            if (life >= rx.boil_latent) {
+                to = mt.boil_to;
+            } else tu = mt.boil_at;
         } else if (tu > mt.melt_at) {
             to = mt.melt_to;
         } else if (tu < mt.freeze_at) {
             to = mt.freeze_to;
+        } else if (mflags & Flag.boils != 0 and tu < mt.boil_at) {
+            life = 0;
         }
         if (to != m) return cell.make(to, tu, self.mat(to).state_init, 0, variant);
 

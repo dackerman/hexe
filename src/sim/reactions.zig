@@ -25,6 +25,10 @@ pub const emit_gap_shift = 3;
 /// An emitter loses (what it gave) >> emit_drain_shift: emitters are mostly
 /// heat sources, but pools of them still cool down eventually.
 pub const emit_drain_shift = 2;
+/// Ticks a cell spends held at its boil point (counted in its state byte)
+/// before it turns into its boil product: latent heat as time, so a fire
+/// next to a pond does not flash it to steam.
+pub const boil_latent: u32 = 40;
 /// Burning cells heat themselves up to this temperature byte (900 C).
 pub const burn_temp: u32 = 118;
 /// Per tick, out of 256: a flammable cell next to fire ignites.

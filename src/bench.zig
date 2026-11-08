@@ -16,6 +16,7 @@ const cases = [_]Case{
     .{ .name = "falling sand, fully active (sleep)", .scene = .bench_active, .sleep = true, .budget_ms = 2.5 },
     .{ .name = "falling sand, sleep disabled", .scene = .bench_active, .sleep = false, .budget_ms = 2.5 },
     .{ .name = "sand + water + smoke mixing, fully active", .scene = .bench_mixed, .sleep = true, .budget_ms = 2.5 },
+    .{ .name = "lava + water + oil + burning wood, fully active", .scene = .bench_fire, .sleep = true, .budget_ms = 2.5 },
 };
 
 pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *const materials.Library) !u8 {
