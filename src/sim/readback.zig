@@ -5,7 +5,7 @@
 //!
 //! Each tick the GPU writes, into the frame slot's host-visible buffers:
 //! a 1-bit solid mask and a 1-bit liquid mask of the whole window, the
-//! material bytes of up to `max_regions` requested rectangles, the event
+//! material and info bytes of up to `max_regions` requested rectangles, the event
 //! queue and the particle counters. When the engine finds that slot's
 //! submission complete (it never waits for it just for this), `collect`
 //! copies it into `Mirror`. Gameplay reads the mirror: state as of the end
@@ -41,6 +41,33 @@ pub const region_bytes = 1 << 20;
 pub const event_history = 8;
 
 pub const Region = struct { x: i32, y: i32, w: u32, h: u32 };
+
+/// Info byte per region cell (`Mirror.info`), INFO_* in
+/// shaders/sim/readback/region.comp (docs/decisions/120-gameplay-readback-info.md).
+pub const Info = struct {
+    /// Conductive cell with a nonzero charge phase (decision 42).
+    pub const charged: u8 = 0x1;
+    pub const burning: u8 = 0x2;
+    pub const body: u8 = 0x4;
+    pub const particle: u8 = 0x8;
+};
+
+/// CPU definition of a cell's info byte (`cell_info` in region.comp).
+pub fn cellInfo(c: u32, tables: *const @import("materials.zig").Tables) u8 {
+    var i: u8 = 0;
+    const conductive = tables.materials[cell.material(c)].flags & @import("materials.zig").Flag.conductive != 0;
+    if (conductive and cell.state(c) >> cell.charge_shift != 0) i |= Info.charged;
+    if (cell.has(c, cell.flag_burning)) i |= Info.burning;
+    if (cell.has(c, cell.flag_body)) i |= Info.body;
+    if (cell.has(c, cell.flag_particle)) i |= Info.particle;
+    return i;
+}
+
+/// Words one region occupies in the readback: the material plane, then the
+/// info plane, each ceil(w / 4) words per row.
+pub fn regionWords(w: u32, h: u32) u32 {
+    return 2 * ((w + 3) / 4) * h;
+}
 
 const host_bytes = (2 * mask_words) * 4 + region_bytes;
 
@@ -97,12 +124,44 @@ pub const Mirror = struct {
 
     /// Material id at (x, y) if it lies in a region requested for `tick`.
     pub fn material(self: *const Mirror, x: i32, y: i32) ?u8 {
+        return self.regionByte(x, y, 0);
+    }
+
+    /// `Info` bits of the cell at (x, y) if it lies in a region requested
+    /// for `tick` (charge, burning, body-owned, particle-backed).
+    pub fn info(self: *const Mirror, x: i32, y: i32) ?u8 {
+        return self.regionByte(x, y, 1);
+    }
+
+    /// A region read back at `tick` that contains the whole rectangle, for
+    /// fast repeated lookups (entity collision and contact scans); null if
+    /// none does.
+    pub fn regionView(self: *const Mirror, x: i32, y: i32, w: u32, h: u32) ?RegionView {
+        for (self.regions[0..self.region_count], self.region_offset[0..self.region_count]) |r, off| {
+            const dx = cell.wrap(x -% r.x);
+            const dy = cell.wrap(y -% r.y);
+            if (dx + w > r.w or dy + h > r.h) continue;
+            const wpr = (r.w + 3) / 4;
+            return .{
+                .x = r.x,
+                .y = r.y,
+                .w = r.w,
+                .h = r.h,
+                .wpr = wpr,
+                .mats = self.region_data[off..][0 .. wpr * r.h],
+                .infos = self.region_data[off + wpr * r.h ..][0 .. wpr * r.h],
+            };
+        }
+        return null;
+    }
+
+    fn regionByte(self: *const Mirror, x: i32, y: i32, plane: u32) ?u8 {
         for (self.regions[0..self.region_count], self.region_offset[0..self.region_count]) |r, off| {
             const dx = cell.wrap(x -% r.x);
             const dy = cell.wrap(y -% r.y);
             if (dx >= r.w or dy >= r.h) continue;
             const wpr = (r.w + 3) / 4;
-            const word = self.region_data[off + dy * wpr + dx / 4];
+            const word = self.region_data[off + plane * wpr * r.h + dy * wpr + dx / 4];
             return @truncate(word >> @intCast(8 * (dx % 4)));
         }
         return null;
@@ -113,7 +172,7 @@ pub const Mirror = struct {
     /// every frame for as long as it is needed.
     pub fn requestRegion(self: *Mirror, x: i32, y: i32, w: u32, h: u32) !void {
         if (w == 0 or h == 0 or w > cell.world_size or h > cell.world_size) return error.BadRegion;
-        const bytes: u32 = ((w + 3) / 4) * 4 * h;
+        const bytes: u32 = regionWords(w, h) * 4;
         if (self.pending_count >= max_regions or self.pending_bytes + bytes > region_bytes) return error.TooManyRegions;
         self.pending[self.pending_count] = .{ .x = x, .y = y, .w = w, .h = h };
         self.pending_count += 1;
@@ -145,6 +204,35 @@ pub const Mirror = struct {
     /// HUD).
     pub fn liveParticles(self: *const Mirror) u32 {
         return self.particles.live;
+    }
+};
+
+/// One read-back region (`Mirror.regionView`): material and info bytes of
+/// a rectangle, coordinates wrapping on the torus like the mirror's.
+pub const RegionView = struct {
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    wpr: u32,
+    mats: []const u32,
+    infos: []const u32,
+
+    inline fn index(self: *const RegionView, x: i32, y: i32) ?struct { usize, u5 } {
+        const dx = cell.wrap(x -% self.x);
+        const dy = cell.wrap(y -% self.y);
+        if (dx >= self.w or dy >= self.h) return null;
+        return .{ dy * self.wpr + dx / 4, @intCast(8 * (dx % 4)) };
+    }
+
+    pub fn material(self: *const RegionView, x: i32, y: i32) ?u8 {
+        const i, const shift = self.index(x, y) orelse return null;
+        return @truncate(self.mats[i] >> shift);
+    }
+
+    pub fn info(self: *const RegionView, x: i32, y: i32) ?u8 {
+        const i, const shift = self.index(x, y) orelse return null;
+        return @truncate(self.infos[i] >> shift);
     }
 };
 
@@ -258,7 +346,7 @@ pub const Readback = struct {
                 s.regions[i] = r;
                 s.offsets[i] = offset;
                 table[i] = .{ .x = r.x, .y = r.y, .w = r.w, .h = r.h, .offset_words = offset, .words_per_row = wpr };
-                offset += wpr * r.h;
+                offset += regionWords(r.w, r.h);
             }
             m.pending_count = 0;
             m.pending_bytes = 0;
@@ -272,7 +360,7 @@ pub const Readback = struct {
             var max_words: u32 = 0;
             for (s.regions[0..s.region_count], s.offsets[0..s.region_count]) |r, off| {
                 max_words = @max(max_words, ((r.w + 3) / 4) * r.h);
-                region_words = @max(region_words, off + ((r.w + 3) / 4) * r.h);
+                region_words = @max(region_words, off + regionWords(r.w, r.h));
             }
             frame.bindCompute(self.region_pipeline);
             frame.push(extern struct { table: u32, out: u32, base: u32 }{ .table = s.table.slot, .out = self.scratch.slot, .base = 2 * mask_words });
@@ -300,7 +388,7 @@ pub const Readback = struct {
         for (s.regions[0..s.region_count], 0..) |r, i| {
             m.regions[i] = r;
             m.region_offset[i] = s.offsets[i];
-            words = @max(words, s.offsets[i] + ((r.w + 3) / 4) * r.h);
+            words = @max(words, s.offsets[i] + regionWords(r.w, r.h));
         }
         @memcpy(m.region_data[0..words], host[2 * mask_words ..][0..words]);
         const bytes = s.ticks.bytes();
@@ -384,7 +472,15 @@ test "mirror bit addressing and regions" {
     m.region_offset[0] = 4;
     m.region_count = 1;
     data[4 + 2 + 1] = 0x0000_0900; // row 1, column 5 -> byte 1 of word 1
+    data[4 + 4 + 2 + 1] = 0x0000_0100; // the info plane follows (2 rows of 2 words)
     try std.testing.expectEqual(@as(?u8, 9), m.material(3, 11));
+    try std.testing.expectEqual(@as(?u8, Info.charged), m.info(3, 11));
+    try std.testing.expectEqual(@as(?u8, 0), m.info(2, 11));
+    const v = m.regionView(-1, 10, 4, 2).?;
+    try std.testing.expectEqual(@as(?u8, 9), v.material(3, 11));
+    try std.testing.expectEqual(@as(?u8, Info.charged), v.info(3, 11));
+    try std.testing.expectEqual(@as(?u8, null), v.material(4, 11));
+    try std.testing.expect(m.regionView(0, 10, 6, 2) == null);
     try std.testing.expectEqual(@as(?u8, 0), m.material(cell.world_size - 2, 10));
     try std.testing.expectEqual(@as(?u8, null), m.material(4, 11));
     try m.requestRegion(0, 0, 10, 10);
