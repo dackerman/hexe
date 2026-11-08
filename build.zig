@@ -13,6 +13,9 @@ const shader_sources = [_][]const u8{
     "sim/grid/commands.comp",
     "sim/grid/activity.comp",
     "sim/grid/movement.comp",
+    // ---- reactions (M3) ----
+    "sim/grid/reactions.comp",
+    "sim/grid/reactions_commit.comp",
     // ---- render ----
     "render/fullscreen.vert",
     "render/world.frag",
@@ -121,7 +124,9 @@ pub fn build(b: *std.Build) void {
     // ---- unit tests (CPU only) ----
     const test_step = b.step("test", "Run all unit tests (CPU only; -Dgpu-tests adds the GPU determinism check)");
     const exe_tests = b.addTest(.{ .root_module = exe.module });
-    test_step.dependOn(&b.addRunArtifact(exe_tests).step);
+    const run_exe_tests = b.addRunArtifact(exe_tests);
+    run_exe_tests.setCwd(b.path(".")); // reference reaction tests read materials/
+    test_step.dependOn(&run_exe_tests.step);
 
     // ---- data: tests and `zig build docs` ----
     const data_tests = b.addTest(.{ .root_module = data_mod });
@@ -188,6 +193,7 @@ pub fn build(b: *std.Build) void {
     });
     const verify_run = b.addRunArtifact(verify_exe.compile);
     verify_run.addArgs(&.{ "--headless", "--verify-determinism" });
+    verify_run.setCwd(b.path(".")); // materials/
     verify_run.addPassthruArgs();
     b.step("verify-determinism", "Run the seeded scenario on GPU and CPU reference and compare every cell").dependOn(&verify_run.step);
     if (gpu_tests) test_step.dependOn(&verify_run.step);
@@ -204,9 +210,18 @@ pub fn build(b: *std.Build) void {
     });
     const bench_run = b.addRunArtifact(bench_exe.compile);
     bench_run.addArgs(&.{ "--headless", "--bench" });
+    bench_run.setCwd(b.path(".")); // materials/
     bench_run.addPassthruArgs();
     bench_run.has_side_effects = true;
     b.step("bench", "Run fixed benchmark scenes headless (ReleaseFast) and print per-pass GPU ms").dependOn(&bench_run.step);
+
+    // ---- scenarios: headless GPU regression worlds (ReleaseSafe, reuses the verify binary) ----
+    const scenarios_run = b.addRunArtifact(verify_exe.compile);
+    scenarios_run.addArgs(&.{ "--headless", "--scenarios", "scenarios" });
+    scenarios_run.setCwd(b.path("."));
+    scenarios_run.addPassthruArgs();
+    scenarios_run.has_side_effects = true;
+    b.step("scenarios", "Run every scenarios/*.zon headless on the GPU and check its assertions").dependOn(&scenarios_run.step);
 }
 
 const HexeOptions = struct {

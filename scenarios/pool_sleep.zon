@@ -7,6 +7,7 @@
 .{
     .name = "pool_sleep",
     .description = "Water poured into a wide bedrock basin for 60 ticks is fully asleep 300 ticks later. A gravel blob dropped near the left edge at tick 400 wakes water there; the right edge stays asleep.",
+    .requires = .{.flip},
     .ticks = 440,
     .fills = .{
         .{ .rect = .{ .x = 16, .y = 240, .w = 224, .h = 8 }, .material = "bedrock" },

@@ -3,6 +3,7 @@
 .{
     .name = "determinism",
     .description = "A busy scene (powders, both liquid solvers, fire, steam, an explosion) run twice from the same seed must produce bit-identical cell images at tick 600.",
+    .requires = .{ .explosions, .flip },
     .seed = 0x5eed,
     .ticks = 600,
     .fills = .{

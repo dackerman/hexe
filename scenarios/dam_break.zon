@@ -3,6 +3,7 @@
 .{
     .name = "dam_break",
     .description = "Left basin full, right basin empty, separated by a 1-px wood dam. The dam is removed at tick 60; a wave reaches the far wall and the water settles level across both halves.",
+    .requires = .{.flip},
     .ticks = 900,
     .fills = .{
         .{ .rect = .{ .x = 16, .y = 232, .w = 224, .h = 8 }, .material = "bedrock" },

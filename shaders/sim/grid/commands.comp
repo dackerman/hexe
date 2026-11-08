@@ -1,5 +1,6 @@
 #version 460
-// Apply one command (fill circle / fill rect) over its bounding box. The CPU
+// Apply one command (fill, ignite, heat or charge over a circle or rect)
+// over its bounding box. The CPU
 // records one dispatch per command, in list order, with a barrier between
 // them, and aligns the box origin to 16 so each workgroup lies inside one
 // activity tile. Changed tiles are marked active (with neighbors).
@@ -16,12 +17,35 @@ layout(push_constant) uniform PC {
 
 shared bool s_changed;
 
+// The cell after command `c` (spawn hash `h`) acts on `old`.
+uint apply_command(Command c, uint old, uint h) {
+    uint action = c.kind >> CMD_ACTION_SHIFT;
+    uint om = cell_material(old);
+    if (action == CMD_ACTION_IGNITE) {
+        if ((MATERIALS[om].flags & MATERIAL_FLAG_FLAMMABLE) == 0u || cell_has(old, CELL_FLAG_BURNING)) return old;
+        return cell_ignite(old, om);
+    }
+    if (action == CMD_ACTION_HEAT) return cell_with_temperature(old, (c.flags >> CMD_TEMP_SHIFT) & 0xffu);
+    if (action == CMD_ACTION_CHARGE) {
+        if (!mat_conductive(om) || cell_charge(old) != 0u) return old;
+        return cell_with_state(old, (cell_state(old) & CONDUCTIVE_STATE_MASK) | (CHARGE_HEAD << CHARGE_SHIFT));
+    }
+    uint material = c.material & 0xffu;
+    if ((c.flags & CMD_FLAG_ONLY_AIR) != 0u && om != MATERIAL_AIR) return old;
+    if ((c.flags & CMD_FLAG_ONLY_MATERIAL) != 0u && om != ((c.material >> CMD_ONLY_SHIFT) & 0xffu)) return old;
+    uint cell = spawn_cell(material, h >> 28);
+    if ((c.flags & CMD_FLAG_SET_TEMP) != 0u) cell = cell_with_temperature(cell, (c.flags >> CMD_TEMP_SHIFT) & 0xffu);
+    if ((c.flags & CMD_FLAG_SET_STATE) != 0u) cell = cell_with_state(cell, c.flags >> CMD_STATE_SHIFT);
+    return cell;
+}
+
 bool inside_shape(Command c, ivec2 p) {
-    if (c.kind == CMD_FILL_CIRCLE) {
+    uint shape = c.kind & CMD_SHAPE_MASK;
+    if (shape == CMD_FILL_CIRCLE) {
         ivec2 d = p - ivec2(c.x0, c.y0);
         return d.x * d.x + d.y * d.y <= c.x1 * c.x1;
     }
-    if (c.kind == CMD_FILL_RECT) {
+    if (shape == CMD_FILL_RECT) {
         return all(greaterThanEqual(p, ivec2(c.x0, c.y0))) && all(lessThan(p, ivec2(c.x1, c.y1)));
     }
     return false;
@@ -38,15 +62,11 @@ void main() {
         uint old = imageLoad(CELLS, w).x;
         uint h = hash_salt(uint(w.x), uint(w.y), c.seed, SALT_SPAWN_VARIANT);
         uint coverage = (c.flags >> CMD_COVERAGE_SHIFT) & 0xffu;
-        bool replace = (c.flags & CMD_FLAG_ONLY_AIR) == 0u || cell_material(old) == MATERIAL_AIR;
-        if (coverage != 0u && (h & 0xffu) >= coverage) replace = false;
-        if (replace) {
-            uint variant = h >> 28;
-            uint cell = spawn_cell(c.material, variant);
-            if (cell != old) {
-                imageStore(CELLS, w, uvec4(cell, 0u, 0u, 0u));
-                s_changed = true;
-            }
+        bool hit = coverage == 0u || (h & 0xffu) < coverage;
+        uint cell = apply_command(c, old, h);
+        if (hit && cell != old) {
+            imageStore(CELLS, w, uvec4(cell, 0u, 0u, 0u));
+            s_changed = true;
         }
     }
 

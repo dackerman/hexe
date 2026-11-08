@@ -7,6 +7,8 @@ const std = @import("std");
 const cell = @import("../sim/cell.zig");
 const materials = @import("../sim/materials.zig");
 const commands = @import("../sim/commands.zig");
+const reactions = @import("../sim/reactions.zig");
+const Flag = materials.Flag;
 
 // ---- descriptor set 0 (src/gpu/descriptors.zig) ----
 pub const binding_storage_images = 0;
@@ -25,6 +27,10 @@ pub const slot_buf_materials = 0;
 pub const slot_buf_tile_marks = 1;
 pub const slot_buf_tile_list = 2;
 pub const slot_buf_commands = 3;
+/// Reaction table, 256 x 256 ReactionEntry (src/sim/reactions.zig).
+pub const slot_buf_reactions = 12;
+/// GPU -> CPU event ring (src/sim/reactions.zig).
+pub const slot_buf_events = 13;
 /// First storage buffer slot handed out by `Descriptors.allocBufferSlot`.
 pub const slot_buf_dynamic_base = 32;
 
@@ -80,9 +86,10 @@ pub const mirrors = .{
     .{ "SAMPLER_NEAREST_REPEAT", sampler_nearest_repeat },
     .{ "SAMPLER_LINEAR_REPEAT", sampler_linear_repeat },
     .{ "PUSH_CONSTANT_BYTES", push_constant_bytes },
+    .{ "SLOT_BUF_REACTIONS", slot_buf_reactions },
+    .{ "SLOT_BUF_EVENTS", slot_buf_events },
     .{ "MATERIAL_COUNT", materials.count },
     .{ "MATERIAL_WORDS", @sizeOf(materials.MaterialGpu) / 4 },
-    .{ "MATERIAL_NONE", materials.none },
     .{ "MATERIAL_AIR", materials.air },
     .{ "MATERIAL_RAMP_WORD", @offsetOf(materials.MaterialGpu, "ramp") / 4 },
     .{ "MATERIAL_RAMP_MAX", materials.ramp_max },
@@ -90,10 +97,24 @@ pub const mirrors = .{
     .{ "PHASE_POWDER", @backingInt(materials.Phase.powder) },
     .{ "PHASE_LIQUID", @backingInt(materials.Phase.liquid) },
     .{ "PHASE_GAS", @backingInt(materials.Phase.gas) },
-    .{ "MATERIAL_FLAG_CONDUCTIVE", materials.flag_conductive },
-    .{ "MATERIAL_FLAG_TRANSLUCENT", materials.flag_translucent },
-    .{ "MATERIAL_FLAG_FLAMMABLE", materials.flag_flammable },
-    .{ "MATERIAL_FLAG_EMISSIVE", materials.flag_emissive },
+    .{ "MATERIAL_FLAG_CONDUCTIVE", Flag.conductive },
+    .{ "MATERIAL_FLAG_TRANSLUCENT", Flag.translucent },
+    .{ "MATERIAL_FLAG_EMISSIVE", Flag.emissive },
+    .{ "MATERIAL_FLAG_SOLVER_FLIP", Flag.solver_flip },
+    .{ "MATERIAL_FLAG_FLAMMABLE", Flag.flammable },
+    .{ "MATERIAL_FLAG_HAS_LIFETIME", Flag.has_lifetime },
+    .{ "MATERIAL_FLAG_HAS_HEALTH", Flag.has_health },
+    .{ "MATERIAL_FLAG_EXTINGUISHER", Flag.extinguisher },
+    .{ "MATERIAL_FLAG_BLOCKS_LIGHT", Flag.blocks_light },
+    .{ "MATERIAL_FLAG_FEEDS_AIR", Flag.feeds_air },
+    .{ "MATERIAL_FLAG_ANCHOR", Flag.anchor },
+    .{ "MATERIAL_FLAG_RICOCHET", Flag.ricochet },
+    .{ "MATERIAL_FLAG_GLOWS", Flag.glows },
+    .{ "MATERIAL_FLAG_MELTS", Flag.melts },
+    .{ "MATERIAL_FLAG_FREEZES", Flag.freezes },
+    .{ "MATERIAL_FLAG_BOILS", Flag.boils },
+    .{ "MATERIAL_FLAG_REACTIVE", Flag.reactive },
+    .{ "MATERIAL_FLAG_MISSING", Flag.missing },
     .{ "SORT_KEY_AIR", materials.sort_key_air },
     .{ "SORT_KEY_DENSE_BASE", materials.sort_key_dense_base },
     .{ "SORT_KEY_STATIC", materials.sort_key_static },
@@ -102,10 +123,39 @@ pub const mirrors = .{
     .{ "TILE_WAKE_TICKS", cell.tile_wake_ticks },
     .{ "CMD_FILL_CIRCLE", @backingInt(commands.Kind.fill_circle) },
     .{ "CMD_FILL_RECT", @backingInt(commands.Kind.fill_rect) },
+    .{ "CMD_SHAPE_MASK", commands.shape_mask },
+    .{ "CMD_ACTION_SHIFT", commands.action_shift },
+    .{ "CMD_ACTION_FILL", @backingInt(commands.Action.fill) },
+    .{ "CMD_ACTION_IGNITE", @backingInt(commands.Action.ignite) },
+    .{ "CMD_ACTION_HEAT", @backingInt(commands.Action.heat) },
+    .{ "CMD_ACTION_CHARGE", @backingInt(commands.Action.charge) },
+    .{ "CMD_ONLY_SHIFT", commands.only_shift },
     .{ "CMD_FLAG_ONLY_AIR", commands.flag_only_air },
+    .{ "CMD_FLAG_ONLY_MATERIAL", commands.flag_only_material },
+    .{ "CMD_FLAG_SET_TEMP", commands.flag_set_temp },
+    .{ "CMD_FLAG_SET_STATE", commands.flag_set_state },
     .{ "CMD_COVERAGE_SHIFT", commands.coverage_shift },
+    .{ "CMD_TEMP_SHIFT", commands.temp_shift },
+    .{ "CMD_STATE_SHIFT", commands.state_shift },
     .{ "CMD_WORDS", @sizeOf(commands.CommandGpu) / 4 },
     .{ "SALT_SPAWN_VARIANT", cell.salt_spawn_variant },
+    .{ "REACTION_FLAG_HAS_CATALYST", materials.ReactionFlag.has_catalyst },
+    .{ "REACTION_FLAG_EMITS_EVENT", materials.ReactionFlag.emits_event },
+    .{ "EVENT_CAPACITY", reactions.event_capacity },
+    .{ "EVENT_EXPLODE", @backingInt(reactions.Event.explode) },
+    .{ "EVENT_PRESSURE", @backingInt(reactions.Event.pressure) },
+    .{ "EVENT_PARTICLE_CELL_CHANGED", @backingInt(reactions.Event.particle_cell_changed) },
+    .{ "CHARGE_SHIFT", cell.charge_shift },
+    .{ "CHARGE_HEAD", cell.charge_head },
+    .{ "CONDUCTIVE_STATE_MASK", cell.conductive_state_mask },
+    .{ "SALT_REACT_CELL", reactions.salt_cell },
+    .{ "SALT_REACT_PAIR", reactions.salt_pair },
+    .{ "HEAT_SHIFT", reactions.heat_shift },
+    .{ "EMIT_GAP_SHIFT", reactions.emit_gap_shift },
+    .{ "BURN_TEMP", reactions.burn_temp },
+    .{ "IGNITE_CONTACT_CHANCE", reactions.ignite_contact_chance },
+    .{ "FLAME_CHANCE", reactions.flame_chance },
+    .{ "SMOKE_CHANCE", reactions.smoke_chance },
 };
 
 pub const Define = struct { name: []const u8, value: u64 };
@@ -132,7 +182,7 @@ pub fn parseDefines(src: []const u8, out: []Define) usize {
 
 test "common.glsl mirror" {
     const src = @embedFile("common_glsl");
-    var defines: [256]Define = undefined;
+    var defines: [512]Define = undefined;
     const n = parseDefines(src, &defines);
     try std.testing.expect(n > 40);
     for (defines[0..n]) |d| {

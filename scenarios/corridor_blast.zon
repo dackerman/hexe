@@ -8,6 +8,7 @@
 .{
     .name = "corridor_blast",
     .description = "Same explosion in a 3-wide corridor and in the open: the corridor destroys plugs at 40 and 80 cells, the open only at 40.",
+    .requires = .{ .explosions, .air_field },
     .size = .{ .w = 512, .h = 256 },
     .ticks = 120,
     .fills = .{

@@ -25,7 +25,7 @@ uvec2 margolus_offset(uint substep) {
 void block_cache(inout Block b, int i) {
     uint m = cell_material(b.cell[i]);
     b.move[i] = MATERIALS[m].move;
-    b.key[i] = mat_sort_key(MATERIALS[m].density);
+    b.key[i] = MATERIALS[m].sort_key;
     b.moved[i] = false;
 }
 

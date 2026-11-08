@@ -4,7 +4,8 @@
 const std = @import("std");
 const cell = @import("cell.zig");
 const commands = @import("commands.zig");
-const m = @import("materials_builtin.zig");
+const materials = @import("materials.zig");
+const Ids = materials.Ids;
 
 pub const Scene = enum {
     /// Nothing; paint with the mouse.
@@ -24,12 +25,13 @@ pub const Scene = enum {
     noise,
 };
 
-pub fn emit(scene: Scene, tick: u32, seed: u32, list: *commands.CommandList) void {
+/// `m` holds the material ids, looked up by name from the loaded set.
+pub fn emit(scene: Scene, tick: u32, seed: u32, m: *const Ids, list: *commands.CommandList) void {
     switch (scene) {
         .empty, .noise => {},
-        .sandbox => sandbox(tick, seed, list),
-        .determinism => determinism(tick, seed, list),
-        .bench_static => if (tick == 0) benchStatic(list),
+        .sandbox => sandbox(tick, seed, m, list),
+        .determinism => determinism(tick, seed, m, list),
+        .bench_static => if (tick == 0) benchStatic(m, list),
         .bench_active => if (tick == 0) list.fillRect(0, 0, cell.world_size, cell.world_size, m.sand, .{ .coverage = 128 }),
         .bench_mixed => if (tick == 0) {
             list.fillRect(0, 0, W, W, m.water, .{ .coverage = 80 });
@@ -41,7 +43,7 @@ pub fn emit(scene: Scene, tick: u32, seed: u32, list: *commands.CommandList) voi
 
 const W: i32 = cell.world_size;
 
-fn sandbox(tick: u32, seed: u32, list: *commands.CommandList) void {
+fn sandbox(tick: u32, seed: u32, m: *const Ids, list: *commands.CommandList) void {
     if (tick == 0) {
         var prng = std.Random.DefaultPrng.init(seed);
         const r = prng.random();
@@ -97,7 +99,7 @@ fn sandbox(tick: u32, seed: u32, list: *commands.CommandList) void {
 /// falls and slides, liquid falls, flows and spreads, sand sinks in water,
 /// smoke rises and drifts, statics hold, commands overwrite, fill only air,
 /// cover partially, and things cross the torus seam in both axes.
-fn determinism(tick: u32, seed: u32, list: *commands.CommandList) void {
+fn determinism(tick: u32, seed: u32, m: *const Ids, list: *commands.CommandList) void {
     const ox: i32 = 768;
     const oy: i32 = 640;
     if (tick == 0) {
@@ -123,6 +125,7 @@ fn determinism(tick: u32, seed: u32, list: *commands.CommandList) void {
         list.fillRect(-60, 200, 60, 210, m.stone, .{});
         list.fillRect(-10, 150, 10, 199, m.water, .{});
     }
+    reactionArena(tick, m, list);
     if (tick < 200) {
         if (tick % 3 == 0) list.fillCircle(ox + 130, oy + 70, 4, m.sand, .{ .only_air = true });
         if (tick % 3 == 1) list.fillCircle(ox + 400, oy + 70, 4, m.water, .{ .only_air = true });
@@ -131,7 +134,35 @@ fn determinism(tick: u32, seed: u32, list: *commands.CommandList) void {
     }
 }
 
-fn benchStatic(list: *commands.CommandList) void {
+/// The determinism scene's reactions half: a bedrock basin where lava meets
+/// water (stone, steam), sand falls into lava (molten glass), oil floats on
+/// the water and is lit by flame, a wood block and a gunpowder heap burn
+/// (smoke, flame, charcoal, an explode event), ice melts, a heated spot
+/// boils, and a charged steel rod pulses through the water.
+fn reactionArena(tick: u32, m: *const Ids, list: *commands.CommandList) void {
+    const ax: i32 = 200;
+    const ay: i32 = 1300;
+    if (tick == 0) {
+        list.fillRect(ax, ay + 180, ax + 300, ay + 192, m.bedrock, .{});
+        list.fillRect(ax, ay + 60, ax + 8, ay + 180, m.bedrock, .{});
+        list.fillRect(ax + 292, ay + 60, ax + 300, ay + 180, m.bedrock, .{});
+        list.fillRect(ax + 10, ay + 150, ax + 90, ay + 180, m.lava, .{});
+        list.fillRect(ax + 100, ay + 140, ax + 180, ay + 180, m.water, .{});
+        list.fillRect(ax + 100, ay + 177, ax + 180, ay + 179, m.steel, .{});
+        list.fillRect(ax + 120, ay + 120, ax + 160, ay + 128, m.oil, .{});
+        list.fillRect(ax + 30, ay + 100, ax + 60, ay + 110, m.sand, .{});
+        list.fillRect(ax + 200, ay + 150, ax + 240, ay + 180, m.wood, .{});
+        list.fillRect(ax + 246, ay + 172, ax + 256, ay + 180, m.gunpowder, .{});
+        list.fillRect(ax + 260, ay + 120, ax + 284, ay + 124, m.stone, .{});
+        list.fillRect(ax + 262, ay + 110, ax + 282, ay + 120, m.ice, .{});
+    }
+    if (tick == 5) list.igniteRect(ax + 200, ay + 150, ax + 240, ay + 153);
+    if (tick == 40) list.fillCircle(ax + 140, ay + 112, 3, m.flame, .{ .only_air = true });
+    if (tick == 60) list.heatCircle(ax + 170, ay + 150, 4, 40); // 280 C: boils
+    if (tick % 10 == 0) list.chargeCircle(ax + 101, ay + 178, 1);
+}
+
+fn benchStatic(m: *const Ids, list: *commands.CommandList) void {
     list.fillRect(0, 1024, W, W, m.stone, .{});
     list.fillRect(0, 900, W, 1024, m.sand, .{});
     list.fillRect(200, 400, 1800, 420, m.stone, .{});
@@ -141,13 +172,14 @@ fn benchStatic(list: *commands.CommandList) void {
 }
 
 test "scenes are deterministic" {
+    const ids: Ids = .{ .stone = 1, .sand = 2, .water = 3, .smoke = 4 };
     var a: commands.CommandList = .{};
     var b: commands.CommandList = .{};
     for ([_]u32{ 0, 1, 25, 199, 200 }) |t| {
         a.begin(t);
         b.begin(t);
-        emit(.determinism, t, 7, &a);
-        emit(.determinism, t, 7, &b);
+        emit(.determinism, t, 7, &ids, &a);
+        emit(.determinism, t, 7, &ids, &b);
         try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(a.slice()), std.mem.sliceAsBytes(b.slice()));
     }
 }

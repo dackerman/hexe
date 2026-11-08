@@ -1,0 +1,31 @@
+#version 460
+// Second half of the reactions pass: copy the cells reactions.comp changed
+// (marked in the tile's change mask) from NEXT back into CELLS. One
+// workgroup per active tile, same list order as reactions.comp, so the mask
+// of tile list entry i is words[i * 32 .. i * 32 + 32], one word per tile row.
+#include "common.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PC {
+    uint next_slot;
+    uint mask_slot;
+} pc;
+
+HEXE_BUFFER(MaskBlock, readonly, uint words[];, g_change_masks);
+#define NEXT g_uimages[pc.next_slot]
+
+void main() {
+    uint packed = TILE_LIST.tiles[gl_WorkGroupID.x];
+    uvec2 tile = uvec2(packed & 0xffffu, packed >> 16);
+    uvec2 base = tile * TILE_SIZE + gl_LocalInvocationID.xy * 2u;
+    for (uint row = 0u; row < 2u; row++) {
+        uint w = g_change_masks[pc.mask_slot].words[gl_WorkGroupID.x * 32u + gl_LocalInvocationID.y * 2u + row];
+        if (w == 0u) continue;
+        for (uint col = 0u; col < 2u; col++) {
+            if (((w >> (gl_LocalInvocationID.x * 2u + col)) & 1u) == 0u) continue;
+            ivec2 p = ivec2(base + uvec2(col, row));
+            imageStore(CELLS, p, imageLoad(NEXT, p));
+        }
+    }
+}

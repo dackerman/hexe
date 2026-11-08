@@ -5,12 +5,15 @@
 //!        [--scene name] [--seed n] [--profile out.csv] [--no-sleep]
 //!   hexe --headless --bench                (zig build bench)
 //!   hexe --headless --verify-determinism   (zig build verify-determinism)
+//!   hexe --headless --scenarios DIR | --scenario FILE   (zig build scenarios)
+//!   every mode: [--materials DIR] (default ./materials)
 const std = @import("std");
 const builtin = @import("builtin");
 const Engine = @import("engine.zig").Engine;
 const Crop = @import("engine.zig").Crop;
 const scenes = @import("sim/scenes.zig");
-const materials_builtin = @import("sim/materials_builtin.zig");
+const materials = @import("sim/materials.zig");
+const scenario_runner = @import("scenario_runner.zig");
 const Profile = @import("profile.zig").Profile;
 const app = @import("app.zig");
 const cell = @import("sim/cell.zig");
@@ -42,6 +45,11 @@ pub const Cli = struct {
     zoom: u32 = 2,
     /// World pixel at the center of the view (default: world center).
     center: ?[2]i32 = null,
+    /// Materials directory (ZON files), relative to the working directory.
+    materials: []const u8 = materials.default_dir,
+    /// Run one scenario file / every scenario in a directory, headless.
+    scenario: ?[]const u8 = null,
+    scenarios: ?[]const u8 = null,
 };
 
 fn usage() void {
@@ -63,6 +71,9 @@ fn usage() void {
         \\  --size WxH              window size (default 1600x900)
         \\  --bench                 run the benchmark scenes (with --headless)
         \\  --verify-determinism    CPU reference vs GPU, bit for bit
+        \\  --materials DIR         materials directory (default ./materials)
+        \\  --scenario FILE         run one scenario headless and check its assertions
+        \\  --scenarios DIR         run every scenario in DIR (zig build scenarios)
         \\
     , .{});
 }
@@ -122,6 +133,12 @@ fn parseCli(args: []const [:0]const u8) !Cli {
             cli.bench = true;
         } else if (std.mem.eql(u8, a, "--verify-determinism")) {
             cli.verify = true;
+        } else if (std.mem.eql(u8, a, "--materials")) {
+            cli.materials = try next(args, &i);
+        } else if (std.mem.eql(u8, a, "--scenario")) {
+            cli.scenario = try next(args, &i);
+        } else if (std.mem.eql(u8, a, "--scenarios")) {
+            cli.scenarios = try next(args, &i);
         } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
             usage();
             std.process.exit(0);
@@ -140,18 +157,32 @@ pub fn main(init: std.process.Init) !u8 {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     const cli = parseCli(args) catch return 2;
 
-    if (cli.verify) return verify.run(gpa, io, cli);
-    if (cli.bench) return bench.run(gpa, io, cli);
-    if (!cli.headless) return app.run(gpa, io, cli);
-    return runHeadless(gpa, io, cli);
+    var lib = loadLibrary(gpa, io, cli.materials) catch return 2;
+    defer lib.deinit(gpa);
+
+    if (cli.verify) return verify.run(gpa, io, cli, &lib);
+    if (cli.bench) return bench.run(gpa, io, cli, &lib);
+    if (cli.scenario != null or cli.scenarios != null) return scenario_runner.run(gpa, io, cli, &lib);
+    if (!cli.headless) return app.run(gpa, io, cli, &lib);
+    return runHeadless(gpa, io, cli, &lib);
 }
 
-fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
-    const table = materials_builtin.table();
+/// Load and validate the materials directory; prints every problem.
+pub fn loadLibrary(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !materials.Library {
+    var diag: materials.Diagnostics = .init(gpa);
+    defer diag.deinit();
+    return materials.Library.loadDir(io, gpa, dir, &diag) catch |err| {
+        std.debug.print("materials: cannot load {s} ({s}):\n{f}\n", .{ dir, @errorName(err), diag });
+        return err;
+    };
+}
+
+fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *const materials.Library) !u8 {
     const engine = try gpa.create(Engine);
     defer gpa.destroy(engine);
     try engine.init(gpa, .{
-        .table = &table,
+        .tables = lib.tables,
+        .ids = lib.ids(),
         .validation = cli.validation orelse (builtin.mode == .debug),
         .pipeline = .{ .sleep = cli.sleep, .noise = cli.scene == .noise },
     });
@@ -198,7 +229,7 @@ fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
             .radius = 8,
             .view = view,
             .cursor = center,
-            .material_count = table.len,
+            .material_count = lib.len(),
         });
         try engine.screenshotView(io, path, view, cli.width, cli.height);
     }
@@ -209,7 +240,8 @@ test {
     _ = @import("gpu/gpu.zig");
     _ = @import("sim/cell.zig");
     _ = @import("sim/materials.zig");
-    _ = @import("sim/materials_builtin.zig");
+    _ = @import("sim/reactions.zig");
+    _ = @import("scenario_runner.zig");
     _ = @import("sim/commands.zig");
     _ = @import("sim/scenes.zig");
     _ = @import("sim/reference/grid.zig");

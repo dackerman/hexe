@@ -5,7 +5,7 @@ const builtin = @import("builtin");
 const Cli = @import("main.zig").Cli;
 const Engine = @import("engine.zig").Engine;
 const scenes = @import("sim/scenes.zig");
-const materials_builtin = @import("sim/materials_builtin.zig");
+const materials = @import("sim/materials.zig");
 const Profile = @import("profile.zig").Profile;
 const cell = @import("sim/cell.zig");
 
@@ -18,8 +18,7 @@ const cases = [_]Case{
     .{ .name = "sand + water + smoke mixing, fully active", .scene = .bench_mixed, .sleep = true, .budget_ms = 2.5 },
 };
 
-pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
-    const table = materials_builtin.table();
+pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *const materials.Library) !u8 {
     const ticks = if (cli.ticks == 0) 300 else cli.ticks;
     std.debug.print("hexe bench: {d} ticks per scene, {s} build, warm-up 10 ticks excluded\n", .{ ticks, @tagName(builtin.mode) });
     var failed = false;
@@ -41,7 +40,8 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         const engine = try gpa.create(Engine);
         defer gpa.destroy(engine);
         try engine.init(gpa, .{
-            .table = &table,
+            .tables = lib.tables,
+            .ids = lib.ids(),
             .validation = cli.validation orelse false,
             .pipeline = .{ .sleep = case.sleep },
         });

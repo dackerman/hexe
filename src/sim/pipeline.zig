@@ -25,6 +25,7 @@ const commands = @import("commands.zig");
 const Grid = @import("grid.zig").Grid;
 const Noise = @import("noise.zig").Noise;
 const materials = @import("materials.zig");
+const Reactions = @import("reactions.zig").Reactions;
 
 pub const frames_in_flight = 2;
 /// Most ticks recorded into one frame (catch-up after a slow frame).
@@ -126,29 +127,41 @@ pub const Pipeline = struct {
     grid: Grid,
     applier: commands.Applier,
     noise: Noise,
+    reactions: Reactions,
     // ---- end subsystems ----
 
     /// In place: `shared` points into `self`.
-    pub fn init(self: *Pipeline, ctx: *gpu.Context, config: Config, alloc: std.mem.Allocator, table: *const materials.Table) !void {
+    pub fn init(self: *Pipeline, ctx: *gpu.Context, config: Config, alloc: std.mem.Allocator, tables: *const materials.Tables) !void {
         self.config = config;
         // ---- subsystem init (order: grid first, it owns the shared images) ----
         self.grid = try Grid.init(ctx, config, alloc);
         errdefer self.grid.deinit();
-        try self.grid.uploadMaterials(table);
+        try self.grid.uploadMaterials(tables);
+        try self.grid.clearCells(materials.ambientAir(tables));
         self.applier = try commands.Applier.init(ctx, config, alloc);
         errdefer self.applier.deinit();
         self.noise = try Noise.init(ctx, config, alloc);
         errdefer self.noise.deinit();
+        self.reactions = try Reactions.init(ctx, config, alloc);
+        errdefer self.reactions.deinit();
+        try self.reactions.uploadReactions(tables);
         // ---- end subsystem init ----
         self.shared = self.grid.shared();
     }
 
     pub fn deinit(self: *Pipeline) void {
         // ---- subsystem deinit (reverse order) ----
+        self.reactions.deinit();
         self.noise.deinit();
         self.applier.deinit();
         self.grid.deinit();
         // ---- end subsystem deinit ----
+    }
+
+    /// Replace the material and reaction tables (hot reload). Waits for idle.
+    pub fn uploadTables(self: *Pipeline, tables: *const materials.Tables) !void {
+        try self.grid.uploadMaterials(tables);
+        try self.reactions.uploadReactions(tables);
     }
 
     /// Record one tick, in the order of docs/01-architecture.md "Frame pipeline".
@@ -164,10 +177,11 @@ pub const Pipeline = struct {
         // 7'. activity compaction: tiles marked last tick and by this tick's
         //     edits form this tick's active list (docs/decisions/10-activity-tiles.md)
         self.grid.recordCompaction(frame);
-        // 3. 8 x { reactions and heat gather (M3); Margolus movement }
+        // 3. 8 x { reactions and heat gather; Margolus movement }
         var s: u32 = 0;
         while (s < cell.substeps) : (s += 1) {
             frame.substep = s;
+            self.reactions.recordSubstep(frame);
             self.grid.recordSubstep(frame);
         }
         frame.substep = 0;

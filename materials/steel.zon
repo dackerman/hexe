@@ -4,7 +4,7 @@
     .id = 27,
     .phase = .static,
     .density = 800,
-    .health = 255,
+    .health = 63,
     .conductivity = 220,
     .melt = .{ .at = 1500, .to = "molten_steel" },
     .conductive = true,

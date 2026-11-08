@@ -16,18 +16,43 @@ const pipeline_mod = @import("pipeline.zig");
 const Frame = pipeline_mod.Frame;
 const shaders = @import("shaders");
 
+/// Shape, bits 0-7 of `kind`.
 pub const Kind = enum(u32) {
     /// Center (x0, y0), radius x1: every pixel with dx^2 + dy^2 <= r^2.
     fill_circle = 1,
     /// [x0, x1) x [y0, y1).
     fill_rect = 2,
 };
+pub const shape_mask: u32 = 0xff;
+
+/// What a command does to the pixels of its shape, bits 8-15 of `kind`.
+pub const Action = enum(u32) {
+    /// Paint `material` (with the overrides in `Options`).
+    fill = 0,
+    /// Set the burning flag on flammable cells (health-less ones get their
+    /// burn fuel as state).
+    ignite = 1,
+    /// Set the temperature byte (`Options.temperature`).
+    heat = 2,
+    /// Start a charge pulse in conductive cells.
+    charge = 3,
+};
+pub const action_shift = 8;
 
 /// Only replace air cells (pouring, scenery that must not overwrite).
 pub const flag_only_air: u32 = 0x1;
+/// Only replace cells of the material in bits 8-15 of `material`.
+pub const flag_only_material: u32 = 0x2;
+/// Spawned cells get the temperature byte in bits 16-23 of `flags`.
+pub const flag_set_temp: u32 = 0x4;
+/// Spawned cells get the state byte in bits 24-31 of `flags`.
+pub const flag_set_state: u32 = 0x8;
 /// Bits 8-15 of `flags`: coverage. 0 = every pixel of the shape; otherwise a
 /// pixel is filled when the low byte of its spawn hash is below the coverage.
 pub const coverage_shift = 8;
+pub const temp_shift = 16;
+pub const state_shift = 24;
+pub const only_shift = 8;
 
 /// GPU encoding, 8 words; `struct Command` in common.glsl.
 pub const CommandGpu = extern struct {
@@ -52,11 +77,32 @@ pub const max_radius = 1000;
 
 pub const Options = struct {
     only_air: bool = false,
+    /// Only paint over cells of this material.
+    only: ?u8 = null,
     /// Fraction of the shape's pixels to fill, 1-255 of 256; 0 = all.
     coverage: u8 = 0,
+    /// Temperature byte for spawned cells (fill) or the target (heat);
+    /// null = the material's spawn temperature.
+    temperature: ?u8 = null,
+    /// State byte for spawned cells; null = the material's initial state.
+    state: ?u8 = null,
+    action: Action = .fill,
 
     fn flags(o: Options) u32 {
-        return (if (o.only_air) flag_only_air else 0) | (@as(u32, o.coverage) << coverage_shift);
+        var f: u32 = @as(u32, o.coverage) << coverage_shift;
+        if (o.only_air) f |= flag_only_air;
+        if (o.only != null) f |= flag_only_material;
+        if (o.temperature) |t| f |= flag_set_temp | (@as(u32, t) << temp_shift);
+        if (o.state) |st| f |= flag_set_state | (@as(u32, st) << state_shift);
+        return f;
+    }
+
+    fn materialWord(o: Options, material: u8) u32 {
+        return @as(u32, material) | (@as(u32, o.only orelse 0) << only_shift);
+    }
+
+    fn kind(o: Options, shape: Kind) u32 {
+        return @backingInt(shape) | (@backingInt(o.action) << action_shift);
     }
 };
 
@@ -87,8 +133,8 @@ pub const CommandList = struct {
 
     pub fn fillCircle(self: *CommandList, cx: i32, cy: i32, radius: i32, material: u8, opts: Options) void {
         self.push(.{
-            .kind = @backingInt(Kind.fill_circle),
-            .material = material,
+            .kind = opts.kind(.fill_circle),
+            .material = opts.materialWord(material),
             .x0 = cx,
             .y0 = cy,
             .x1 = std.math.clamp(radius, 0, max_radius),
@@ -101,8 +147,8 @@ pub const CommandList = struct {
     pub fn fillRect(self: *CommandList, x0: i32, y0: i32, x1: i32, y1: i32, material: u8, opts: Options) void {
         if (x1 <= x0 or y1 <= y0) return;
         self.push(.{
-            .kind = @backingInt(Kind.fill_rect),
-            .material = material,
+            .kind = opts.kind(.fill_rect),
+            .material = opts.materialWord(material),
             .x0 = x0,
             .y0 = y0,
             .x1 = x1,
@@ -110,6 +156,29 @@ pub const CommandList = struct {
             .flags = opts.flags(),
             .seed = 0,
         });
+    }
+
+    /// Set flammable cells in [x0, x1) x [y0, y1) alight.
+    pub fn igniteRect(self: *CommandList, x0: i32, y0: i32, x1: i32, y1: i32) void {
+        self.fillRect(x0, y0, x1, y1, 0, .{ .action = .ignite });
+    }
+
+    pub fn igniteCircle(self: *CommandList, cx: i32, cy: i32, radius: i32) void {
+        self.fillCircle(cx, cy, radius, 0, .{ .action = .ignite });
+    }
+
+    /// Set the temperature byte of every cell in [x0, x1) x [y0, y1).
+    pub fn heatRect(self: *CommandList, x0: i32, y0: i32, x1: i32, y1: i32, temperature: u8) void {
+        self.fillRect(x0, y0, x1, y1, 0, .{ .action = .heat, .temperature = temperature });
+    }
+
+    pub fn heatCircle(self: *CommandList, cx: i32, cy: i32, radius: i32, temperature: u8) void {
+        self.fillCircle(cx, cy, radius, 0, .{ .action = .heat, .temperature = temperature });
+    }
+
+    /// Start a charge pulse in the conductive cells of a circle.
+    pub fn chargeCircle(self: *CommandList, cx: i32, cy: i32, radius: i32) void {
+        self.fillCircle(cx, cy, radius, 0, .{ .action = .charge });
     }
 
     pub fn slice(self: *const CommandList) []const CommandGpu {
@@ -126,7 +195,8 @@ pub fn bounds(c: CommandGpu) ?Box {
     var y0: i32 = undefined;
     var x1: i32 = undefined; // exclusive
     var y1: i32 = undefined;
-    switch (@as(Kind, @fromBackingInt(@intCast(c.kind)))) {
+    const shape = std.enums.fromInt(Kind, c.kind & shape_mask) orelse return null;
+    switch (shape) {
         .fill_circle => {
             x0 = c.x0 - c.x1;
             y0 = c.y0 - c.x1;
@@ -155,7 +225,8 @@ pub fn bounds(c: CommandGpu) ?Box {
 }
 
 pub fn insideShape(c: CommandGpu, x: i32, y: i32) bool {
-    return switch (@as(Kind, @fromBackingInt(@intCast(c.kind)))) {
+    const shape = std.enums.fromInt(Kind, c.kind & shape_mask) orelse return false;
+    return switch (shape) {
         .fill_circle => blk: {
             const dx = x - c.x0;
             const dy = y - c.y0;

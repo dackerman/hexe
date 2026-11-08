@@ -100,6 +100,12 @@ uint hash_salt(uint x, uint y, uint tick, uint salt) {
     return hash(x, y, tick, salt ^ 0x9e3779b9u);
 }
 
+// Per (cell, tick, substep) stream for a pass other than movement; `salt`
+// (below 2^24) keeps passes independent.
+uint hash_pass(uint x, uint y, uint tick, uint substep, uint salt) {
+    return hash(x, y, tick, (substep & 0xffu) | (salt << 8));
+}
+
 // ---------------------------------------------------------------------------
 // Bindless descriptor set 0, shared by every pipeline (src/gpu/descriptors.zig).
 //   binding 0: storage images, any format, indexed by slot
@@ -125,6 +131,8 @@ uint hash_salt(uint x, uint y, uint tick, uint salt) {
 #define SLOT_BUF_TILE_MARKS 1u
 #define SLOT_BUF_TILE_LIST 2u
 #define SLOT_BUF_COMMANDS 3u
+#define SLOT_BUF_REACTIONS 12u
+#define SLOT_BUF_EVENTS 13u
 #define SLOT_BUF_DYNAMIC_BASE 32u
 
 #define SAMPLER_NEAREST_CLAMP 0u
@@ -151,31 +159,19 @@ uint load_cell(ivec2 p) { return imageLoad(CELLS, wrap_coord(p)).x; }
 void store_cell(ivec2 p, uint c) { imageStore(CELLS, wrap_coord(p), uvec4(c, 0u, 0u, 0u)); }
 
 // ---------------------------------------------------------------------------
-// Material table (storage buffer at SLOT_BUF_MATERIALS, 256 entries).
-// 32 words = 128 bytes per material, std430. Byte layout, little endian, is
-// the Zig extern struct `MaterialGpu` in src/sim/materials.zig; keep both in
-// sync (tests check the offsets). Temperatures are temperature bytes;
-// material references are ids with MATERIAL_NONE = no transition.
-//   w0  move     phase | dispersion<<8 | slide<<16 | vertical_chance<<24
-//   w1  density  density(16) | sort_key<<16
-//   w2  flags    MATERIAL_FLAG_*
-//   w3  misc0    solver | health<<8 | conductivity<<16 | emissive<<24
-//   w4  misc1    lifetime(16) | decays_to<<16 | initial_state<<24
-//   w5  misc2    spawn_temp | emits_heat<<8 | impact<<16 | blast_response<<24
-//   w6  misc3    blast_threshold(16) | drag<<16 | ramp_len<<24
-//   w7  change0  melt_at | melt_to<<8 | freeze_at<<16 | freeze_to<<24
-//   w8  change1  boil_at | boil_to<<8 | ignite_at<<16 | burn_to<<24
-//   w9  burn     burn_ticks(16) | smoke_to<<16 | glow_from<<24
-//   w10 glow     glow_to | reserved
-//   w11-15       reserved
-//   w16-23 ramp  RGBA8 colors, R in the low byte; ramp_len of them valid
-//   w24-31       reserved
+// Material table (storage buffer at SLOT_BUF_MATERIALS, 256 entries), packed
+// by the data layer from materials/*.zon. 48 words = 192 bytes per material,
+// std430. The struct below is src/data/gpu_tables.zig `glsl_material_struct`
+// verbatim (a test checks it); field meanings are documented there and in
+// docs/decisions/40-reactions-material-table.md. Temperatures are
+// temperature bytes; material references are ids, and "no transition" is
+// encoded as the material's own id with a threshold that cannot fire
+// (melt/boil/ignite at 255, freeze at 0).
 // ---------------------------------------------------------------------------
 #define MATERIAL_COUNT 256u
-#define MATERIAL_WORDS 32u
-#define MATERIAL_NONE 255u
+#define MATERIAL_WORDS 48u
 #define MATERIAL_AIR 0u
-#define MATERIAL_RAMP_WORD 16u
+#define MATERIAL_RAMP_WORD 40u
 #define MATERIAL_RAMP_MAX 8u
 
 #define PHASE_STATIC 0u
@@ -183,10 +179,25 @@ void store_cell(ivec2 p, uint c) { imageStore(CELLS, wrap_coord(p), uvec4(c, 0u,
 #define PHASE_LIQUID 2u
 #define PHASE_GAS 3u
 
+// MaterialGpu.flags (gpu_tables.Flag).
 #define MATERIAL_FLAG_CONDUCTIVE 0x1u
 #define MATERIAL_FLAG_TRANSLUCENT 0x2u
-#define MATERIAL_FLAG_FLAMMABLE 0x4u
-#define MATERIAL_FLAG_EMISSIVE 0x8u
+#define MATERIAL_FLAG_EMISSIVE 0x4u
+#define MATERIAL_FLAG_SOLVER_FLIP 0x8u
+#define MATERIAL_FLAG_FLAMMABLE 0x10u
+#define MATERIAL_FLAG_HAS_LIFETIME 0x20u
+#define MATERIAL_FLAG_HAS_HEALTH 0x40u
+#define MATERIAL_FLAG_EXTINGUISHER 0x80u
+#define MATERIAL_FLAG_BLOCKS_LIGHT 0x100u
+#define MATERIAL_FLAG_FEEDS_AIR 0x200u
+#define MATERIAL_FLAG_ANCHOR 0x400u
+#define MATERIAL_FLAG_RICOCHET 0x800u
+#define MATERIAL_FLAG_GLOWS 0x1000u
+#define MATERIAL_FLAG_MELTS 0x2000u
+#define MATERIAL_FLAG_FREEZES 0x4000u
+#define MATERIAL_FLAG_BOILS 0x8000u
+#define MATERIAL_FLAG_REACTIVE 0x10000u
+#define MATERIAL_FLAG_MISSING 0x80000000u
 
 // Movement ordering: a cell sinks into a fluid cell below it with a lower key.
 #define SORT_KEY_AIR 256u
@@ -194,39 +205,65 @@ void store_cell(ivec2 p, uint c) { imageStore(CELLS, wrap_coord(p), uvec4(c, 0u,
 #define SORT_KEY_STATIC 65535u
 
 struct MaterialGpu {
-    uint move;
+    uint phase;
     uint density;
+    uint dispersion;
+    uint slide;
+    uint state_init;
+    uint health;
+    uint lifetime;
+    uint lifetime_period;
+    uint decays_to;
+    uint temperature;
+    uint conductivity;
+    uint emits_heat;
+    uint melt_at;
+    uint melt_to;
+    uint freeze_at;
+    uint freeze_to;
+    uint boil_at;
+    uint boil_to;
+    uint ignite_at;
+    uint burn_fuel;
+    uint burn_period;
+    uint burns_to;
+    uint smoke;
+    uint burn_heat;
+    uint burn_event;
     uint flags;
-    uint misc0;
-    uint misc1;
-    uint misc2;
-    uint misc3;
-    uint change0;
-    uint change1;
-    uint burn;
-    uint glow;
-    uint reserved0[5];
+    uint impact;
+    uint blast_threshold;
+    uint blast_response;
+    uint rubble;
+    uint drag;
+    uint emissive;
+    uint glow_from;
+    uint glow_to;
+    uint pressure_event;
+    uint move;
+    uint sort_key;
+    uint flame;
+    uint reserved;
+    uint ramp_len;
     uint ramp[8];
-    uint reserved1[8];
 };
 
 HEXE_BUFFER(MaterialBlock, readonly, MaterialGpu materials[];, g_material_tables);
 #define MATERIALS g_material_tables[SLOT_BUF_MATERIALS].materials
 
+// MaterialGpu.move: phase | dispersion<<8 | slide<<16 | vertical_chance<<24.
 uint mat_phase(uint move) { return move & 0xffu; }
 uint mat_dispersion(uint move) { return (move >> 8) & 0xffu; }
 uint mat_slide(uint move) { return (move >> 16) & 0xffu; }
 uint mat_vertical_chance(uint move) { return move >> 24; }
-uint mat_density(uint density) { return density & 0xffffu; }
-uint mat_sort_key(uint density) { return density >> 16; }
-uint mat_spawn_temp(MaterialGpu m) { return m.misc2 & 0xffu; }
-uint mat_initial_state(MaterialGpu m) { return m.misc1 >> 24; }
-uint mat_ramp_len(MaterialGpu m) { return m.misc3 >> 24; }
+uint mat_sort_key(MaterialGpu m) { return m.sort_key; }
+uint mat_spawn_temp(MaterialGpu m) { return m.temperature; }
+uint mat_initial_state(MaterialGpu m) { return m.state_init; }
+uint mat_ramp_len(MaterialGpu m) { return m.ramp_len; }
 
 // A freshly spawned cell of `material` (commands, reactions).
 uint spawn_cell(uint material, uint variant) {
-    MaterialGpu m = MATERIALS[material];
-    return cell_make(material, mat_spawn_temp(m), mat_initial_state(m), 0u, variant);
+    return cell_make(material, MATERIALS[material].temperature, MATERIALS[material].state_init, 0u, variant);
 }
 
 // Chance test used by every probabilistic rule: 255 means always.
@@ -272,14 +309,36 @@ void mark_tile_and_neighbors(uvec2 t) {
 // Commands (CPU -> GPU edits), src/sim/commands.zig. 8 words each, in the
 // buffer at SLOT_BUF_COMMANDS; the CPU tells each dispatch which one to run.
 //   kind, material, x0, y0, x1, y1, flags, seed
-//   CMD_FILL_CIRCLE: center (x0, y0), radius x1 (inclusive: d^2 <= r^2)
-//   CMD_FILL_RECT:   [x0, x1) x [y0, y1), unwrapped coordinates
+//   kind bits 0-7 shape:  CMD_FILL_CIRCLE center (x0, y0), radius x1
+//                         (inclusive: d^2 <= r^2); CMD_FILL_RECT [x0, x1) x
+//                         [y0, y1), unwrapped coordinates
+//   kind bits 8-15 action: CMD_ACTION_FILL paint `material`; IGNITE set the
+//                         burning flag on flammable cells; HEAT set the
+//                         temperature byte; CHARGE start a charge pulse in
+//                         conductive cells
+//   material bits 0-7 material, bits 8-15 the only material painted over
+//                         (with CMD_FLAG_ONLY_MATERIAL)
+//   flags bit 0 only air, bit 1 only material, bit 2 set temperature, bit 3
+//                         set state; bits 8-15 coverage (0 = every pixel),
+//                         16-23 temperature byte, 24-31 state byte
 // Coordinates are world pixels and wrap on the torus.
 // ---------------------------------------------------------------------------
 #define CMD_FILL_CIRCLE 1u
 #define CMD_FILL_RECT 2u
+#define CMD_SHAPE_MASK 0xffu
+#define CMD_ACTION_SHIFT 8u
+#define CMD_ACTION_FILL 0u
+#define CMD_ACTION_IGNITE 1u
+#define CMD_ACTION_HEAT 2u
+#define CMD_ACTION_CHARGE 3u
+#define CMD_ONLY_SHIFT 8u
 #define CMD_FLAG_ONLY_AIR 0x1u
+#define CMD_FLAG_ONLY_MATERIAL 0x2u
+#define CMD_FLAG_SET_TEMP 0x4u
+#define CMD_FLAG_SET_STATE 0x8u
 #define CMD_COVERAGE_SHIFT 8u
+#define CMD_TEMP_SHIFT 16u
+#define CMD_STATE_SHIFT 24u
 #define CMD_WORDS 8u
 #define SALT_SPAWN_VARIANT 0x51a7u
 
@@ -296,5 +355,87 @@ struct Command {
 
 HEXE_BUFFER(CommandBlock, readonly, Command commands[];, g_command_buffers);
 #define COMMANDS g_command_buffers[SLOT_BUF_COMMANDS].commands
+
+// ---------------------------------------------------------------------------
+// Reaction table (storage buffer at SLOT_BUF_REACTIONS): 256 x 256
+// ReactionEntry, 8 bytes each, read as uvec2, flat index self * 256 + other
+// (src/data/gpu_tables.zig ReactionEntry):
+//   x: self_result | other_result<<8 | chance<<16 | min_temp<<24
+//   y: max_temp | catalyst<<8 | event<<16 | flags<<24
+// chance 0 = no reaction. Temperature bounds are inclusive on the pair
+// temperature (t_self + t_other) / 2.
+// ---------------------------------------------------------------------------
+#define REACTION_FLAG_HAS_CATALYST 0x1u
+#define REACTION_FLAG_EMITS_EVENT 0x2u
+
+HEXE_BUFFER(ReactionBlock, readonly, uvec2 reactions[];, g_reaction_tables);
+#define REACTIONS g_reaction_tables[SLOT_BUF_REACTIONS].reactions
+
+// ---------------------------------------------------------------------------
+// Event queue (storage buffer at SLOT_BUF_EVENTS): a ring the GPU appends to
+// when a rule needs gameplay to react (docs/01-architecture.md "Readback").
+// `count` only grows (wrapping at 2^32); event i lives at
+// events[i % EVENT_CAPACITY]. A reader remembers the last count it saw;
+// more than EVENT_CAPACITY new events since then means some were
+// overwritten. Order within a tick is not deterministic, the set is.
+//   event: uvec4(x | y << 16, kind, payload, tick)
+// Kinds below 128 are data-defined (materials.Event: 1 explode, 2
+// pressure); the engine's own start at 128.
+// ---------------------------------------------------------------------------
+#define EVENT_CAPACITY 4096u
+#define EVENT_EXPLODE 1u
+#define EVENT_PRESSURE 2u
+#define EVENT_PARTICLE_CELL_CHANGED 128u
+
+HEXE_BUFFER(EventBlock, , uint count; uint capacity; uint dropped; uint pad; uvec4 events[];, g_event_queues);
+#define EVENTS g_event_queues[SLOT_BUF_EVENTS]
+
+void emit_event(ivec2 p, uint kind, uint payload, uint tick) {
+    uint i = atomicAdd(EVENTS.count, 1u);
+    ivec2 w = wrap_coord(p);
+    EVENTS.events[i & (EVENT_CAPACITY - 1u)] = uvec4(uint(w.x) | (uint(w.y) << 16), kind, payload, tick);
+}
+
+// ---------------------------------------------------------------------------
+// State byte (docs/decisions/42-reactions-state-byte.md). Health, lifetime
+// count and health-less burn fuel use the whole byte, except in conductive
+// materials, which keep their charge phase in bits 6-7 and everything else
+// in bits 0-5: CHARGE_HEAD is a fresh pulse, lower values the refractory
+// tail; a neutral conductive cell next to a head becomes a head.
+// ---------------------------------------------------------------------------
+#define CHARGE_SHIFT 6u
+#define CHARGE_HEAD 3u
+#define CONDUCTIVE_STATE_MASK 0x3fu
+
+bool mat_conductive(uint material) { return (MATERIALS[material].flags & MATERIAL_FLAG_CONDUCTIVE) != 0u; }
+uint cell_charge(uint c) { return cell_state(c) >> CHARGE_SHIFT; }
+
+// `c` (of flammable `material`) set alight: the burning flag, and the burn
+// fuel as state for materials without health (with health, burning
+// consumes the health already in the state byte).
+uint cell_ignite(uint c, uint material) {
+    uint s = (MATERIALS[material].flags & MATERIAL_FLAG_HAS_HEALTH) != 0u ? cell_state(c) : MATERIALS[material].burn_fuel;
+    return cell_with_flag(cell_with_state(c, s), CELL_FLAG_BURNING, true);
+}
+
+// ---------------------------------------------------------------------------
+// Reactions and heat pass tuning (shaders/sim/grid/reactions.comp,
+// docs/decisions/41-reactions-pass.md). Chances are out of 256.
+//   HEAT_SHIFT          conduction: dT = sum(min(k_a, k_b) * (T_n - T)) >> 10
+//                       per substep, stochastically rounded
+//   EMIT_GAP_SHIFT      emission per tick moves at most gap >> 3 bytes
+//   BURN_TEMP           burning cells heat themselves up to this byte (900 C)
+//   IGNITE_CONTACT_CHANCE  per tick, a flammable cell next to fire ignites
+//   FLAME_CHANCE, SMOKE_CHANCE  per tick, air next to a burning cell becomes
+//                       its flame / its smoke (cumulative rolls)
+// ---------------------------------------------------------------------------
+#define SALT_REACT_CELL 0x4e1u
+#define SALT_REACT_PAIR 0x4e2u
+#define HEAT_SHIFT 10u
+#define EMIT_GAP_SHIFT 3u
+#define BURN_TEMP 118u
+#define IGNITE_CONTACT_CHANCE 24u
+#define FLAME_CHANCE 40u
+#define SMOKE_CHANCE 10u
 
 #endif

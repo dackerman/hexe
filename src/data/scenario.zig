@@ -189,10 +189,28 @@ pub const Assertion = struct {
     }
 };
 
+/// Engine systems a scenario depends on beyond the cell grid and its
+/// reactions. The runner skips (and reports) scenarios whose requirements
+/// are not built yet.
+pub const Requirement = enum {
+    /// FLIP liquid solver, particle-backed water, sleep and wake (M6).
+    flip,
+    /// Lattice Boltzmann air field, pressure (M5).
+    air_field,
+    /// Explosion command (M4 heuristic, M5 air field).
+    explosions,
+    /// Unified particle buffer, ballistic pixels (M4).
+    particles,
+    /// Rigid bodies in the grid (M7).
+    bodies,
+};
+
 /// One scenario file.
 pub const Def = struct {
     name: []const u8,
     description: []const u8 = "",
+    /// Systems this scenario needs; see `Requirement`.
+    requires: []const Requirement = &.{},
     size: Size = default_size,
     /// Seed for the simulation hash.
     seed: u64 = 0,

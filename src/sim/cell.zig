@@ -38,6 +38,11 @@ pub const variant_bits = 4;
 
 pub const salt_spawn_variant: u32 = 0x51a7;
 
+/// Charge phase in state bits 6-7 of conductive materials (common.glsl).
+pub const charge_shift = 6;
+pub const charge_head: u32 = 3;
+pub const conductive_state_mask: u32 = 0x3f;
+
 pub const Cell = u32;
 
 pub inline fn material(c: Cell) u32 {
@@ -107,6 +112,11 @@ pub inline fn hash(x: u32, y: u32, tick: u32, substep: u32) u32 {
 
 pub inline fn hashSalt(x: u32, y: u32, tick: u32, salt: u32) u32 {
     return hash(x, y, tick, salt ^ 0x9e3779b9);
+}
+
+/// common.glsl hash_pass: per (cell, tick, substep) stream of another pass.
+pub inline fn hashPass(x: u32, y: u32, tick: u32, substep: u32, salt: u32) u32 {
+    return hash(x, y, tick, (substep & 0xff) | (salt << 8));
 }
 
 /// Chance test shared by every probabilistic rule: 255 means always.

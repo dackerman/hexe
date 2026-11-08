@@ -1,0 +1,242 @@
+#version 460
+// Reactions and heat, one substep (docs/decisions/41-reactions-pass.md). A
+// pure gather over the active tiles: every cell reads itself and its
+// neighbors from CELLS, computes its next value and, only if it changed,
+// writes it to the private NEXT image and sets its bit in this tile's change
+// mask. reactions_commit.comp copies the marked cells back after a barrier,
+// so no cell ever reads a neighbor that was already updated: the result is
+// independent of evaluation order. Mirrored exactly by
+// src/sim/reference/grid.zig (`reactCell`).
+//
+// Per cell, in order (the first rule that changes the material wins):
+//   pair reaction  substeps 0-3 pair every cell with one neighbor (horizontal
+//                  even, vertical even, horizontal odd, vertical odd domino
+//                  tilings), so each adjacent pair is offered once per tick
+//                  and both cells agree through the pair's hash
+//   heat           conduction every substep; emission, burn heat once per
+//                  tick (substep 0)
+//   burning        extinguish, fuel, burn out (substep 0), ignition
+//   phase change   boil, melt, freeze on the new temperature
+//   lifetime       decay once per lifetime period (substep 0)
+//   fire products  air next to a burning cell becomes flame or smoke
+//   charge         pulse propagation in conductive materials
+#include "common.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PC {
+    uint tick;
+    uint substep;
+    uint mark_tiles; // nonzero: mark tiles with changed cells
+    uint next_slot; // storage image: changed cells
+    uint mask_slot; // storage buffer: 32 mask words (one per tile row) per tile list entry
+} pc;
+
+HEXE_BUFFER(MaskBlock, , uint words[];, g_change_masks);
+#define NEXT g_uimages[pc.next_slot]
+
+shared uint s_mask[32];
+
+// Neighbor order: up, right, down, left.
+const ivec2 DIRS[4] = ivec2[4](ivec2(0, -1), ivec2(1, 0), ivec2(0, 1), ivec2(-1, 0));
+
+bool tile_active_at(ivec2 p) {
+    uvec2 w = uvec2(wrap_coord(p));
+    return uint(TILE_MARKS[TILE_ACTIVE_OFFSET + tile_index(w >> TILE_SHIFT)]) != 0u;
+}
+
+bool is_burning(uint c) {
+    return cell_has(c, CELL_FLAG_BURNING) && (MATERIALS[cell_material(c)].flags & MATERIAL_FLAG_FLAMMABLE) != 0u;
+}
+
+// Whether `cat` is one of the six cells around the domino (f, f + dir).
+bool catalyst_near(ivec2 f, ivec2 dir, uint cat) {
+    ivec2 g = f + dir;
+    ivec2 perp = ivec2(dir.y, dir.x);
+    return cell_material(load_cell(f - dir)) == cat || cell_material(load_cell(g + dir)) == cat ||
+        cell_material(load_cell(f + perp)) == cat || cell_material(load_cell(f - perp)) == cat ||
+        cell_material(load_cell(g + perp)) == cat || cell_material(load_cell(g - perp)) == cat;
+}
+
+// The material a burning cell of `burns_to` continues as: a flammable product
+// keeps burning with fresh fuel.
+uint burn_out(uint b, uint t, uint variant) {
+    bool flammable = b != MATERIAL_AIR && (MATERIALS[b].flags & MATERIAL_FLAG_FLAMMABLE) != 0u;
+    if (!flammable) return cell_make(b, t, MATERIALS[b].state_init, 0u, variant);
+    uint s = (MATERIALS[b].flags & MATERIAL_FLAG_HAS_HEALTH) != 0u ? MATERIALS[b].state_init : MATERIALS[b].burn_fuel;
+    return cell_make(b, t, s, CELL_FLAG_BURNING, variant);
+}
+
+uint react_cell(ivec2 p, uint c) {
+    if (cell_has(c, CELL_FLAG_BODY)) return c;
+    uint m = cell_material(c);
+    uint mflags = MATERIALS[m].flags;
+    uint variant = cell_variant(c);
+    bool tick_step = pc.substep == 0u;
+    uint h = hash_pass(uint(p.x), uint(p.y), pc.tick, pc.substep, SALT_REACT_CELL);
+
+    uint n[4];
+    for (int i = 0; i < 4; i++) n[i] = load_cell(p + DIRS[i]);
+
+    // ---- pair reaction ----
+    if (pc.substep < 4u) {
+        bool horiz = (pc.substep & 1u) == 0u;
+        uint parity = pc.substep >> 1;
+        uint coord = horiz ? uint(p.x) : uint(p.y);
+        bool first = ((coord - parity) & 1u) == 0u;
+        ivec2 dir = horiz ? ivec2(1, 0) : ivec2(0, 1);
+        int qi = horiz ? (first ? 1 : 3) : (first ? 2 : 0);
+        ivec2 q = p + DIRS[qi];
+        uint cq = n[qi];
+        uint mq = cell_material(cq);
+        uvec2 e = REACTIONS[m * 256u + mq];
+        uint chance = (e.x >> 16) & 0xffu;
+        if (chance != 0u && !cell_has(cq, CELL_FLAG_BODY) && tile_active_at(q)) {
+            ivec2 f = first ? p : q;
+            ivec2 fw = wrap_coord(f);
+            uint hp = hash_pass(uint(fw.x), uint(fw.y), pc.tick, pc.substep, SALT_REACT_PAIR);
+            uint tp = (cell_temperature(c) + cell_temperature(cq)) >> 1;
+            uint eflags = e.y >> 24;
+            bool fire = tp >= (e.x >> 24) && tp <= (e.y & 0xffu) && chance8(hp & 0xffu, chance);
+            if (fire && (eflags & REACTION_FLAG_HAS_CATALYST) != 0u) fire = catalyst_near(f, dir, (e.y >> 8) & 0xffu);
+            if (fire) {
+                uint r = e.x & 0xffu;
+                uint ev = (e.y >> 16) & 0xffu;
+                if ((eflags & REACTION_FLAG_EMITS_EVENT) != 0u && ev != 0u && (m != mq || first)) emit_event(p, ev, m, pc.tick);
+                if (r != m) return spawn_cell(r, variant);
+            }
+        }
+    }
+
+    // ---- heat ----
+    int t = int(cell_temperature(c));
+    bool flammable = (mflags & MATERIAL_FLAG_FLAMMABLE) != 0u;
+    bool burning = flammable && cell_has(c, CELL_FLAG_BURNING);
+    bool conductive = (mflags & MATERIAL_FLAG_CONDUCTIVE) != 0u;
+    uint k = MATERIALS[m].conductivity;
+    uint emit_self = MATERIALS[m].emits_heat + (burning ? MATERIALS[m].burn_heat : 0u);
+    int flow = 0;
+    int emit = 0;
+    bool extinguisher_near = false;
+    bool fire_near = false;
+    bool head_near = false;
+    uint flame = MATERIALS[m].flame;
+    for (int i = 0; i < 4; i++) {
+        uint nm = cell_material(n[i]);
+        uint nflags = MATERIALS[nm].flags;
+        int tn = int(cell_temperature(n[i]));
+        flow += int(min(k, MATERIALS[nm].conductivity)) * (tn - t);
+        bool nburning = (nflags & MATERIAL_FLAG_FLAMMABLE) != 0u && cell_has(n[i], CELL_FLAG_BURNING);
+        if (tick_step && nm != m) {
+            uint en = MATERIALS[nm].emits_heat + (nburning ? MATERIALS[nm].burn_heat : 0u);
+            if (tn > t) emit += int(min(en, uint(tn - t) >> EMIT_GAP_SHIFT));
+            else if (t > tn) emit -= int(min(emit_self, uint(t - tn) >> EMIT_GAP_SHIFT));
+        }
+        extinguisher_near = extinguisher_near || (nflags & MATERIAL_FLAG_EXTINGUISHER) != 0u;
+        fire_near = fire_near || nburning || (flame != MATERIAL_AIR && nm == flame);
+        head_near = head_near || ((nflags & MATERIAL_FLAG_CONDUCTIVE) != 0u && cell_charge(n[i]) == CHARGE_HEAD);
+    }
+    t += (flow + int(h & 1023u)) >> HEAT_SHIFT;
+    t += emit;
+    if (burning && tick_step && t < int(BURN_TEMP)) t = min(t + int(MATERIALS[m].burn_heat), int(BURN_TEMP));
+    t = clamp(t, 0, 255);
+    uint tu = uint(t);
+
+    uint s = cell_state(c);
+    uint life = conductive ? s & CONDUCTIVE_STATE_MASK : s;
+    uint charge = conductive ? s >> CHARGE_SHIFT : 0u;
+
+    // ---- burning ----
+    if (flammable) {
+        // Burning liquids float on extinguishers and keep burning (oil on water).
+        bool doused = extinguisher_near && mat_phase(MATERIALS[m].move) != PHASE_LIQUID;
+        if (burning) {
+            if (doused) {
+                burning = false;
+                tu = min(tu, MATERIALS[m].ignite_at);
+            } else if (tick_step && pc.tick % MATERIALS[m].burn_period == 0u) {
+                if (life <= 1u) return burn_out(MATERIALS[m].burns_to, tu, variant);
+                life -= 1u;
+            }
+        } else if (!doused) {
+            bool ignite = tu > MATERIALS[m].ignite_at;
+            if (!ignite && tick_step && fire_near) ignite = ((h >> 12) & 0xffu) < IGNITE_CONTACT_CHANCE;
+            if (ignite) {
+                burning = true;
+                if ((mflags & MATERIAL_FLAG_HAS_HEALTH) == 0u) life = MATERIALS[m].burn_fuel;
+                if (MATERIALS[m].burn_event != 0u) emit_event(p, MATERIALS[m].burn_event, m, pc.tick);
+            }
+        }
+    }
+
+    // ---- phase change (keeps temperature and variant) ----
+    uint to = m;
+    if (tu > MATERIALS[m].boil_at) to = MATERIALS[m].boil_to;
+    else if (tu > MATERIALS[m].melt_at) to = MATERIALS[m].melt_to;
+    else if (tu < MATERIALS[m].freeze_at) to = MATERIALS[m].freeze_to;
+    if (to != m) return cell_make(to, tu, MATERIALS[to].state_init, 0u, variant);
+
+    // ---- lifetime ----
+    if ((mflags & MATERIAL_FLAG_HAS_LIFETIME) != 0u && !burning && tick_step && pc.tick % MATERIALS[m].lifetime_period == 0u) {
+        if (life <= 1u) return spawn_cell(MATERIALS[m].decays_to, variant);
+        life -= 1u;
+    }
+
+    // ---- fire products: air next to a burning cell ----
+    if (m == MATERIAL_AIR && tick_step) {
+        uint start = h & 3u;
+        for (uint j = 0u; j < 4u; j++) {
+            uint nc = n[(start + j) & 3u];
+            if (!is_burning(nc)) continue;
+            uint bm = cell_material(nc);
+            uint r = (h >> 20) & 0xffu;
+            uint fl = MATERIALS[bm].flame;
+            uint sm = MATERIALS[bm].smoke;
+            if (r < FLAME_CHANCE && fl != MATERIAL_AIR) return spawn_cell(fl, h >> 28);
+            if (r >= FLAME_CHANCE && r < FLAME_CHANCE + SMOKE_CHANCE && sm != MATERIAL_AIR) return spawn_cell(sm, h >> 28);
+            break;
+        }
+    }
+
+    // ---- charge ----
+    if (conductive) {
+        if (charge > 0u) charge -= 1u;
+        else if (head_near) charge = CHARGE_HEAD;
+    }
+
+    uint ns = conductive ? (life & CONDUCTIVE_STATE_MASK) | (charge << CHARGE_SHIFT) : life;
+    uint r = cell_with_state(cell_with_temperature(c, tu), ns);
+    return cell_with_flag(r, CELL_FLAG_BURNING, burning);
+}
+
+void main() {
+    if (gl_LocalInvocationIndex < 32u) s_mask[gl_LocalInvocationIndex] = 0u;
+    barrier();
+
+    uint packed = TILE_LIST.tiles[gl_WorkGroupID.x];
+    uvec2 tile = uvec2(packed & 0xffffu, packed >> 16);
+    uvec2 base = tile * TILE_SIZE + gl_LocalInvocationID.xy * 2u;
+    for (uint j = 0u; j < 4u; j++) {
+        uvec2 o = uvec2(j & 1u, j >> 1);
+        ivec2 p = ivec2(base + o);
+        uint c = imageLoad(CELLS, p).x;
+        uint r = react_cell(p, c);
+        if (r != c) {
+            imageStore(NEXT, p, uvec4(r, 0u, 0u, 0u));
+            atomicOr(s_mask[gl_LocalInvocationID.y * 2u + o.y], 1u << (gl_LocalInvocationID.x * 2u + o.x));
+            if (cell_has(c, CELL_FLAG_PARTICLE) && cell_material(r) != cell_material(c)) {
+                emit_event(p, EVENT_PARTICLE_CELL_CHANGED, imageLoad(OWNER, p).x, pc.tick);
+            }
+        }
+    }
+
+    barrier();
+    if (gl_LocalInvocationIndex < 32u) {
+        g_change_masks[pc.mask_slot].words[gl_WorkGroupID.x * 32u + gl_LocalInvocationIndex] = s_mask[gl_LocalInvocationIndex];
+    }
+    if (gl_LocalInvocationIndex == 0u && pc.mark_tiles != 0u) {
+        uint any_changed = 0u;
+        for (uint i = 0u; i < 32u; i++) any_changed |= s_mask[i];
+        if (any_changed != 0u) mark_tile_and_neighbors(tile);
+    }
+}

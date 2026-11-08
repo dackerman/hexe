@@ -2,7 +2,8 @@
 //!
 //! Input mapping (docs/decisions/07-input-mapping.md):
 //!   left mouse     paint the selected material    right mouse   erase (air)
-//!   1-9            select material by id           wheel         brush radius
+//!   1-9            select a palette material        wheel         brush radius
+//!   0              ignite brush (sets fire)
 //!   WASD / arrows  pan                             middle drag   pan
 //!   = / -          zoom in / out (integer)         space         pause
 //!   .              single tick while paused        F1            toggle HUD
@@ -18,23 +19,30 @@ const Input = @import("platform/window.zig").Input;
 const View = @import("render/world.zig").View;
 const cell = @import("sim/cell.zig");
 const commands = @import("sim/commands.zig");
-const materials_builtin = @import("sim/materials_builtin.zig");
 const materials = @import("sim/materials.zig");
+const data = @import("data");
 const max_ticks_per_frame = @import("sim/pipeline.zig").max_ticks_per_frame;
 const Profile = @import("profile.zig").Profile;
 
 const tick_ns: i96 = std.time.ns_per_s / 60;
 
-pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
+/// Brush materials on keys 1-9, by name (missing ones are skipped).
+const palette = [_][]const u8{ "sand", "water", "stone", "lava", "wood", "oil", "flame", "steel", "gunpowder" };
+/// Ticks between polls of the materials directory.
+const reload_poll_ticks = 30;
+/// How long the reload message stays in the HUD.
+const reload_message_ticks = 300;
+
+pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *materials.Library) !u8 {
     var window = try Window.init("hexe", cli.width, cli.height);
     defer window.deinit();
-    const table = materials_builtin.table();
     const engine = try gpa.create(Engine);
     defer gpa.destroy(engine);
     try engine.init(gpa, .{
         .window = &window,
         .vsync = cli.vsync,
-        .table = &table,
+        .tables = lib.tables,
+        .ids = lib.ids(),
         .validation = cli.validation orelse (builtin.mode == .debug),
         .pipeline = .{ .sleep = cli.sleep, .noise = cli.scene == .noise },
     });
@@ -47,8 +55,16 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
     view.camera_x = @as(i32, cell.world_size / 2) - @as(i32, @intCast(win_w / 2 / view.scale));
     view.camera_y = @as(i32, cell.world_size / 2) - @as(i32, @intCast(win_h / 2 / view.scale));
 
-    var material: u8 = materials_builtin.sand;
+    var material: u8 = lib.id("sand") orelse 1;
+    var igniting = false;
     var radius: i32 = 8;
+    var watcher: ?data.reload.Watcher = data.reload.Watcher.init(io, cli.materials) catch null;
+    var reload_diag: materials.Diagnostics = .init(gpa);
+    defer reload_diag.deinit();
+    var reload_msg_buf: [96]u8 = undefined;
+    var reload_msg: []const u8 = "";
+    var reload_msg_tick: u32 = 0;
+    var last_poll: u32 = 0;
     var paused = false;
     var show_hud = true;
     var pending: commands.CommandList = .{};
@@ -78,10 +94,41 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         if (input.wasPressed(c.SDL_SCANCODE_F1)) show_hud = !show_hud;
         if (input.wasPressed(c.SDL_SCANCODE_F2)) view.show_tiles = !view.show_tiles;
 
-        // Material selection: number keys pick ids 1-9.
-        for (0..9) |k| {
-            const id: u8 = @intCast(k + 1);
-            if (input.wasPressed(c.SDL_SCANCODE_1 + @as(c_int, @intCast(k))) and id < table.len) material = id;
+        // Material selection: number keys pick from the palette, 0 ignites.
+        for (palette, 0..) |name, k| {
+            if (input.wasPressed(c.SDL_SCANCODE_1 + @as(c_int, @intCast(k)))) {
+                if (lib.id(name)) |id| {
+                    material = id;
+                    igniting = false;
+                }
+            }
+        }
+        if (input.wasPressed(c.SDL_SCANCODE_0)) igniting = true;
+
+        // Hot reload: poll the materials directory every few ticks.
+        if (watcher != null and engine.tick -% last_poll >= reload_poll_ticks) {
+            last_poll = engine.tick;
+            reload_diag.clear();
+            if (watcher.?.poll(io, gpa, &lib.set, &reload_diag)) |maybe| {
+                if (maybe) |r| {
+                    var fresh = r;
+                    if (engine.reloadTables(fresh.tables, materials.Ids.resolve(&fresh.set))) |_| {
+                        lib.deinit(gpa);
+                        lib.* = .{ .set = fresh.set, .tables = fresh.tables };
+                        reload_msg = std.fmt.bufPrint(&reload_msg_buf, "materials reloaded{s}", .{if (fresh.ids_changed) " (ids changed: existing cells may be wrong)" else ""}) catch "materials reloaded";
+                        if (lib.set.get(material) == null) material = lib.id("sand") orelse 1;
+                    } else |err| {
+                        fresh.deinit(gpa);
+                        reload_msg = std.fmt.bufPrint(&reload_msg_buf, "materials reload failed: {s}", .{@errorName(err)}) catch "materials reload failed";
+                    }
+                    reload_msg_tick = engine.tick;
+                }
+            } else |err| {
+                const first = if (reload_diag.messages.items.len > 0) reload_diag.messages.items[0] else @errorName(err);
+                reload_msg = std.fmt.bufPrint(&reload_msg_buf, "materials not reloaded: {s}", .{first}) catch "materials not reloaded";
+                reload_msg_tick = engine.tick;
+                std.log.err("materials reload: {f}", .{reload_diag});
+            }
         }
         // Brush radius on the wheel.
         if (input.wheel != 0) radius = std.math.clamp(radius + (if (input.wheel > 0) @as(i32, 1) else -1) * @max(1, @divTrunc(radius, 4)), 1, 200);
@@ -128,7 +175,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         if (input.left or input.right) {
             const paint: u8 = if (input.right) materials.air else material;
             const from = last_paint orelse [2]i32{ mwx, mwy };
-            strokeLine(&pending, from, .{ mwx, mwy }, radius, paint);
+            strokeLine(&pending, from, .{ mwx, mwy }, radius, paint, input.left and igniting);
             last_paint = .{ mwx, mwy };
         } else last_paint = null;
 
@@ -143,11 +190,12 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         if (show_hud) fillHud(engine, &profile, .{
             .frame_ms = frame_ms,
             .paused = paused,
-            .material = table.names[material],
+            .material = if (igniting) "ignite" else lib.name(material),
             .radius = radius,
             .view = view,
             .cursor = .{ @mod(mwx, cell.world_size), @mod(mwy, cell.world_size) },
-            .material_count = table.len,
+            .material_count = palette.len,
+            .message = if (reload_msg.len > 0 and engine.tick -% reload_msg_tick < reload_message_ticks) reload_msg else "",
         });
 
         const src: @import("engine.zig").TickSource = .{
@@ -175,6 +223,8 @@ pub const HudInfo = struct {
     view: View = .{},
     cursor: [2]i32 = .{ 0, 0 },
     material_count: u32 = 0,
+    /// Extra status line (hot reload result).
+    message: []const u8 = "",
 };
 
 /// The HUD text: frame time, grid time, per-pass GPU ms, tool state.
@@ -189,11 +239,12 @@ pub fn fillHud(engine: *Engine, profile: *const Profile, info: HudInfo) void {
     for (0..names.count) |i| w.print("  {s} {d:.3}", .{ names.get(i), profile.smooth[i] }) catch {};
     hud.print("{s}", .{w.buffered()});
     hud.print("brush {s} r{d}  zoom {d}x  cam {d},{d}  cursor {d},{d}", .{ info.material, info.radius, info.view.scale, info.view.camera_x, info.view.camera_y, info.cursor[0], info.cursor[1] });
-    hud.print("1-{d} material  LMB paint  RMB erase  wheel size  WASD pan  =/- zoom  space pause  F2 tiles", .{info.material_count -| 1});
+    hud.print("1-{d} material  0 ignite  LMB paint  RMB erase  wheel size  WASD pan  =/- zoom  space pause  F2 tiles", .{info.material_count});
+    if (info.message.len > 0) hud.print("{s}", .{info.message});
 }
 
 /// Circles every radius/2 pixels from `a` to `b` (at least one).
-fn strokeLine(list: *commands.CommandList, a: [2]i32, b: [2]i32, radius: i32, material: u8) void {
+fn strokeLine(list: *commands.CommandList, a: [2]i32, b: [2]i32, radius: i32, material: u8, ignite: bool) void {
     const dx = b[0] - a[0];
     const dy = b[1] - a[1];
     const len: i32 = @intFromFloat(@sqrt(@as(f32, @floatFromInt(dx * dx + dy * dy))));
@@ -203,6 +254,6 @@ fn strokeLine(list: *commands.CommandList, a: [2]i32, b: [2]i32, radius: i32, ma
     while (i < n) : (i += 1) {
         const x = a[0] + if (n > 1) @divTrunc(dx * i, n - 1) else 0;
         const y = a[1] + if (n > 1) @divTrunc(dy * i, n - 1) else 0;
-        list.fillCircle(x, y, radius, material, .{});
+        if (ignite) list.igniteCircle(x, y, radius) else list.fillCircle(x, y, radius, material, .{});
     }
 }
