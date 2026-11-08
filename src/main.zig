@@ -7,12 +7,15 @@
 //!   hexe --headless --verify-determinism   (zig build verify-determinism)
 //!   hexe --world [--seed N] [--save DIR]   endless streamed world (windowed or --headless)
 //!   hexe --headless --gpu-tests            (zig build gpu-test)
+//!   hexe --headless --scenarios DIR | --scenario FILE   (zig build scenarios)
+//!   every mode: [--materials DIR] (default ./materials)
 const std = @import("std");
 const builtin = @import("builtin");
 const Engine = @import("engine.zig").Engine;
 const Crop = @import("engine.zig").Crop;
 const scenes = @import("sim/scenes.zig");
-const materials_builtin = @import("sim/materials_builtin.zig");
+const materials = @import("sim/materials.zig");
+const scenario_runner = @import("scenario_runner.zig");
 const Profile = @import("profile.zig").Profile;
 const app = @import("app.zig");
 const cell = @import("sim/cell.zig");
@@ -22,7 +25,6 @@ const verify = @import("verify.zig");
 const world_mode = @import("world_mode.zig");
 const air_test = @import("air_test.zig");
 const bodies_scenes = @import("sim/bodies_scenes.zig");
-const bodies_materials = @import("sim/bodies_materials.zig");
 const gpu_tests = @import("gpu_tests.zig");
 
 pub const std_options: std.Options = .{
@@ -77,6 +79,13 @@ pub const Cli = struct {
     /// Rigid bodies (M7): null = on in the windowed app and the bodies_*
     /// scenes, off otherwise (determinism, bench).
     bodies: ?bool = null,
+    /// Materials directory (ZON files), relative to the working directory.
+    materials: []const u8 = materials.default_dir,
+    /// Run one scenario file / every scenario in a directory, headless.
+    scenario: ?[]const u8 = null,
+    scenarios: ?[]const u8 = null,
+    /// Scenario runner: with --screenshot PREFIX, also write a PNG every N ticks.
+    shot_every: u32 = 0,
 };
 
 fn usage() void {
@@ -89,8 +98,9 @@ fn usage() void {
         \\  --view-screenshot PATH  headless: write the window view with HUD (--size, --zoom, --center)
         \\  --zoom N                integer zoom (default 2)
         \\  --center X,Y            world pixel at the view center
-        \\  --scene NAME            empty|sandbox|determinism|bench_static|bench_active|bench_mixed|noise
+        \\  --scene NAME            empty|sandbox|determinism|fire_demo|bench_static|bench_active|bench_mixed|bench_fire|noise
         \\                          particles_demo|bench_particles|bench_particles_rain|determinism_commands
+        \\                          air_demo|bench_air|bodies_crate|bodies_slab|bodies_beam|bodies_water|bodies_bench
         \\  --seed N                scene seed (default 1)
         \\  --profile PATH          per-tick per-pass GPU ms as CSV (tick,pass,ms)
         \\  --no-sleep              disable activity tiles (simulate every tile)
@@ -113,6 +123,11 @@ fn usage() void {
         \\  --air-test              air field scenarios (sealed room, corridor blast)
         \\  --bodies / --no-bodies  rigid bodies (default: on in the window and bodies_* scenes)
         \\  --gpu-tests             particle, readback mirror and event queue tests on the GPU
+        \\  --materials DIR         materials directory (default ./materials)
+        \\  --scenario FILE         run one scenario headless and check its assertions
+        \\  --scenarios DIR         run every scenario in DIR (zig build scenarios)
+        \\                          with --screenshot PREFIX: PNGs at assertion ticks
+        \\  --shot-every N          scenario runner: also a PNG every N ticks
         \\
     , .{});
 }
@@ -209,6 +224,14 @@ fn parseCli(args: []const [:0]const u8) !Cli {
             cli.air_test = true;
         } else if (std.mem.eql(u8, a, "--gpu-tests")) {
             cli.gpu_tests = true;
+        } else if (std.mem.eql(u8, a, "--materials")) {
+            cli.materials = try next(args, &i);
+        } else if (std.mem.eql(u8, a, "--scenario")) {
+            cli.scenario = try next(args, &i);
+        } else if (std.mem.eql(u8, a, "--scenarios")) {
+            cli.scenarios = try next(args, &i);
+        } else if (std.mem.eql(u8, a, "--shot-every")) {
+            cli.shot_every = try std.fmt.parseInt(u32, try next(args, &i), 10);
         } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
             usage();
             std.process.exit(0);
@@ -227,25 +250,37 @@ pub fn main(init: std.process.Init) !u8 {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     const cli = parseCli(args) catch return 2;
 
-    if (cli.verify) return verify.run(gpa, io, cli);
-    if (cli.air_test) return air_test.run(gpa, io, cli);
-    if (cli.gpu_tests) return gpu_tests.run(gpa, io, cli);
-    if (cli.bench) return bench.run(gpa, io, cli);
-    if (cli.world and cli.headless) return world_mode.runHeadless(gpa, io, cli);
-    if (!cli.headless) return app.run(gpa, io, cli);
-    return runHeadless(gpa, io, cli);
+    var lib = loadLibrary(gpa, io, cli.materials) catch return 2;
+    defer lib.deinit(gpa);
+
+    if (cli.verify) return verify.run(gpa, io, cli, &lib);
+    if (cli.air_test) return air_test.run(gpa, io, cli, &lib);
+    if (cli.gpu_tests) return gpu_tests.run(gpa, io, cli, &lib);
+    if (cli.bench) return bench.run(gpa, io, cli, &lib);
+    if (cli.scenario != null or cli.scenarios != null) return scenario_runner.run(gpa, io, cli, &lib);
+    if (cli.world and cli.headless) return world_mode.runHeadless(gpa, io, cli, &lib);
+    if (!cli.headless) return app.run(gpa, io, cli, &lib);
+    return runHeadless(gpa, io, cli, &lib);
 }
 
-fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
-    var table = materials_builtin.table();
+/// Load and validate the materials directory; prints every problem.
+pub fn loadLibrary(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !materials.Library {
+    var diag: materials.Diagnostics = .init(gpa);
+    defer diag.deinit();
+    return materials.Library.loadDir(io, gpa, dir, &diag) catch |err| {
+        std.debug.print("materials: cannot load {s} ({s}):\n{f}\n", .{ dir, @errorName(err), diag });
+        return err;
+    };
+}
+
+fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *const materials.Library) !u8 {
     // ---- bodies (M7) ----
     const bodies_on = cli.bodies orelse bodies_scenes.isBodiesScene(cli.scene);
-    if (bodies_on) bodies_materials.ensureMaterials(&table);
     // ---- end bodies ----
     const engine = try gpa.create(Engine);
     defer gpa.destroy(engine);
     try engine.init(gpa, .{
-        .table = &table,
+        .library = lib,
         .validation = cli.validation orelse (builtin.mode == .debug),
         .pipeline = .{ .sleep = cli.sleep, .noise = cli.scene == .noise, .air = cli.air and cli.scene != .determinism, .air_sleep = cli.air_sleep, .bodies = bodies_on },
     });
@@ -309,7 +344,7 @@ fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
             .radius = 8,
             .view = view,
             .cursor = center,
-            .material_count = table.len,
+            .material_count = app.palette.len,
         });
         try engine.screenshotView(io, path, view, cli.width, cli.height);
     }
@@ -320,7 +355,8 @@ test {
     _ = @import("gpu/gpu.zig");
     _ = @import("sim/cell.zig");
     _ = @import("sim/materials.zig");
-    _ = @import("sim/materials_builtin.zig");
+    _ = @import("sim/reactions.zig");
+    _ = @import("scenario_runner.zig");
     _ = @import("sim/commands.zig");
     _ = @import("sim/scenes.zig");
     _ = @import("sim/reference/grid.zig");
@@ -334,4 +370,5 @@ test {
     _ = @import("sim/bodies_sim.zig");
     _ = @import("sim/bodies_materials.zig");
     _ = @import("sim/terrain_source.zig");
+    _ = @import("sim/events.zig");
 }

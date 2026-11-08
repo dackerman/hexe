@@ -38,7 +38,7 @@ const Allocator = std.mem.Allocator;
 const BodyHandle = bodies.BodyHandle;
 const BeamHandle = bodies.BeamHandle;
 const Region = ts.Region;
-const none = materials.none;
+const none = bm.none;
 
 const log = std.log.scoped(.bodies);
 
@@ -318,8 +318,8 @@ pub const BodySim = struct {
         a.destroy(self);
     }
 
-    pub fn setMaterials(self: *BodySim, table: *const materials.Table) void {
-        self.mats = bm.Table.build(table);
+    pub fn setMaterials(self: *BodySim, set: *const materials.MaterialSet, tables: *const materials.Tables) void {
+        self.mats = bm.Table.build(set, tables);
         self.mats.apply(&self.world);
     }
 
@@ -1482,9 +1482,9 @@ pub const Bodies = struct {
         self.gpu_.deinit(self.alloc);
     }
 
-    pub fn setMaterials(self: *Bodies, table: *const materials.Table) void {
-        self.sync.setMaterials(table.gpu[0..]);
-        self.sim.setMaterials(table);
+    pub fn setMaterials(self: *Bodies, lib: *const materials.Library) void {
+        self.sync.setMaterials(lib.tables.materials[0..]);
+        self.sim.setMaterials(&lib.set, lib.tables);
     }
 
     /// Engine, before recording a frame: ticks below `completed_tick` have

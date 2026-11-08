@@ -31,6 +31,7 @@ const Air = @import("air.zig").Air;
 const Bodies = @import("bodies_sim.zig").Bodies;
 const Particles = @import("particles.zig").Particles;
 const Readback = @import("readback.zig").Readback;
+const Reactions = @import("reactions.zig").Reactions;
 
 pub const frames_in_flight = 2;
 /// Most ticks recorded into one frame (catch-up after a slow frame).
@@ -161,15 +162,18 @@ pub const Pipeline = struct {
     bodies: Bodies,
     particles: Particles,
     readback: Readback,
+    reactions: Reactions,
     // ---- end subsystems ----
 
     /// In place: `shared` points into `self`.
-    pub fn init(self: *Pipeline, ctx: *gpu.Context, config: Config, alloc: std.mem.Allocator, table: *const materials.Table) !void {
+    pub fn init(self: *Pipeline, ctx: *gpu.Context, config: Config, alloc: std.mem.Allocator, lib: *const materials.Library) !void {
+        const tables = lib.tables;
         self.config = config;
         // ---- subsystem init (order: grid first, it owns the shared images) ----
         self.grid = try Grid.init(ctx, config, alloc);
         errdefer self.grid.deinit();
-        try self.grid.uploadMaterials(table);
+        try self.grid.uploadMaterials(tables);
+        try self.grid.clearCells(materials.ambientAir(tables));
         self.applier = try commands.Applier.init(ctx, config, alloc);
         errdefer self.applier.deinit();
         self.noise = try Noise.init(ctx, config, alloc);
@@ -184,11 +188,14 @@ pub const Pipeline = struct {
         self.air.temp_slot = self.coarsen.temp.slot;
         self.bodies = try Bodies.init(ctx, config, alloc, &self.grid.cells);
         errdefer self.bodies.deinit();
-        self.bodies.setMaterials(table);
+        self.bodies.setMaterials(lib);
         self.particles = try Particles.init(ctx, config, alloc);
         errdefer self.particles.deinit();
         self.readback = try Readback.init(ctx, config, alloc);
         errdefer self.readback.deinit();
+        self.reactions = try Reactions.init(ctx, config, alloc);
+        errdefer self.reactions.deinit();
+        try self.reactions.uploadReactions(tables);
         // ---- end subsystem init ----
         self.shared = self.grid.shared();
         self.shared.solid_coarse = &self.coarsen.solid;
@@ -204,10 +211,18 @@ pub const Pipeline = struct {
         self.stream.deinit();
         self.readback.deinit();
         self.particles.deinit();
+        self.reactions.deinit();
         self.noise.deinit();
         self.applier.deinit();
         self.grid.deinit();
         // ---- end subsystem deinit ----
+    }
+
+    /// Replace the material and reaction tables (hot reload). Waits for idle.
+    pub fn uploadTables(self: *Pipeline, lib: *const materials.Library) !void {
+        try self.grid.uploadMaterials(lib.tables);
+        try self.reactions.uploadReactions(lib.tables);
+        self.bodies.setMaterials(lib);
     }
 
     /// Record one tick, in the order of docs/01-architecture.md "Frame pipeline".
@@ -232,10 +247,11 @@ pub const Pipeline = struct {
         // 7'. activity compaction: tiles marked last tick and by this tick's
         //     edits form this tick's active list (docs/decisions/10-activity-tiles.md)
         self.grid.recordCompaction(frame);
-        // 3. 8 x { reactions and heat gather (M3); Margolus movement }
+        // 3. 8 x { reactions and heat gather; Margolus movement }
         var s: u32 = 0;
         while (s < cell.substeps) : (s += 1) {
             frame.substep = s;
+            self.reactions.recordSubstep(frame);
             //    gas advection by last tick's air (M5); nothing when air is off
             self.air.recordSubstep(frame);
             self.grid.recordSubstep(frame);

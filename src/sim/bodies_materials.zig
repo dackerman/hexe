@@ -1,7 +1,8 @@
 //! Materials as the bodies layer sees them: Box2D density/friction/beam
 //! behavior and breakup thresholds per grid material id, resolved by name
-//! from whatever material table the engine runs (the hardcoded M1 table or
-//! the ZON loader's). See docs/decisions/98-bodies-gpu-materials.md.
+//! from the loaded material library (materials/*.zon). Body presets are
+//! keyed by material name. See docs/decisions/98-bodies-gpu-materials.md and
+//! 110-integrate-material-layout.md.
 const std = @import("std");
 const bodies = @import("bodies");
 const materials = @import("materials.zig");
@@ -13,7 +14,7 @@ pub const Breakup = struct {
     /// it (`shapeFactor`).
     break_dv: f32 = std.math.inf(f32),
     /// Grid material the broken pixels turn into (powder), or none.
-    rubble: u8 = materials.none,
+    rubble: u8 = none,
     /// Anchors connectivity: a component containing it never falls.
     anchor: bool = false,
 };
@@ -29,16 +30,20 @@ pub const Info = struct {
     liquid_density: f32 = 0,
 };
 
+/// "No such material" in roles and rubble: no material has id 255 in the
+/// shipped set (bodies use it only on the CPU side).
+pub const none: u8 = 255;
+
 /// Ids of the materials the bodies layer refers to by role.
 pub const Roles = struct {
-    concrete: u8 = materials.none,
-    steel: u8 = materials.none,
-    wood: u8 = materials.none,
-    stone: u8 = materials.none,
-    rubble: u8 = materials.none,
-    gravel: u8 = materials.none,
-    bedrock: u8 = materials.none,
-    water: u8 = materials.none,
+    concrete: u8 = none,
+    steel: u8 = none,
+    wood: u8 = none,
+    stone: u8 = none,
+    rubble: u8 = none,
+    gravel: u8 = none,
+    bedrock: u8 = none,
+    water: u8 = none,
 };
 
 /// kg per pixel from the grid density (1 px = 5 cm cube; grid density 100 is
@@ -51,48 +56,34 @@ pub const Table = struct {
     info: [256]Info = @splat(.{}),
     roles: Roles = .{},
 
-    pub fn build(table: *const materials.Table) Table {
+    pub fn build(set: *const materials.MaterialSet, tables: *const materials.Tables) Table {
         var t: Table = .{};
-        for (0..table.len) |i| {
-            const g = table.gpu[i];
-            const name = table.names[i];
+        for (set.materials) |mat| {
+            const i = mat.id;
+            const g = tables.materials[i];
+            const name = mat.def.name;
             var info: Info = .{};
             info.static = g.phase == @backingInt(materials.Phase.static);
             info.liquid = g.phase == @backingInt(materials.Phase.liquid);
-            info.liquid_density = if (info.liquid) kgPerPixel(g.density) else 0;
-            info.body = .{ .density = @max(kgPerPixel(g.density), 0.01), .friction = 0.7 };
-            if (std.mem.eql(u8, name, "steel")) {
-                info.body = bodies.Material.presets.steel;
-                info.breakup = .{ .break_dv = 4000 };
-            } else if (std.mem.eql(u8, name, "wood")) {
-                info.body = bodies.Material.presets.wood;
-                info.breakup = .{ .break_dv = 600 };
-            } else if (std.mem.eql(u8, name, "concrete")) {
-                info.body = bodies.Material.presets.concrete;
-                info.breakup = .{ .break_dv = 300 };
-            } else if (std.mem.eql(u8, name, "stone")) {
-                info.body.beam = bodies.Material.presets.concrete.beam;
-                info.breakup = .{ .break_dv = 300 };
-            } else if (std.mem.eql(u8, name, "glass")) {
-                info.breakup = .{ .break_dv = 120 };
-            } else if (std.mem.eql(u8, name, "bedrock")) {
-                info.breakup = .{ .anchor = true };
+            info.liquid_density = if (info.liquid) kgPerPixel(@intCast(g.density)) else 0;
+            info.body = .{ .density = @max(kgPerPixel(@intCast(g.density)), 0.01), .friction = 0.7 };
+            // Grid rubble from the material file (docs/03-materials.md:
+            // concrete -> rubble, stone -> gravel); none when it is itself.
+            if (g.rubble != i) info.breakup.rubble = @intCast(g.rubble);
+            info.breakup.anchor = g.flags & materials.Flag.anchor != 0;
+            for (presets) |p| {
+                if (!std.mem.eql(u8, name, p.name)) continue;
+                if (p.body) |b| info.body = b;
+                if (p.beam) |b| info.body.beam = b;
+                info.breakup.break_dv = p.break_dv;
+                if (p.rubble) |r| info.breakup.rubble = set.idOf(r) orelse info.breakup.rubble;
             }
             t.info[i] = info;
         }
         const r = &t.roles;
-        r.concrete = table.byName("concrete") orelse materials.none;
-        r.steel = table.byName("steel") orelse materials.none;
-        r.wood = table.byName("wood") orelse materials.none;
-        r.stone = table.byName("stone") orelse materials.none;
-        r.rubble = table.byName("rubble") orelse materials.none;
-        r.gravel = table.byName("gravel") orelse materials.none;
-        r.bedrock = table.byName("bedrock") orelse materials.none;
-        r.water = table.byName("water") orelse materials.none;
-        // Rubble products (docs/03-materials.md: concrete -> rubble, stone -> gravel).
-        if (r.concrete != materials.none) t.info[r.concrete].breakup.rubble = r.rubble;
-        if (r.stone != materials.none) t.info[r.stone].breakup.rubble = if (r.gravel != materials.none) r.gravel else r.rubble;
-        if (table.byName("glass")) |gl| t.info[gl].breakup.rubble = table.byName("sand") orelse materials.none;
+        inline for (@typeInfo(Roles).@"struct".field_names) |f| {
+            @field(r, f) = set.idOf(f) orelse none;
+        }
         return t;
     }
 
@@ -111,44 +102,38 @@ pub fn shapeFactor(w: f32, h: f32) f32 {
     return std.math.clamp(2 * short / long, 0.35, 1);
 }
 
-/// Materials the bodies layer needs (concrete, steel, wood, rubble, gravel,
-/// bedrock), appended to `table` when it lacks them, with the values of the
-/// ZON files in materials/. A table loaded from materials/ has them all and
-/// is left unchanged. Appending keeps existing ids, so scenes that do not use
-/// them (the determinism scene) are unaffected.
-pub fn ensureMaterials(table: *materials.Table) void {
-    for (extra) |d| {
-        if (table.byName(d.name) == null) _ = table.add(d) catch return;
-    }
-}
-
-const extra = [_]materials.MaterialDesc{
-    .{ .name = "concrete", .phase = .static, .density = 280, .health = 180, .conductivity = 30, .impact = .chip, .blast_threshold = 150, .blast_response = .@"break", .drag = 20, .ramp = &.{ 0x8a8a86, 0x9a9a95, 0x7c7c78, 0xa8a8a2, 0x6e6e6a } },
-    .{ .name = "steel", .phase = .static, .density = 800, .health = 255, .conductivity = 220, .conductive = true, .impact = .dent, .drag = 5, .ramp = &.{ 0x6e7782, 0x828c98, 0x5c646e, 0x98a2ae, 0x4e555e } },
-    .{ .name = "wood", .phase = .static, .density = 60, .health = 120, .conductivity = 10, .impact = .chip, .blast_threshold = 80, .blast_response = .@"break", .drag = 80, .ramp = &.{ 0x6b4423, 0x7d522c, 0x5a3a1e, 0x8f6236, 0x4e3219 } },
-    .{ .name = "rubble", .phase = .powder, .density = 170, .slide = 100, .conductivity = 25, .impact = .spray, .blast_threshold = 40, .blast_response = .fly, .drag = 25, .ramp = &.{ 0x7a756e, 0x8c867e, 0x66615b, 0x9e978e, 0x58534e } },
-    .{ .name = "gravel", .phase = .powder, .density = 180, .slide = 60, .conductivity = 35, .impact = .spray, .blast_threshold = 30, .blast_response = .fly, .drag = 20, .ramp = &.{ 0x6f6a64, 0x7d7770, 0x5f5a55, 0x8a847c, 0x544f4b } },
-    .{ .name = "bedrock", .phase = .static, .density = 1000, .conductivity = 30, .impact = .ricochet, .ramp = &.{ 0x1c1b22, 0x26252e, 0x302e3a, 0x3a3846, 0x221f29 } },
+/// Body behavior per material name. Materials not listed get a body from
+/// their grid density and no breakup.
+const Preset = struct {
+    name: []const u8,
+    body: ?bodies.Material = null,
+    beam: ?@FieldType(bodies.Material, "beam") = null,
+    break_dv: f32 = std.math.inf(f32),
+    /// Overrides the material file's rubble for body breakup.
+    rubble: ?[]const u8 = null,
 };
 
-test "ensureMaterials appends missing materials and keeps ids" {
-    const builtin = @import("materials_builtin.zig");
-    var t = builtin.table();
-    const before = t.len;
-    var missing: usize = 0;
-    for (extra) |d| {
-        if (t.byName(d.name) == null) missing += 1;
-    }
-    ensureMaterials(&t);
-    try std.testing.expectEqual(builtin.smoke, t.byName("smoke").?);
-    try std.testing.expect(t.len == before + missing);
-    const len = t.len;
-    ensureMaterials(&t);
-    try std.testing.expectEqual(len, t.len);
-    const bt = Table.build(&t);
-    try std.testing.expectEqual(t.byName("rubble").?, bt.info[bt.roles.concrete].breakup.rubble);
+const presets = [_]Preset{
+    .{ .name = "steel", .body = bodies.Material.presets.steel, .break_dv = 4000 },
+    .{ .name = "wood", .body = bodies.Material.presets.wood, .break_dv = 600 },
+    .{ .name = "concrete", .body = bodies.Material.presets.concrete, .break_dv = 300 },
+    .{ .name = "stone", .beam = bodies.Material.presets.concrete.beam, .break_dv = 300 },
+    .{ .name = "glass", .break_dv = 120, .rubble = "sand" },
+};
+
+test "body table from the shipped materials" {
+    const gpa = std.testing.allocator;
+    var diag: materials.Diagnostics = .init(gpa);
+    defer diag.deinit();
+    var lib = try materials.Library.loadDir(std.testing.io, gpa, materials.default_dir, &diag);
+    defer lib.deinit(gpa);
+    const bt = Table.build(&lib.set, lib.tables);
+    try std.testing.expectEqual(lib.id("rubble").?, bt.info[bt.roles.concrete].breakup.rubble);
+    try std.testing.expectEqual(lib.id("gravel").?, bt.info[bt.roles.stone].breakup.rubble);
+    try std.testing.expectEqual(lib.id("sand").?, bt.info[lib.id("glass").?].breakup.rubble);
     try std.testing.expect(bt.info[bt.roles.bedrock].breakup.anchor);
     try std.testing.expect(bt.info[bt.roles.water].liquid);
+    try std.testing.expect(bt.info[bt.roles.steel].static);
     try std.testing.expectApproxEqAbs(@as(f32, 0.125), bt.info[bt.roles.water].liquid_density, 1e-6);
 }
 

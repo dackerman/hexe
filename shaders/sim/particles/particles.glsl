@@ -73,19 +73,9 @@
 #define PCTRL_BUDGET 288u
 #define PCTRL_WORDS 544u
 
-// MaterialGpu.misc2 impact byte (src/sim/materials.zig Impact).
-#define IMPACT_NONE 0u
-#define IMPACT_SPLASH 1u
-#define IMPACT_SPRAY 2u
-#define IMPACT_CHIP 3u
-#define IMPACT_DENT 4u
-#define IMPACT_RICOCHET 5u
-
 // CMD_EJECT (src/sim/commands.zig eject_min_speed, eject_damage_shift).
 #define EJECT_MIN_SPEED 40u
 #define EJECT_DAMAGE_SHIFT 2u
-
-uint mat_impact(MaterialGpu m) { return (m.misc2 >> 16) & 0xffu; }
 
 struct SpawnRequest {
     vec2 pos;

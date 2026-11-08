@@ -42,14 +42,14 @@ pub const Options = struct {
 /// Builds procgen's ids from the loaded material table by name. Missing
 /// names fall back to stone (logged once, listing all of them); lava is
 /// then kept at ambient temperature (procgen guards on aliasing).
-pub fn materialIds(table: *const materials.Table) procgen.MaterialIds {
-    const stone = table.byName("stone") orelse 1;
+pub fn materialIds(lib: *const materials.Library) procgen.MaterialIds {
+    const stone = lib.id("stone") orelse 1;
     var ids: procgen.MaterialIds = undefined;
     var missing_buf: [256]u8 = undefined;
     var missing: Io.Writer = .fixed(&missing_buf);
     var n_missing: u32 = 0;
     inline for (@typeInfo(procgen.MaterialIds).@"struct".field_names) |name| {
-        @field(ids, name) = table.byName(name) orelse blk: {
+        @field(ids, name) = lib.id(name) orelse blk: {
             missing.print(" {s}", .{name}) catch {};
             n_missing += 1;
             break :blk stone;
@@ -107,11 +107,11 @@ pub const Session = struct {
 
     /// In place. Loads the window around `cam` (default: `spawn`) blocking,
     /// with every worker generating in parallel.
-    pub fn init(self: *Session, gpa: std.mem.Allocator, io: Io, engine: *Engine, table: *const materials.Table, opts: Options, cam: ?[2]i32) !void {
+    pub fn init(self: *Session, gpa: std.mem.Allocator, io: Io, engine: *Engine, lib: *const materials.Library, opts: Options, cam: ?[2]i32) !void {
         self.gpa = gpa;
         self.io = io;
         self.engine = engine;
-        self.ids = materialIds(table);
+        self.ids = materialIds(lib);
         self.save_path = opts.save_dir;
         self.timing = .{};
         self.last_tick_ns = 0;
@@ -306,12 +306,13 @@ test "cam path parses and interpolates" {
 }
 
 test "material ids fall back to stone" {
-    const t = @import("sim/materials_builtin.zig").table();
-    const ids = materialIds(&t);
+    var lib = try materials.Library.builtin(std.testing.allocator);
+    defer lib.deinit(std.testing.allocator);
+    const ids = materialIds(&lib);
     try std.testing.expectEqual(@as(u8, 0), ids.air);
-    try std.testing.expectEqual(t.byName("sand").?, ids.sand);
-    try std.testing.expectEqual(t.byName("water").?, ids.water);
-    try std.testing.expectEqual(t.byName("stone").?, ids.lava);
+    try std.testing.expectEqual(lib.id("sand").?, ids.sand);
+    try std.testing.expectEqual(lib.id("water").?, ids.water);
+    try std.testing.expectEqual(lib.id("stone").?, ids.lava); // no lava in the builtin set
 }
 
 // ---------------------------------------------------------------------------
@@ -322,26 +323,25 @@ const builtin = @import("builtin");
 const Cli = @import("main.zig").Cli;
 const View = @import("render/world.zig").View;
 const commands = @import("sim/commands.zig");
-const materials_builtin = @import("sim/materials_builtin.zig");
 const Profile = @import("profile.zig").Profile;
 const app = @import("app.zig");
 const sim_cell = @import("sim/cell.zig");
 
-fn parseEdit(text: []const u8, table: *const materials.Table) !struct { x: i32, y: i32, r: i32, m: u8 } {
+fn parseEdit(text: []const u8, lib: *const materials.Library) !struct { x: i32, y: i32, r: i32, m: u8 } {
     var it = std.mem.splitScalar(u8, text, ',');
     const x = try std.fmt.parseInt(i32, it.next() orelse return error.BadEdit, 10);
     const y = try std.fmt.parseInt(i32, it.next() orelse return error.BadEdit, 10);
     const r = try std.fmt.parseInt(i32, it.next() orelse return error.BadEdit, 10);
     const name = it.next() orelse return error.BadEdit;
-    const m = table.byName(name) orelse return error.UnknownMaterial;
+    const m = lib.id(name) orelse return error.UnknownMaterial;
     return .{ .x = x, .y = y, .r = r, .m = m };
 }
 
-fn initEngine(gpa: std.mem.Allocator, cli: Cli, table: *const materials.Table) !*Engine {
+fn initEngine(gpa: std.mem.Allocator, cli: Cli, lib: *const materials.Library) !*Engine {
     const engine = try gpa.create(Engine);
     errdefer gpa.destroy(engine);
     try engine.init(gpa, .{
-        .table = table,
+        .library = lib,
         .validation = cli.validation orelse (builtin.mode == .debug),
         .pipeline = .{ .sleep = cli.sleep },
     });
@@ -350,25 +350,24 @@ fn initEngine(gpa: std.mem.Allocator, cli: Cli, table: *const materials.Table) !
 
 /// `--world --headless`: stream along `--cam-path` (or sit at the spawn),
 /// optionally edit, probe, save and screenshot.
-pub fn runHeadless(gpa: std.mem.Allocator, io: Io, cli: Cli) !u8 {
-    const table = materials_builtin.table();
-    const engine = try initEngine(gpa, cli, &table);
+pub fn runHeadless(gpa: std.mem.Allocator, io: Io, cli: Cli, lib: *const materials.Library) !u8 {
+    const engine = try initEngine(gpa, cli, lib);
     defer gpa.destroy(engine);
     defer engine.deinit();
     var profile: Profile = .{};
     engine.profile = &profile;
-    if (cli.world_selftest) return selftest(gpa, io, engine, &table, cli);
+    if (cli.world_selftest) return selftest(gpa, io, engine, lib, cli);
 
     const session = try gpa.create(Session);
     defer gpa.destroy(session);
     const start_cam = if (cli.cam_path) |p| p.at(0) else cli.center;
-    try session.init(gpa, io, engine, &table, .{ .seed = cli.seed, .save_dir = cli.save_dir, .ops_per_tick = cli.stream_ops }, start_cam);
+    try session.init(gpa, io, engine, lib, .{ .seed = cli.seed, .save_dir = cli.save_dir, .ops_per_tick = cli.stream_ops }, start_cam);
     defer session.deinit();
 
     var edit: commands.CommandList = .{};
     edit.begin(0);
     if (cli.world_edit) |text| {
-        const e = try parseEdit(text, &table);
+        const e = try parseEdit(text, lib);
         edit.fillCircle(e.x, e.y, e.r, e.m, .{});
         session.markDirty(e.x, e.y); // also caught by the GPU bits; belt and braces
     }
@@ -407,7 +406,7 @@ pub fn runHeadless(gpa: std.mem.Allocator, io: Io, cli: Cli) !u8 {
         const v = cells[w[1] * sim_cell.world_size + w[0]];
         const m: u8 = @intCast(sim_cell.material(v));
         std.debug.print("probe {d},{d} (window {d},{d}, resident {}): cell 0x{x:0>8} material {d} ({s})\n", .{
-            p[0], p[1], w[0], w[1], session.isResident(p[0], p[1]), v, m, table.names[m],
+            p[0], p[1], w[0], w[1], session.isResident(p[0], p[1]), v, m, lib.name(m),
         });
     }
     if (cli.save_dir != null) _ = try session.save();
@@ -425,7 +424,7 @@ pub fn runHeadless(gpa: std.mem.Allocator, io: Io, cli: Cli) !u8 {
             .radius = 8,
             .view = view,
             .cursor = cam,
-            .material_count = table.len,
+            .material_count = app.palette.len,
             .world = session,
         });
         try engine.screenshotView(io, path, view, cli.width, cli.height);
@@ -444,12 +443,13 @@ fn check(ok: bool, comptime what: []const u8, args: anytype) !void {
 
 /// Upload → edit via command → takeDirty → download → save → reload, all
 /// through the real GPU sink.
-fn selftest(gpa: std.mem.Allocator, io: Io, engine: *Engine, table: *const materials.Table, cli: Cli) !u8 {
+fn selftest(gpa: std.mem.Allocator, io: Io, engine: *Engine, lib: *const materials.Library, cli: Cli) !u8 {
     const save_path = cli.save_dir orelse ".zig-cache/stream-selftest";
     Io.Dir.cwd().deleteTree(io, save_path) catch {};
     const session = try gpa.create(Session);
     defer gpa.destroy(session);
-    try session.init(gpa, io, engine, table, .{ .seed = cli.seed, .save_dir = save_path }, null);
+    try session.init(gpa, io, engine, lib, .{ .seed = cli.seed, .save_dir = save_path }, null);
+    const ids = lib.ids();
     defer session.deinit();
     const sink = engine.pipeline.stream.sink();
     std.debug.print("stream self-test (seed {d}, save {s})\n", .{ session.seed, save_path });
@@ -476,7 +476,7 @@ fn selftest(gpa: std.mem.Allocator, io: Io, engine: *Engine, table: *const mater
     // 1. Edit with a command.
     var list: commands.CommandList = .{};
     list.begin(0);
-    list.fillCircle(ex, ey, 10, materials_builtin.stone, .{});
+    list.fillCircle(ex, ey, 10, ids.stone, .{});
     try engine.frame(1, .{ .scene = .empty, .extra = list.slice() }, null);
     try engine.frame(1, .{ .scene = .empty }, null);
     try check(sink.takeDirty(slot.x, slot.y), "command edit sets the slot's dirty bit", .{});
@@ -485,14 +485,14 @@ fn selftest(gpa: std.mem.Allocator, io: Io, engine: *Engine, table: *const mater
     defer gpa.destroy(cells);
     sink.downloadChunk(slot.x, slot.y, cells);
     const center = cells[chunk.index(128, 128)];
-    try check(world.cell.material(center) == materials_builtin.stone, "download has the edit (0x{x:0>8})", .{center});
-    try check(world.cell.material(cells[chunk.index(0, 0)]) == materials_builtin.air, "download keeps the sky around it", .{});
+    try check(world.cell.material(center) == ids.stone, "download has the edit (0x{x:0>8})", .{center});
+    try check(world.cell.material(cells[chunk.index(0, 0)]) == ids.air, "download keeps the sky around it", .{});
 
     // 2. Upload a pattern: not dirty, reads back exactly.
     const pattern = try gpa.create(chunk.Cells);
     defer gpa.destroy(pattern);
     pattern.* = cells.*;
-    for (0..chunk.size) |x| pattern[chunk.index(@intCast(x), 40)] = world.cell.pack(materials_builtin.stone, 8, 200, 0, @truncate(x));
+    for (0..chunk.size) |x| pattern[chunk.index(@intCast(x), 40)] = world.cell.pack(ids.stone, 8, 200, 0, @truncate(x));
     sink.uploadChunk(slot.x, slot.y, pattern);
     for (0..3) |_| try engine.frame(1, .{ .scene = .empty }, null);
     try check(!sink.takeDirty(slot.x, slot.y), "an upload is not a change", .{});
@@ -501,7 +501,7 @@ fn selftest(gpa: std.mem.Allocator, io: Io, engine: *Engine, table: *const mater
 
     // 3. Edit again, save, reload in a fresh store.
     list.begin(1);
-    list.fillCircle(ex + 40, ey, 6, materials_builtin.stone, .{});
+    list.fillCircle(ex + 40, ey, 6, ids.stone, .{});
     try engine.frame(1, .{ .scene = .empty, .extra = list.slice() }, null);
     try engine.frame(1, .{ .scene = .empty }, null);
     session.st.slots[slot.index()].cpu_dirty = false;
@@ -524,7 +524,7 @@ fn selftest(gpa: std.mem.Allocator, io: Io, engine: *Engine, table: *const mater
         if (chunk.normalized(sky, @intCast(i), a) != b) mismatches += 1;
     }
     try check(mismatches == 0, "reloaded chunk equals the GPU's cells ({d} mismatches)", .{mismatches});
-    try check(world.cell.material(back[chunk.index(168, 128)]) == materials_builtin.stone, "second edit survived the save", .{});
+    try check(world.cell.material(back[chunk.index(168, 128)]) == ids.stone, "second edit survived the save", .{});
     std.debug.print("stream self-test passed\n", .{});
     return 0;
 }

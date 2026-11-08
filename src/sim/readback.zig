@@ -20,28 +20,12 @@ const Frame = pipeline_mod.Frame;
 const particles_mod = @import("particles.zig");
 const shaders = @import("shaders");
 
-// ---- events.glsl mirror (test "events.glsl mirror") ----
-pub const event_capacity = 4096;
-pub const event_header_words = 4;
-pub const EventKind = enum(u16) {
-    none = 0,
-    /// Gunpowder (and anything with `.flammable.event = .explode`) ignited;
-    /// the CPU answers with an explosion command (M4: `CommandList.eject`).
-    explode = 1,
-    /// A cell's `pressure_event` threshold was exceeded (air field, M5).
-    pressure = 2,
-    /// CMD_EJECT ran; payload = radius. The M4 test event.
-    eject = 3,
-    _,
-};
-
-/// One GPU event: `entries[i]` of the event buffer (8 bytes).
-pub const Event = extern struct {
-    x: u16,
-    y: u16,
-    kind: EventKind,
-    payload: u16,
-};
+// ---- the event ABI lives in events.zig (mirror of events.glsl) ----
+pub const events_abi = @import("events.zig");
+pub const event_capacity = events_abi.capacity;
+pub const event_header_words = events_abi.header_words;
+pub const EventKind = events_abi.Kind;
+pub const Event = events_abi.Event;
 
 const event_bytes = event_header_words * 4 + event_capacity * @sizeOf(Event);
 const stats_bytes = @sizeOf(particles_mod.Stats);
@@ -142,6 +126,13 @@ pub const Mirror = struct {
         const h = &self.history[t % event_history];
         if (!h.valid or h.tick != t) return null;
         return h.items[0..h.len];
+    }
+
+    /// Appends the GPU refused in tick `t` (queue full); 0 if unknown.
+    pub fn droppedAt(self: *const Mirror, t: u32) u32 {
+        const h = &self.history[t % event_history];
+        if (!h.valid or h.tick != t) return 0;
+        return h.dropped;
     }
 
     /// Events of `tick` (the newest tick read back).
@@ -367,29 +358,14 @@ fn recordCopy(cmd: vk.CommandBuffer, ctx: *gpu.Context, image: *const gpu.Image,
 
 /// CPU computation of the masks from a cell image (tests and tools; the
 /// same definition as shaders/sim/readback/mask.comp).
-pub fn computeMasks(cells: []const u32, table: *const @import("materials.zig").Table, solid: []u32, liquid: []u32) void {
+pub fn computeMasks(cells: []const u32, tables: *const @import("materials.zig").Tables, solid: []u32, liquid: []u32) void {
     @memset(solid, 0);
     @memset(liquid, 0);
     for (cells, 0..) |c, i| {
-        const phase = table.gpu[cell.material(c)].phase;
+        const phase = tables.materials[cell.material(c)].phase;
         const bit = @as(u32, 1) << @intCast(i % 32);
         if (phase == 0 or cell.has(c, cell.flag_body)) solid[i / 32] |= bit else if (phase == 2) liquid[i / 32] |= bit;
     }
-}
-
-test "events.glsl mirror" {
-    const src = @embedFile("events_glsl");
-    const constants = @import("../gpu/constants.zig");
-    var defines: [32]constants.Define = undefined;
-    const n = constants.parseDefines(src, &defines);
-    try particles_mod.checkMirror(defines[0..n], .{
-        .{ "EVENT_CAPACITY", event_capacity },
-        .{ "EVENT_HEADER_WORDS", event_header_words },
-        .{ "EVENT_NONE", @backingInt(EventKind.none) },
-        .{ "EVENT_EXPLODE", @backingInt(EventKind.explode) },
-        .{ "EVENT_PRESSURE", @backingInt(EventKind.pressure) },
-        .{ "EVENT_EJECT", @backingInt(EventKind.eject) },
-    });
 }
 
 test "mirror bit addressing and regions" {
@@ -415,7 +391,7 @@ test "mirror bit addressing and regions" {
     try std.testing.expectEqual(@as(u32, 1), m.pending_count);
     try std.testing.expectError(error.BadRegion, m.requestRegion(0, 0, 0, 1));
     history[3] = .{ .tick = 11, .valid = true, .len = 1 };
-    history[3].items[0] = .{ .x = 1, .y = 2, .kind = .eject, .payload = 4 };
+    history[3].items[0] = .init(1, 2, .eject, 4);
     m.tick = 11;
     m.valid = true;
     try std.testing.expectEqual(@as(usize, 1), m.events().len);

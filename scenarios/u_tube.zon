@@ -3,6 +3,7 @@
 .{
     .name = "u_tube",
     .description = "Water poured into the left arm of a stone U-tube for 60 ticks; 120 ticks after the pour stops both arms hold the same level.",
+    .requires = .{.flip},
     .ticks = 180,
     .fills = .{
         .{ .rect = .{ .x = 40, .y = 40, .w = 176, .h = 200 }, .material = "stone" },

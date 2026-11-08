@@ -26,8 +26,9 @@ const vk = gpu.vk;
 const cell = @import("cell.zig");
 const materials = @import("materials.zig");
 
-/// Material id reported by `materials()` for body-owned cells.
-pub const body_owned: u8 = materials.none;
+/// Material id reported by `materials()` for body-owned cells (no shipped
+/// material uses id 255).
+pub const body_owned: u8 = 255;
 
 pub const Region = struct {
     x: i32,

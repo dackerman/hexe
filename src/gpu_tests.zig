@@ -8,10 +8,11 @@ const cell = @import("sim/cell.zig");
 const commands = @import("sim/commands.zig");
 const scenes = @import("sim/scenes.zig");
 const readback = @import("sim/readback.zig");
-const m = @import("sim/materials_builtin.zig");
+/// Material ids of the loaded set, resolved by name in `run`.
+var m: materials.Ids = .{};
 const materials = @import("sim/materials.zig");
 
-const Test = struct { name: []const u8, func: *const fn (std.mem.Allocator, *Engine, *const materials.Table) anyerror!void };
+const Test = struct { name: []const u8, func: *const fn (std.mem.Allocator, *Engine, *const materials.Library) anyerror!void };
 
 const tests = [_]Test{
     .{ .name = "mirror masks and regions match a synchronous readback", .func = mirrorMatchesReadback },
@@ -22,16 +23,17 @@ const tests = [_]Test{
     .{ .name = "material budget refuses spawns beyond it", .func = budget },
 };
 
-pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
+pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *const materials.Library) !u8 {
     _ = io;
-    const table = m.table();
+    m = lib.ids();
+    const table = lib;
     var failed: u32 = 0;
     for (tests) |t| {
         const engine = try gpa.create(Engine);
         defer gpa.destroy(engine);
-        try engine.init(gpa, .{ .table = &table, .validation = cli.validation orelse false, .pipeline = .{ .sleep = cli.sleep } });
+        try engine.init(gpa, .{ .library = table, .validation = cli.validation orelse false, .pipeline = .{ .sleep = cli.sleep } });
         defer engine.deinit();
-        if (t.func(gpa, engine, &table)) |_| {
+        if (t.func(gpa, engine, table)) |_| {
             std.debug.print("PASS  {s}\n", .{t.name});
         } else |err| {
             std.debug.print("FAIL  {s}: {s}\n", .{ t.name, @errorName(err) });
@@ -59,7 +61,7 @@ fn countMaterial(cells: []const u32, mat: u32) usize {
     return n;
 }
 
-fn mirrorMatchesReadback(gpa: std.mem.Allocator, engine: *Engine, table: *const materials.Table) !void {
+fn mirrorMatchesReadback(gpa: std.mem.Allocator, engine: *Engine, table: *const materials.Library) !void {
     // The demo scene to just after the explosion: debris in flight, sand
     // piles, a pool, steel and stone. Regions requested every frame,
     // including one across the torus seam.
@@ -81,7 +83,7 @@ fn mirrorMatchesReadback(gpa: std.mem.Allocator, engine: *Engine, table: *const 
     defer gpa.free(solid);
     const liquid = try gpa.alloc(u32, readback.mask_words);
     defer gpa.free(liquid);
-    readback.computeMasks(cells, table, solid, liquid);
+    readback.computeMasks(cells, table.tables, solid, liquid);
     var bad: usize = 0;
     var solid_bits: usize = 0;
     var liquid_bits: usize = 0;
@@ -101,7 +103,7 @@ fn mirrorMatchesReadback(gpa: std.mem.Allocator, engine: *Engine, table: *const 
             const c = cells[cell.index(@intCast(x), @intCast(y))];
             const want: u8 = @intCast(cell.material(c));
             if ((mirror.material(x, y) orelse 255) != want) region_bad += 1;
-            if (mirror.isSolid(x, y) != (table.gpu[want].phase == 0)) region_bad += 1;
+            if (mirror.isSolid(x, y) != (table.tables.materials[want].phase == 0)) region_bad += 1;
         }
     }
     y = -6;
@@ -117,7 +119,7 @@ fn mirrorMatchesReadback(gpa: std.mem.Allocator, engine: *Engine, table: *const 
     std.debug.print("      tick {d}: {d} solid bits, {d} liquid bits, 2 regions, {d} particles live\n", .{ mirror.tick, solid_bits, liquid_bits, mirror.particles.live });
 }
 
-fn eventsOneTickLate(gpa: std.mem.Allocator, engine: *Engine, table: *const materials.Table) !void {
+fn eventsOneTickLate(gpa: std.mem.Allocator, engine: *Engine, table: *const materials.Library) !void {
     _ = gpa;
     _ = table;
     var list: commands.CommandList = .{};
@@ -143,9 +145,9 @@ fn eventsOneTickLate(gpa: std.mem.Allocator, engine: *Engine, table: *const mate
     try check(evs.len == 2, "{d} events, want 2", .{evs.len});
     var seen: u32 = 0;
     for (evs) |e| {
-        try check(e.kind == .eject, "kind {d}", .{@backingInt(e.kind)});
-        if (e.x == 300 and e.y == 400 and e.payload == 25) seen |= 1;
-        if (e.x == cell.world_size - 5 and e.y == 7 and e.payload == 9) seen |= 2;
+        try check(e.kind() == .eject, "kind {d}", .{@backingInt(e.kind())});
+        if (e.x == 300 and e.y == 400 and e.payload() == 25) seen |= 1;
+        if (e.x == cell.world_size - 5 and e.y == 7 and e.payload() == 9) seen |= 2;
     }
     try check(seen == 3, "events at the wrong place: {any}", .{evs});
     // The next tick has its own (empty) queue.
@@ -156,7 +158,7 @@ fn eventsOneTickLate(gpa: std.mem.Allocator, engine: *Engine, table: *const mate
     try check((engine.mirror().eventsAt(t0) orelse return error.NoEvents).len == 2, "history lost", .{});
 }
 
-fn sprayLandsConserved(gpa: std.mem.Allocator, engine: *Engine, table: *const materials.Table) !void {
+fn sprayLandsConserved(gpa: std.mem.Allocator, engine: *Engine, table: *const materials.Library) !void {
     _ = table;
     var list: commands.CommandList = .{};
     list.begin(engine.tick);
@@ -209,7 +211,7 @@ fn closedWorld(list: *commands.CommandList) void {
     list.fillRect(0, 560, cell.world_size, 600, m.stone, .{});
 }
 
-fn ejectHill(gpa: std.mem.Allocator, engine: *Engine, table: *const materials.Table) !void {
+fn ejectHill(gpa: std.mem.Allocator, engine: *Engine, table: *const materials.Library) !void {
     _ = table;
     var list: commands.CommandList = .{};
     list.begin(engine.tick);
@@ -263,7 +265,7 @@ fn ejectHill(gpa: std.mem.Allocator, engine: *Engine, table: *const materials.Ta
     try check(spread_left > 500 and spread_right > 500, "debris did not fly out: {d} left, {d} right", .{ spread_left, spread_right });
 }
 
-fn cpuSpawn(gpa: std.mem.Allocator, engine: *Engine, table: *const materials.Table) !void {
+fn cpuSpawn(gpa: std.mem.Allocator, engine: *Engine, table: *const materials.Library) !void {
     _ = gpa;
     _ = table;
     var list: commands.CommandList = .{};
@@ -277,7 +279,7 @@ fn cpuSpawn(gpa: std.mem.Allocator, engine: *Engine, table: *const materials.Tab
     try check(engine.mirror().particles.live == 100 and engine.mirror().particles.spawned == 100, "live {d} spawned {d}", .{ engine.mirror().particles.live, engine.mirror().particles.spawned });
 }
 
-fn budget(gpa: std.mem.Allocator, engine: *Engine, table: *const materials.Table) !void {
+fn budget(gpa: std.mem.Allocator, engine: *Engine, table: *const materials.Library) !void {
     _ = gpa;
     _ = table;
     engine.pipeline.particles.setBudget(m.sand, 1000);

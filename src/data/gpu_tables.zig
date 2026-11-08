@@ -2,7 +2,7 @@
 //!
 //! Two buffers are uploaded:
 //!
-//! * the material table, 256 × `MaterialGpu` (176 B each, 45 056 B), indexed
+//! * the material table, 256 × `MaterialGpu` (192 B each, 49 152 B), indexed
 //!   by the cell's material byte;
 //! * the reaction table, 256 × 256 × `ReactionEntry` (8 B each, 512 KiB),
 //!   indexed `[self][neighbor]`, flat index `self * 256 + neighbor`.
@@ -11,10 +11,12 @@
 //! integer at its natural alignment, with no implicit padding, so the Zig
 //! `extern struct` and the GLSL declaration agree byte for byte.
 //!
-//! `MaterialGpu` is std430- *and* std140-compatible: it contains only
-//! `uint` scalars followed by a `uvec4[2]` at a 16-byte-aligned offset, and
-//! its size is a multiple of 16, so the array stride is 176 under both
-//! rules. Declare it with `glsl_material_struct` below.
+//! `MaterialGpu` is the one material layout of the project: the engine
+//! uploads it unchanged and `shaders/common.glsl` declares it with
+//! `glsl_material_struct` (docs/decisions/40-reactions-material-table.md).
+//! It contains only `uint` scalars, with the ramp starting at a 16-byte
+//! aligned offset and a size that is a multiple of 16, so the std430 array
+//! stride is 192 (std140 would agree if the ramp were declared `uvec4[2]`).
 //!
 //! `ReactionEntry` is read in GLSL as one `uvec2` per entry from a std430
 //! storage buffer (`uvec2 reactions[65536]`), bytes extracted with
@@ -146,21 +148,34 @@ pub const MaterialGpu = extern struct {
     glow_to: u32,
     /// Pressure that appends a `pressure` event; 0 = never.        @136
     pressure_event: u32,
+    /// Movement word for the Margolus pass, packed so one load serves
+    /// every rule: `phase | dispersion << 8 | slide << 16 |
+    /// vertical_chance << 24` (see `moveWord`).                    @140
+    move: u32,
+    /// Movement ordering key (`sortKey`): a cell sinks into a fluid
+    /// cell below it with a strictly lower key.                    @144
+    sort_key: u32,
+    /// Gas spawned into adjacent air while burning (and the material
+    /// whose contact ignites this one); 0 (air) = none.            @148
+    flame: u32,
+    /// Velocity a ballistic particle keeps bouncing off this
+    /// material, /255; 0 = the engine default.                     @152
+    restitution: u32,
     /// Number of authored ramp colors, 4–8; `ramp` repeats them
     /// cyclically to fill all 8 slots, so `ramp[variant & 7]` is
-    /// valid as well as `ramp[variant % ramp_len]`.                @140
+    /// valid as well as `ramp[variant % ramp_len]`.                @156
     ramp_len: u32,
     /// RGBA8 colors, R in the low byte (`unpackUnorm4x8` order).
     /// Alpha is 255, 160 for translucent materials, 0 for air.
-    /// GLSL: `uvec4 ramp[2]`.                                      @144
+    /// GLSL: `uint ramp[8]` (std430 storage buffer).               @160
     ramp: [8]u32,
 };
 
 comptime {
-    std.debug.assert(@sizeOf(MaterialGpu) == 176);
+    std.debug.assert(@sizeOf(MaterialGpu) == 192);
     std.debug.assert(@offsetOf(MaterialGpu, "flags") == 100);
-    std.debug.assert(@offsetOf(MaterialGpu, "ramp_len") == 140);
-    std.debug.assert(@offsetOf(MaterialGpu, "ramp") == 144);
+    std.debug.assert(@offsetOf(MaterialGpu, "ramp_len") == 156);
+    std.debug.assert(@offsetOf(MaterialGpu, "ramp") == 160);
     std.debug.assert(@offsetOf(MaterialGpu, "ramp") % 16 == 0);
     std.debug.assert(@sizeOf(MaterialGpu) % 16 == 0);
 }
@@ -204,8 +219,12 @@ pub const glsl_material_struct =
     \\    uint glow_from;
     \\    uint glow_to;
     \\    uint pressure_event;
+    \\    uint move;
+    \\    uint sort_key;
+    \\    uint flame;
+    \\    uint restitution;
     \\    uint ramp_len;
-    \\    uvec4 ramp[2];
+    \\    uint ramp[8];
     \\};
     \\
 ;
@@ -287,6 +306,38 @@ pub const Tables = struct {
     }
 };
 
+/// Movement ordering keys (`MaterialGpu.sort_key`).
+pub const sort_key_air: u32 = 256;
+pub const sort_key_dense_base: u32 = 512;
+pub const sort_key_static: u32 = 65535;
+
+/// Movement ordering key. A cell sinks into a fluid cell below it with a
+/// strictly lower key: gases order by density below air, so they rise; every
+/// liquid and powder outranks air and orders by density among themselves.
+pub fn sortKey(phase: materials.Phase, density: u32, is_air: bool) u32 {
+    if (is_air) return sort_key_air;
+    return switch (phase) {
+        .static => sort_key_static,
+        .gas => @min(density, sort_key_air - 1),
+        .powder, .liquid => @min(sort_key_dense_base + density, sort_key_static - 1),
+    };
+}
+
+/// Powders and liquids fall every substep they can; gases rise with a chance
+/// that drops with density (smoke, density 8: 64/256).
+pub fn defaultVerticalChance(phase: materials.Phase, density: u32) u32 {
+    return switch (phase) {
+        .static => 0,
+        .powder, .liquid => 255,
+        .gas => @intCast(std.math.clamp(160 - 12 * @as(i32, @intCast(@min(density, 1000))), 24, 200)),
+    };
+}
+
+/// `MaterialGpu.move`: phase | dispersion << 8 | slide << 16 | vertical_chance << 24.
+pub fn moveWord(phase: u32, dispersion: u32, slide: u32, vertical_chance: u32) u32 {
+    return phase | dispersion << 8 | slide << 16 | vertical_chance << 24;
+}
+
 /// Splits a duration in ticks into a state-byte count and a period so that
 /// `count * period ≈ ticks` with `count ≤ 255`. The state byte is 8 bits but
 /// lifetimes run to thousands of ticks (smoke: 1200), so the GPU decrements
@@ -328,6 +379,8 @@ pub fn missingEntry(id: u8) MaterialGpu {
     e.burns_to = id;
     e.flags = Flag.missing;
     e.rubble = id;
+    e.move = moveWord(@backingInt(materials.Phase.static), 0, 0, 0);
+    e.sort_key = sort_key_static;
     e.glow_from = 255;
     e.glow_to = 255;
     e.ramp_len = 2;
@@ -395,6 +448,15 @@ pub fn packMaterial(set: *const MaterialSet, m: *const materials.Material) Mater
         .glow_from = if (d.glow) |g| toB(g.from) else 255,
         .glow_to = if (d.glow) |g| toB(g.to) else 255,
         .pressure_event = @intCast(d.pressure_event),
+        .move = moveWord(
+            @backingInt(d.phase),
+            @intCast(d.dispersion),
+            @intCast(d.slide),
+            defaultVerticalChance(d.phase, @intCast(d.density)),
+        ),
+        .sort_key = sortKey(d.phase, @intCast(d.density), id == materials.air_id),
+        .flame = materials.air_id,
+        .restitution = @intCast(d.restitution),
         .ramp_len = @intCast(d.ramp.len),
         .ramp = undefined,
     };
@@ -413,6 +475,7 @@ pub fn packMaterial(set: *const MaterialSet, m: *const materials.Material) Mater
         e.smoke = set.ref(fl.smoke, materials.air_id);
         e.burn_heat = temperature.deltaToBytes(fl.heat);
         e.burn_event = @backingInt(fl.event);
+        e.flame = set.ref(fl.flame, materials.air_id);
     }
     const alpha: u8 = if (id == materials.air_id) 0 else if (d.translucent) translucent_alpha else 255;
     for (&e.ramp, 0..) |*c, i| c.* = rgba(d.ramp[i % d.ramp.len], alpha);
@@ -475,7 +538,7 @@ fn loadShipped() !MaterialSet {
 }
 
 test "MaterialGpu layout matches the GLSL declaration" {
-    // Every field is a uint except the trailing uvec4[2] ramp; walk the GLSL
+    // Every field is a uint except the trailing uint[8] ramp; walk the GLSL
     // text and the Zig struct together.
     const info = @typeInfo(MaterialGpu).@"struct";
     var lines = std.mem.tokenizeScalar(u8, glsl_material_struct, '\n');
@@ -488,7 +551,7 @@ test "MaterialGpu layout matches the GLSL declaration" {
             try testing.expectEqual(offset, @offsetOf(MaterialGpu, name));
             offset += 4;
         } else {
-            try testing.expectEqualStrings("uvec4 " ++ name ++ "[2];", line);
+            try testing.expectEqualStrings("uint " ++ name ++ "[8];", line);
             offset = std.mem.alignForward(usize, offset, 16);
             try testing.expectEqual(offset, @offsetOf(MaterialGpu, name));
             offset += 32;
@@ -496,6 +559,21 @@ test "MaterialGpu layout matches the GLSL declaration" {
     }
     try testing.expectEqualStrings("};", lines.next().?);
     try testing.expectEqual(@sizeOf(MaterialGpu), offset);
+}
+
+test "sort key ordering" {
+    const smoke = sortKey(.gas, 8, false);
+    const steam = sortKey(.gas, 5, false);
+    const air_key = sortKey(.gas, 0, true);
+    const water = sortKey(.liquid, 100, false);
+    const oil = sortKey(.liquid, 80, false);
+    const sand = sortKey(.powder, 150, false);
+    const ash = sortKey(.powder, 30, false);
+    try testing.expect(steam < smoke and smoke < air_key); // gases rise through air
+    try testing.expect(air_key < oil and oil < water and water < sand); // oil floats, sand sinks
+    try testing.expect(ash < water); // ash floats on water
+    try testing.expect(sortKey(.static, 300, false) == sort_key_static);
+    try testing.expectEqual(@as(u32, 64), defaultVerticalChance(.gas, 8));
 }
 
 test "packTicks covers long lifetimes in one byte" {
@@ -522,7 +600,7 @@ test "tables build from the shipped set" {
     const t = try build(testing.allocator, &set);
     defer testing.allocator.destroy(t);
 
-    try testing.expectEqual(@as(usize, 256 * 176), t.materialBytes().len);
+    try testing.expectEqual(@as(usize, 256 * 192), t.materialBytes().len);
     try testing.expectEqual(@as(usize, 256 * 256 * 8), t.reactionBytes().len);
 
     const id = struct {
@@ -556,6 +634,14 @@ test "tables build from the shipped set" {
     try testing.expectEqual(@as(u32, id(&set, "charcoal")), wood.burns_to);
     try testing.expectEqual(@as(u32, id(&set, "smoke")), wood.smoke);
     try testing.expectEqual(@as(u32, temperature.toByte(300)), wood.ignite_at);
+
+    try testing.expectEqual(@as(u32, id(&set, "flame")), wood.flame);
+    try testing.expectEqual(sortKey(.static, 60, false), wood.sort_key);
+    try testing.expectEqual(@as(u32, 0), wood.move & 0xff); // static
+    try testing.expectEqual(moveWord(2, 5, 0, 255), water.move);
+    try testing.expectEqual(sort_key_dense_base + 100, water.sort_key);
+    try testing.expectEqual(sort_key_air, t.materials[0].sort_key);
+    try testing.expectEqual(@as(u32, 0), water.flame);
 
     const gunpowder = t.materials[id(&set, "gunpowder")];
     try testing.expectEqual(@as(u32, @backingInt(materials.Event.explode)), gunpowder.burn_event);

@@ -14,6 +14,18 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const temperature = @import("temperature.zig");
 
+/// Largest state value a conductive material may use besides its charge
+/// (state bits 0-5; bits 6-7 hold the charge phase).
+pub const conductive_state_max: i32 = 63;
+
+/// State-byte count `packTicks` gives a duration (mirrors gpu_tables).
+fn lifetimeCount(ticks: i32) i32 {
+    if (ticks <= 0) return 0;
+    const t: u32 = @intCast(ticks);
+    const period = (t + 254) / 255;
+    return @intCast((t + period - 1) / period);
+}
+
 /// Material id of air, built into the engine.
 pub const air_id: u8 = 0;
 /// The id space is one byte of the cell format.
@@ -54,6 +66,9 @@ pub const Flammable = struct {
     heat: i32 = 0,
     /// Event appended on ignition.
     event: Event = .none,
+    /// Gas spawned into adjacent air while burning; "air" for none. The
+    /// cell's own flame material also ignites it on contact.
+    flame: []const u8 = "flame",
 };
 
 pub const Glow = struct {
@@ -126,6 +141,9 @@ pub const Def = struct {
     impact: Impact = .none,
     /// Also ricochets hitters (steel is `.impact = .dent, .ricochet = true`).
     ricochet: bool = false,
+    /// Velocity kept by a ballistic particle bouncing off it, 0–255
+    /// (/255); 0 = the engine default. Used with `ricochet`.
+    restitution: i32 = 0,
     blast_threshold: i32 = 0,
     blast_response: BlastResponse = .fly,
     /// Material that chips and blast breakage land as; null = itself.
@@ -484,6 +502,17 @@ fn validateDef(set: *const MaterialSet, m: *const Material, diag: *Diagnostics) 
     if (d.decays_to) |n| try c.name("decays_to", n);
     if (d.lifetime > 0 and d.health > 0)
         try c.fail("lifetime", "health and lifetime both use the state byte; set only one", .{});
+    // Conductive materials keep their electric charge in state bits 6-7
+    // (docs/decisions/42-reactions-state-byte.md), so what else lives in the
+    // state byte must fit in bits 0-5.
+    if (d.conductive) {
+        if (d.health > conductive_state_max)
+            try c.fail("health", "{d} is above {d}: conductive materials keep charge in the top two state bits", .{ d.health, conductive_state_max });
+        if (d.lifetime > 0 and lifetimeCount(d.lifetime) > conductive_state_max)
+            try c.fail("lifetime", "needs a state count above {d}: conductive materials keep charge in the top two state bits", .{conductive_state_max});
+        if (d.flammable) |fl| if (d.health == 0 and lifetimeCount(fl.burn_ticks) > conductive_state_max)
+            try c.fail("flammable.burn_ticks", "needs a state count above {d}: conductive materials keep charge in the top two state bits", .{conductive_state_max});
+    }
     try c.temp("temperature", d.temperature);
     try c.range("conductivity", d.conductivity, 0, 255);
     try c.range("emits_heat", d.emits_heat, 0, 2040);
@@ -501,6 +530,8 @@ fn validateDef(set: *const MaterialSet, m: *const Material, diag: *Diagnostics) 
         try c.fail("boil.at", "{d} °C is the top of the range and can never be exceeded", .{pc.at});
     if (d.freeze) |pc| if (temperature.toByte(pc.at) == 0)
         try c.fail("freeze.at", "{d} °C is the bottom of the range and can never be undercut", .{pc.at});
+    if (d.boil != null and (d.health > 0 or d.lifetime > 0))
+        try c.fail("boil", "boiling keeps its progress (latent heat) in the state byte, which .health or .lifetime already uses", .{});
     if (d.melt != null and d.boil != null and
         temperature.toByte(d.boil.?.at) <= temperature.toByte(d.melt.?.at))
         try c.fail("boil.at", "must be above .melt.at", .{});
@@ -520,6 +551,7 @@ fn validateDef(set: *const MaterialSet, m: *const Material, diag: *Diagnostics) 
         try c.name("flammable.to", fl.to);
         if (fl.smoke) |s| try c.name("flammable.smoke", s);
         try c.range("flammable.heat", fl.heat, 0, 2040);
+        try c.name("flammable.flame", fl.flame);
         if (d.health == 0 and d.lifetime > 0)
             try c.fail("flammable", "burning without health uses the state byte, which .lifetime already uses", .{});
     }
@@ -529,6 +561,7 @@ fn validateDef(set: *const MaterialSet, m: *const Material, diag: *Diagnostics) 
     try c.range("blast_threshold", d.blast_threshold, 0, 255);
     if (d.rubble) |r| try c.name("rubble", r);
     try c.range("drag", d.drag, 0, 255);
+    try c.range("restitution", d.restitution, 0, 255);
     try c.range("pressure_event", d.pressure_event, 0, 255);
     try c.range("emissive", d.emissive, 0, 255);
     if (d.glow) |g| {
@@ -821,6 +854,18 @@ test "duplicate reaction pair is rejected naming both files" {
         .{ .path = "m/a.zon", .text = ".{ .name = \"a\", .density = 5, " ++ ramp4 ++ ", .reactions = .{ .{ .with = \"b\", .self = \"air\" } } }" },
         .{ .path = "m/b.zon", .text = ".{ .name = \"b\", .density = 5, " ++ ramp4 ++ ", .reactions = .{ .{ .with = \"a\", .other = \"air\" } } }" },
     }, "m/b.zon: .reactions[0]: pair b + a already defined at m/a.zon .reactions[0]");
+}
+
+test "conductive materials leave the top two state bits for charge" {
+    try expectLoadError(&.{
+        .{ .path = "m/a.zon", .text = ".{ .name = \"a\", .density = 5, .conductive = true, .health = 64, " ++ ramp4 ++ " }" },
+    }, "m/a.zon: .health: 64 is above 63");
+    var diag: Diagnostics = .init(testing.allocator);
+    defer diag.deinit();
+    var set = try loadSources(testing.allocator, &.{
+        .{ .path = "m/a.zon", .text = ".{ .name = \"a\", .density = 5, .conductive = true, .health = 63, " ++ ramp4 ++ " }" },
+    }, &diag);
+    set.deinit();
 }
 
 test "all errors in a set are reported, not just the first" {

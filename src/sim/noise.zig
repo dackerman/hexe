@@ -5,7 +5,8 @@ const vk = gpu.vk;
 const cell = @import("cell.zig");
 const Frame = @import("pipeline.zig").Frame;
 const shaders = @import("shaders");
-const builtin_materials = @import("materials_builtin.zig");
+/// Noise picks material ids below this (the version one set).
+const noise_materials = 31;
 const Config = @import("pipeline.zig").Config;
 const Allocator = @import("std").mem.Allocator;
 
@@ -29,7 +30,7 @@ pub const Noise = struct {
 
     fn recordInner(self: *Noise, frame: *Frame) void {
         frame.bindCompute(self.pipeline);
-        frame.push(extern struct { tick: u32, count: u32 }{ .tick = frame.tick, .count = builtin_materials.descs.len });
+        frame.push(extern struct { tick: u32, count: u32 }{ .tick = frame.tick, .count = noise_materials });
         frame.dispatch(cell.world_size / 16, cell.world_size / 16, 1);
         frame.barrier();
     }

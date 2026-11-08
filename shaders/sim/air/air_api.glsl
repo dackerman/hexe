@@ -53,11 +53,11 @@ void air_emit_mass(ivec2 px, int amount) {
 }
 
 void air_gas_created(ivec2 px, uint material) {
-    if ((mat_air_flags(MATERIALS[material]) & MATERIAL_AIR_FEEDS_AIR) != 0u) air_emit_mass(px, int(AIR_GAS_CELL_MASS));
+    if ((MATERIALS[material].flags & MATERIAL_FLAG_FEEDS_AIR) != 0u) air_emit_mass(px, int(AIR_GAS_CELL_MASS));
 }
 
 void air_gas_removed(ivec2 px, uint material) {
-    if ((mat_air_flags(MATERIALS[material]) & MATERIAL_AIR_FEEDS_AIR) != 0u) air_emit_mass(px, -int(AIR_GAS_CELL_MASS));
+    if ((MATERIALS[material].flags & MATERIAL_FLAG_FEEDS_AIR) != 0u) air_emit_mass(px, -int(AIR_GAS_CELL_MASS));
 }
 
 #endif

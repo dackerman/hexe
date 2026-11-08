@@ -66,9 +66,6 @@ pub const ctrl_mat_live = 32;
 pub const ctrl_budget = 288;
 pub const ctrl_words = 544;
 
-/// Impact enum values (materials.Impact), as the shaders name them.
-const impact_defines = .{ "IMPACT_NONE", "IMPACT_SPLASH", "IMPACT_SPRAY", "IMPACT_CHIP", "IMPACT_DENT", "IMPACT_RICOCHET" };
-
 /// `struct SpawnRequest` in particles.glsl (32 bytes).
 pub const SpawnRequest = extern struct {
     pos: [2]f32,
@@ -386,7 +383,6 @@ pub const Particles = struct {
 
 test "particles.glsl mirror" {
     const constants = @import("../gpu/constants.zig");
-    const materials = @import("materials.zig");
     const src = @embedFile("particles_glsl");
     var defines: [128]constants.Define = undefined;
     const n = constants.parseDefines(src, &defines);
@@ -426,12 +422,6 @@ test "particles.glsl mirror" {
         .{ "PCTRL_WORDS", ctrl_words },
         .{ "EJECT_MIN_SPEED", commands.eject_min_speed },
         .{ "EJECT_DAMAGE_SHIFT", commands.eject_damage_shift },
-        .{ impact_defines[0], @backingInt(materials.Impact.none) },
-        .{ impact_defines[1], @backingInt(materials.Impact.splash) },
-        .{ impact_defines[2], @backingInt(materials.Impact.spray) },
-        .{ impact_defines[3], @backingInt(materials.Impact.chip) },
-        .{ impact_defines[4], @backingInt(materials.Impact.dent) },
-        .{ impact_defines[5], @backingInt(materials.Impact.ricochet) },
     };
     try checkMirror(defines[0..n], mirrors);
 }

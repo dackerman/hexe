@@ -10,30 +10,30 @@ const Engine = @import("engine.zig").Engine;
 const cell = @import("sim/cell.zig");
 const commands = @import("sim/commands.zig");
 const scenes = @import("sim/scenes.zig");
-const materials_builtin = @import("sim/materials_builtin.zig");
+const materials = @import("sim/materials.zig");
 const reference = @import("sim/reference/grid.zig");
+const events = @import("sim/events.zig");
 
-pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
+pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *const materials.Library) !u8 {
     _ = io;
-    const table = materials_builtin.table();
     var failures: u32 = 0;
     const modes = [_]bool{ true, false };
     for (modes, 0..) |sleep, n| {
         if (!cli.sleep and sleep) continue;
         const engine = try gpa.create(Engine);
         defer gpa.destroy(engine);
-        try engine.init(gpa, .{ .table = &table, .validation = cli.validation orelse false, .pipeline = .{ .sleep = sleep, .air = false } });
+        try engine.init(gpa, .{ .library = lib, .validation = cli.validation orelse false, .pipeline = .{ .sleep = sleep, .air = false } });
         defer engine.deinit();
         if (n == 0) failures += try accessorTest(gpa, engine);
-        failures += try determinism(gpa, engine, &table, cli, sleep, .determinism, if (cli.ticks == 0) 300 else cli.ticks);
+        failures += try determinism(gpa, engine, lib, cli, sleep, .determinism, if (cli.ticks == 0) 300 else cli.ticks);
         // M4 commands (line, temperature, ignite, eject's cell edits) on a
         // fresh world, compared right after the eject tick: the particles it
         // spawned have not moved yet (docs/decisions/54-commands-m4.md).
         const e2 = try gpa.create(Engine);
         defer gpa.destroy(e2);
-        try e2.init(gpa, .{ .table = &table, .validation = cli.validation orelse false, .pipeline = .{ .sleep = sleep, .air = false } });
+        try e2.init(gpa, .{ .library = lib, .validation = cli.validation orelse false, .pipeline = .{ .sleep = sleep, .air = false } });
         defer e2.deinit();
-        failures += try determinism(gpa, e2, &table, cli, sleep, .determinism_commands, scenes.determinism_commands_ticks);
+        failures += try determinism(gpa, e2, lib, cli, sleep, .determinism_commands, scenes.determinism_commands_ticks);
     }
     if (failures == 0) {
         std.debug.print("verify-determinism: PASS\n", .{});
@@ -78,43 +78,81 @@ fn recordAccessor(cmd: vk.CommandBuffer, ctx: *gpu.Context, pipeline: vk.Pipelin
     gpu.memory.memoryBarrier(ctx, cmd, .{ .compute_shader = true }, .{ .shader_storage_write = true }, .{ .host = true }, .{ .host_read = true });
 }
 
-fn determinism(gpa: std.mem.Allocator, engine: *Engine, table: *const @import("sim/materials.zig").Table, cli: Cli, sleep: bool, scene: scenes.Scene, ticks: u32) !u32 {
+fn determinism(gpa: std.mem.Allocator, engine: *Engine, lib: *const materials.Library, cli: Cli, sleep: bool, scene: scenes.Scene, ticks: u32) !u32 {
     const seed = cli.seed;
+    const ids = lib.ids();
 
-    for (0..ticks) |_| try engine.frame(1, .{ .scene = scene, .seed = seed }, null);
+    // GPU events arrive through the readback mirror, one queue per tick;
+    // wait for every tick so none falls out of the mirror's history.
+    var gpu_events: std.ArrayList(events.Ticked) = .empty;
+    defer gpu_events.deinit(gpa);
+    var dropped: u32 = 0;
+    for (0..ticks) |k| {
+        const t: u32 = @intCast(k);
+        try engine.frame(1, .{ .scene = scene, .seed = seed }, null);
+        try engine.finish();
+        const m = engine.mirror();
+        const evs = m.eventsAt(t) orelse return error.EventsMissing;
+        for (evs) |e| try gpu_events.append(gpa, .{ .tick = t, .event = e });
+        dropped += m.droppedAt(t);
+    }
     const gpu_cells = try gpa.alloc(u32, cell.world_size * cell.world_size);
     defer gpa.free(gpu_cells);
     try engine.readbackCells(gpu_cells);
 
-    var world = try reference.World.init(gpa, table, sleep);
+    var world = try reference.World.init(gpa, lib.tables, sleep);
     defer world.deinit();
     var list: commands.CommandList = .{};
     var t: u32 = 0;
     while (t < ticks) : (t += 1) {
         list.begin(t);
-        scenes.emit(scene, t, seed, &list);
-        world.step(list.slice());
+        scenes.emit(scene, t, seed, &ids, &list);
+        try world.step(list.slice());
     }
 
     var mismatches: usize = 0;
     var counts: [256]usize = @splat(0);
     var moved: usize = 0;
+    var burning: usize = 0;
+    var charged: usize = 0;
     for (gpu_cells, world.cells, 0..) |g, c, i| {
         counts[cell.material(c)] += 1;
         moved += @intFromBool(cell.has(c, cell.flag_moved));
+        burning += @intFromBool(cell.has(c, cell.flag_burning));
+        charged += @intFromBool(lib.tables.materials[cell.material(c)].flags & materials.Flag.conductive != 0 and cell.state(c) >> cell.charge_shift != 0);
         if (g != c) {
             if (mismatches < 10) {
                 const x = i % cell.world_size;
                 const y = i / cell.world_size;
-                std.debug.print("  cell ({d},{d}): gpu 0x{x:0>8} (m{d}) cpu 0x{x:0>8} (m{d})\n", .{ x, y, g, cell.material(g), c, cell.material(c) });
+                std.debug.print("  cell ({d},{d}): gpu 0x{x:0>8} ({s}) cpu 0x{x:0>8} ({s})\n", .{ x, y, g, lib.name(@intCast(cell.material(g))), c, lib.name(@intCast(cell.material(c))) });
             }
             mismatches += 1;
         }
     }
-    std.debug.print("{s} (sleep {s}, seed {d}, {d} ticks): {d} cells differ; active tiles cpu {d} gpu {d}; stone {d} sand {d} water {d} smoke {d}, {d} moved in last substep\n", .{
-        @tagName(scene),                 if (sleep) "on" else "off", seed,                            ticks,                          mismatches,
-        world.activeTiles(),             engine.last.active_tiles,   counts[materials_builtin.stone], counts[materials_builtin.sand], counts[materials_builtin.water],
-        counts[materials_builtin.smoke], moved,
+    std.debug.print("{s} (sleep {s}, seed {d}, {d} ticks): {d} cells differ; active tiles cpu {d} gpu {d}; {d} moved in last substep, {d} burning, {d} charged\n", .{
+        @tagName(scene), if (sleep) "on" else "off", seed, ticks, mismatches, world.activeTiles(), engine.last.active_tiles, moved, burning, charged,
     });
-    return @intFromBool(mismatches != 0);
+    std.debug.print("  ", .{});
+    for (lib.set.materials) |m| {
+        if (counts[m.id] > 0 and m.id != 0) std.debug.print("{s} {d}  ", .{ m.def.name, counts[m.id] });
+    }
+    std.debug.print("\n", .{});
+
+    // Events: the same set on both sides (GPU order is not deterministic).
+    const cpu_events = world.events.items;
+    const gev = gpu_events.items;
+    std.mem.sort(events.Ticked, gev, {}, events.Ticked.lessThan);
+    std.mem.sort(events.Ticked, cpu_events, {}, events.Ticked.lessThan);
+    var events_ok = dropped == 0 and gev.len == cpu_events.len;
+    if (events_ok) for (gev, cpu_events) |a, b| {
+        events_ok = events_ok and a.eql(b);
+    };
+    var kinds: [3]usize = @splat(0);
+    for (gev) |e| switch (e.event.kind()) {
+        .explode => kinds[0] += 1,
+        .eject => kinds[1] += 1,
+        else => kinds[2] += 1,
+    };
+    std.debug.print("  events: gpu {d} (dropped {d}; explode {d}, eject {d}, other {d}) cpu {d}: {s}\n", .{ gev.len, dropped, kinds[0], kinds[1], kinds[2], cpu_events.len, if (events_ok) "match" else "MISMATCH" });
+    return @intFromBool(mismatches != 0) + @intFromBool(!events_ok);
 }

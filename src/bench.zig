@@ -5,7 +5,7 @@ const builtin = @import("builtin");
 const Cli = @import("main.zig").Cli;
 const Engine = @import("engine.zig").Engine;
 const scenes = @import("sim/scenes.zig");
-const materials_builtin = @import("sim/materials_builtin.zig");
+const materials = @import("sim/materials.zig");
 const Profile = @import("profile.zig").Profile;
 const cell = @import("sim/cell.zig");
 
@@ -34,6 +34,8 @@ const cases = [_]Case{
     .{ .name = "air field, active air tiles, static world", .scene = .bench_static, .sleep = true, .budget_ms = 0.2, .air = true },
     .{ .name = "particles: 100K sand falling, no floor", .scene = .bench_particles, .sleep = true, .budget_ms = 1.0, .metric = .particles },
     .{ .name = "particles: sand rain landing on a floor", .scene = .bench_particles_rain, .sleep = true, .budget_ms = 1.0, .metric = .particles },
+    // ---- reactions (M3) ----
+    .{ .name = "lava + water + oil + burning wood, fully active", .scene = .bench_fire, .sleep = true, .budget_ms = 2.5 },
 };
 
 /// Passes that make up "air time" (the M5 budget): coarsening and every
@@ -42,8 +44,7 @@ fn isAirPass(name: []const u8) bool {
     return std.mem.eql(u8, name, "coarsen") or std.mem.startsWith(u8, name, "air.");
 }
 
-pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
-    const table = materials_builtin.table();
+pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *const materials.Library) !u8 {
     const ticks = if (cli.ticks == 0) 300 else cli.ticks;
     std.debug.print("hexe bench: {d} ticks per scene, {s} build, warm-up 10 ticks excluded\n", .{ ticks, @tagName(builtin.mode) });
     var failed = false;
@@ -65,7 +66,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         const engine = try gpa.create(Engine);
         defer gpa.destroy(engine);
         try engine.init(gpa, .{
-            .table = &table,
+            .library = lib,
             .validation = cli.validation orelse false,
             .pipeline = .{ .sleep = case.sleep, .air = case.air, .air_sleep = case.air_sleep },
         });

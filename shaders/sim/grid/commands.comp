@@ -1,9 +1,10 @@
 #version 460
-// Apply one command (fill circle / rect / line, set temperature, ignite,
-// eject) over its bounding box. The CPU records one dispatch per command, in
-// list order, with a barrier between them, and aligns the box origin to 16
-// so each workgroup lies inside one activity tile. Changed tiles are marked
-// active (with neighbors). Spray runs in shaders/sim/particles/spray.comp.
+// Apply one command over its bounding box: a shape (circle, rect, line) with
+// an action (fill, ignite, heat, charge), or an eject. The CPU records one
+// dispatch per command, in list order, with a barrier between them, and
+// aligns the box origin to 16 so each workgroup lies inside one activity
+// tile. Changed tiles are marked active (with neighbors). Spray runs in
+// shaders/sim/particles/spray.comp, inject_pressure in the air field.
 // Mirrored by src/sim/reference/grid.zig (eject: the cell edits, assuming
 // the particle budget is not exhausted).
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
@@ -40,35 +41,41 @@ bool inside_capsule(ivec2 a, ivec2 b, int r, ivec2 p) {
     return cross * cross <= int64_t(r) * int64_t(r) * int64_t(len2);
 }
 
-bool is_circle_kind(uint kind) {
-    return kind == CMD_FILL_CIRCLE || kind == CMD_SET_TEMPERATURE || kind == CMD_IGNITE || kind == CMD_EJECT;
-}
-
 bool inside_shape(Command c, ivec2 p) {
-    if (is_circle_kind(c.kind)) {
+    uint shape = c.kind & CMD_SHAPE_MASK;
+    if (shape == CMD_FILL_CIRCLE || shape == CMD_EJECT) {
         ivec2 d = p - ivec2(c.x0, c.y0);
         return d.x * d.x + d.y * d.y <= c.x1 * c.x1;
     }
-    if (c.kind == CMD_FILL_RECT) {
+    if (shape == CMD_FILL_RECT) {
         return all(greaterThanEqual(p, ivec2(c.x0, c.y0))) && all(lessThan(p, ivec2(c.x1, c.y1)));
     }
-    if (c.kind == CMD_FILL_LINE) {
-        return inside_capsule(ivec2(c.x0, c.y0), ivec2(c.x1, c.y1), int(c.flags >> CMD_LINE_RADIUS_SHIFT), p);
+    if (shape == CMD_FILL_LINE) {
+        return inside_capsule(ivec2(c.x0, c.y0), ivec2(c.x1, c.y1), int(c.material >> CMD_LINE_RADIUS_SHIFT), p);
     }
     return false;
 }
 
-// Fill kinds: replace (only-air, coverage) with a fresh cell of c.material.
-bool apply_fill(Command c, ivec2 w, uint old) {
-    uint h = hash_salt(uint(w.x), uint(w.y), c.seed, SALT_SPAWN_VARIANT);
-    uint coverage = (c.flags >> CMD_COVERAGE_SHIFT) & 0xffu;
-    bool replace = (c.flags & CMD_FLAG_ONLY_AIR) == 0u || cell_material(old) == MATERIAL_AIR;
-    if (coverage != 0u && (h & 0xffu) >= coverage) replace = false;
-    if (!replace) return false;
-    uint cell = spawn_cell(c.material, h >> 28);
-    if (cell == old) return false;
-    imageStore(CELLS, w, uvec4(cell, 0u, 0u, 0u));
-    return true;
+// The cell after shape command `c` (spawn hash `h`) acts on `old`.
+uint apply_command(Command c, uint old, uint h) {
+    uint action = (c.kind >> CMD_ACTION_SHIFT) & 0xffu;
+    uint om = cell_material(old);
+    if (action == CMD_ACTION_IGNITE) {
+        if ((MATERIALS[om].flags & MATERIAL_FLAG_FLAMMABLE) == 0u || cell_has(old, CELL_FLAG_BURNING)) return old;
+        return cell_ignite(old, om);
+    }
+    if (action == CMD_ACTION_HEAT) return cell_with_temperature(old, (c.flags >> CMD_TEMP_SHIFT) & 0xffu);
+    if (action == CMD_ACTION_CHARGE) {
+        if (!mat_conductive(om) || cell_charge(old) != 0u) return old;
+        return cell_with_state(old, (cell_state(old) & CONDUCTIVE_STATE_MASK) | (CHARGE_HEAD << CHARGE_SHIFT));
+    }
+    uint material = c.material & 0xffu;
+    if ((c.flags & CMD_FLAG_ONLY_AIR) != 0u && om != MATERIAL_AIR) return old;
+    if ((c.flags & CMD_FLAG_ONLY_MATERIAL) != 0u && om != ((c.material >> CMD_ONLY_SHIFT) & 0xffu)) return old;
+    uint cell = spawn_cell(material, h >> 28);
+    if ((c.flags & CMD_FLAG_SET_TEMP) != 0u) cell = cell_with_temperature(cell, (c.flags >> CMD_TEMP_SHIFT) & 0xffu);
+    if ((c.flags & CMD_FLAG_SET_STATE) != 0u) cell = cell_with_state(cell, c.flags >> CMD_STATE_SHIFT);
+    return cell;
 }
 
 // Radial launch velocity for an ejected cell: away from the center, biased
@@ -83,11 +90,11 @@ vec2 eject_velocity(ivec2 d, int speed, uint h) {
     return v;
 }
 
-// The interim explosion, one cell. Speed falls off quadratically from y1 at
-// the center to 0 at the rim. Loose cells (powder, liquid, gas) at or above
-// EJECT_MIN_SPEED fly as particles; solids with health lose
-// speed >> EJECT_DAMAGE_SHIFT and, at zero, fly as their rubble (or vanish
-// to air without one). Body-owned and particle-backed cells are left alone.
+// One ejected cell. Speed falls off quadratically from y1 at the center to 0
+// at the rim. Loose cells (powder, liquid, gas) at or above EJECT_MIN_SPEED
+// fly as particles; solids with health lose speed >> EJECT_DAMAGE_SHIFT and,
+// at zero, fly as their rubble (their own material when they have none).
+// Body-owned and particle-backed cells are left alone.
 bool apply_eject(Command c, ivec2 p, ivec2 w, uint old) {
     uint m = cell_material(old);
     if (m == MATERIAL_AIR || (old & (CELL_FLAG_BODY | CELL_FLAG_PARTICLE)) != 0u) return false;
@@ -96,11 +103,10 @@ bool apply_eject(Command c, ivec2 p, ivec2 w, uint old) {
     int d2 = d.x * d.x + d.y * d.y;
     int f = ((r2 - d2) << 8) / max(r2, 1);
     int speed = (c.y1 * f) >> 8;
-    MaterialGpu mt = MATERIALS[m];
     uint h = hash_salt(uint(w.x), uint(w.y), c.seed, SALT_EJECT);
     vec2 vel = eject_velocity(d, speed, h);
-    if (mat_phase(mt.move) == PHASE_STATIC) {
-        if (mat_health(mt) == 0u) return false;
+    if (mat_phase(MATERIALS[m].move) == PHASE_STATIC) {
+        if (MATERIALS[m].health == 0u) return false;
         uint damage = uint(speed) >> EJECT_DAMAGE_SHIFT;
         if (damage == 0u) return false;
         uint hp = cell_state(old);
@@ -108,11 +114,10 @@ bool apply_eject(Command c, ivec2 p, ivec2 w, uint old) {
             imageStore(CELLS, w, uvec4(cell_with_state(old, hp - damage), 0u, 0u, 0u));
             return true;
         }
-        uint rubble = mat_rubble(mt);
-        if (rubble != MATERIAL_NONE && eject_observed(w, old, vel, rubble)) return true;
-        // No rubble, or the particle was refused: rubble stays in place.
-        uint cell = rubble != MATERIAL_NONE ? spawn_cell(rubble, cell_variant(old)) : air_hole();
-        imageStore(CELLS, w, uvec4(cell, 0u, 0u, 0u));
+        uint rubble = MATERIALS[m].rubble;
+        if (eject_observed(w, old, vel, rubble)) return true;
+        // The particle was refused: the rubble stays in place.
+        imageStore(CELLS, w, uvec4(spawn_cell(rubble, cell_variant(old)), 0u, 0u, 0u));
         return true;
     }
     if (uint(speed) < EJECT_MIN_SPEED) return false;
@@ -129,18 +134,18 @@ void main() {
         ivec2 w = wrap_coord(p);
         uint old = imageLoad(CELLS, w).x;
         bool changed = false;
-        if (c.kind == CMD_FILL_CIRCLE || c.kind == CMD_FILL_RECT || c.kind == CMD_FILL_LINE) {
-            changed = apply_fill(c, w, old);
-        } else if (c.kind == CMD_SET_TEMPERATURE) {
-            uint cell = cell_with_temperature(old, celsius_to_temp(c.y1));
-            changed = cell != old;
-            if (changed) imageStore(CELLS, w, uvec4(cell, 0u, 0u, 0u));
-        } else if (c.kind == CMD_IGNITE) {
-            changed = (MATERIALS[cell_material(old)].flags & MATERIAL_FLAG_FLAMMABLE) != 0u && !cell_has(old, CELL_FLAG_BURNING);
-            if (changed) imageStore(CELLS, w, uvec4(old | CELL_FLAG_BURNING, 0u, 0u, 0u));
-        } else if (c.kind == CMD_EJECT) {
+        if ((c.kind & CMD_SHAPE_MASK) == CMD_EJECT) {
             changed = apply_eject(c, p, w, old);
             if (p == ivec2(c.x0, c.y0)) emit_event(p, EVENT_EJECT, uint(c.x1));
+        } else {
+            uint h = hash_salt(uint(w.x), uint(w.y), c.seed, SALT_SPAWN_VARIANT);
+            uint coverage = (c.flags >> CMD_COVERAGE_SHIFT) & 0xffu;
+            bool hit = coverage == 0u || (h & 0xffu) < coverage;
+            uint cell = apply_command(c, old, h);
+            if (hit && cell != old) {
+                imageStore(CELLS, w, uvec4(cell, 0u, 0u, 0u));
+                changed = true;
+            }
         }
         if (changed) s_changed = true;
     }

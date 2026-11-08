@@ -6,7 +6,7 @@ const timestamps = gpu.timestamps;
 const FrameStats = @import("engine.zig").FrameStats;
 
 /// Passes that make up "grid time" (the M2 budget).
-pub const grid_passes = [_][]const u8{ "commands", "activity", "movement" };
+pub const grid_passes = [_][]const u8{ "commands", "activity", "reactions", "movement" };
 
 pub const Profile = struct {
     sum: [timestamps.max_names]f64 = @splat(0),

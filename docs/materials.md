@@ -60,7 +60,7 @@ strictly below it.
 | **glass** | 250 | 40 |  | 30 | melts > 1200 °C → molten_glass |  | chip | 30, break |  | 40 | 30 | translucent |  | `a8d8e8` `bce4f0` `94ccdf` `d2eef6` |
 | **ice** | 90 | 80 | -10 °C | 60 | melts > 0 °C → water |  | chip | 60, break |  | 40 |  | translucent |  | `b8e2f2` `a4d6ec` `cdeef8` `90c8e2` `e2f6fc` |
 | **moss** | 40 | 10 |  | 15 |  | ignites > 250 °C, 40 ticks → ash, smoke smoke, +16 °C/tick | chip | 20, break |  | 150 |  |  |  | `3a5a1e` `4a6e26` `5c8430` `2e4a18` |
-| **steel** | 800 | 255 |  | 220 | melts > 1500 °C → molten_steel |  | dent, ricochet | immune |  | 5 |  | glow 500–1500 °C | conductive | `6e7782` `828c98` `5c646e` `98a2ae` `4e555e` |
+| **steel** | 800 | 63 |  | 220 | melts > 1500 °C → molten_steel |  | dent, ricochet | immune |  | 5 |  | glow 500–1500 °C | conductive | `6e7782` `828c98` `5c646e` `98a2ae` `4e555e` |
 | **stone** | 300 | 200 |  | 40 | melts > 1300 °C → lava |  | chip | 200, break | gravel | 20 |  | glow 600–1300 °C |  | `5e5a56` `6c6762` `7a746e` `524e4a` `87807a` `45423f` |
 | **wood** | 60 | 120 |  | 10 |  | ignites > 300 °C, 600 ticks → charcoal, smoke smoke, +24 °C/tick | chip | 80, break |  | 80 |  |  |  | `6b4423` `7d522c` `5a3a1e` `8f6236` `4e3219` |
 
@@ -250,7 +250,7 @@ flowchart LR
 
 ## GPU table layout
 
-`MaterialGpu` (src/data/gpu_tables.zig), 176 bytes, 256 entries,
+`MaterialGpu` (src/data/gpu_tables.zig), 192 bytes, 256 entries,
 std140- and std430-compatible. Every field is a `uint`; `ramp` is
 `uvec4 ramp[2]` holding 8 RGBA8 colors.
 
@@ -291,8 +291,12 @@ std140- and std430-compatible. Every field is a `uint`; `ramp` is
 | 128 | `glow_from` |
 | 132 | `glow_to` |
 | 136 | `pressure_event` |
-| 140 | `ramp_len` |
-| 144 | `ramp` |
+| 140 | `move` |
+| 144 | `sort_key` |
+| 148 | `flame` |
+| 152 | `reserved` |
+| 156 | `ramp_len` |
+| 160 | `ramp` |
 
 `ReactionEntry`, 8 bytes, 256 × 256 entries indexed `[self * 256 + neighbor]`
 (std430 `uvec2`):

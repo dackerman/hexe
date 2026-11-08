@@ -18,7 +18,6 @@ const std = @import("std");
 const commands = @import("commands.zig");
 const cell = @import("cell.zig");
 const scenes = @import("scenes.zig");
-const m = @import("materials_builtin.zig");
 const materials = @import("materials.zig");
 const BodySim = @import("bodies_sim.zig").BodySim;
 const bodies = @import("bodies");
@@ -33,7 +32,7 @@ pub fn isBodiesScene(s: Scene) bool {
 }
 
 /// Grid part of the scene (pure function of tick, like every scene).
-pub fn terrain(scene: Scene, tick: u32, list: *commands.CommandList) void {
+pub fn terrain(scene: Scene, tick: u32, m: *const materials.Ids, list: *commands.CommandList) void {
     if (tick != 0) return;
     switch (scene) {
         .bodies_crate => {

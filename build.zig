@@ -45,6 +45,9 @@ const shader_sources = [_][]const u8{
     "sim/particles/cpu_spawn.comp",
     "sim/readback/mask.comp",
     "sim/readback/region.comp",
+    // ---- reactions (M3) ----
+    "sim/grid/reactions.comp",
+    "sim/grid/reactions_commit.comp",
     // ---- render ----
     "render/fullscreen.vert",
     "render/world.frag",
@@ -152,13 +155,16 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe.compile);
     run_cmd.step.dependOn(b.getInstallStep());
+    run_cmd.setCwd(b.path(".")); // materials/
     run_cmd.addPassthruArgs();
     b.step("run", "Run hexe").dependOn(&run_cmd.step);
 
     // ---- unit tests (CPU only) ----
     const test_step = b.step("test", "Run all unit tests (CPU only; -Dgpu-tests adds the GPU determinism check)");
     const exe_tests = b.addTest(.{ .root_module = exe.module });
-    test_step.dependOn(&b.addRunArtifact(exe_tests).step);
+    const run_exe_tests = b.addRunArtifact(exe_tests);
+    run_exe_tests.setCwd(b.path(".")); // reference reaction tests read materials/
+    test_step.dependOn(&run_exe_tests.step);
 
     // ---- data: tests and `zig build docs` ----
     const data_tests = b.addTest(.{ .root_module = data_mod });
@@ -225,6 +231,7 @@ pub fn build(b: *std.Build) void {
     });
     const verify_run = b.addRunArtifact(verify_exe.compile);
     verify_run.addArgs(&.{ "--headless", "--verify-determinism" });
+    verify_run.setCwd(b.path(".")); // materials/
     verify_run.addPassthruArgs();
     b.step("verify-determinism", "Run the seeded scenario on GPU and CPU reference and compare every cell").dependOn(&verify_run.step);
     if (gpu_tests) test_step.dependOn(&verify_run.step);
@@ -232,12 +239,14 @@ pub fn build(b: *std.Build) void {
     // ---- world streaming: GPU sink round trip (M4) ----
     const stream_run = b.addRunArtifact(verify_exe.compile);
     stream_run.addArgs(&.{ "--world-selftest", "--validation" });
+    stream_run.setCwd(b.path(".")); // materials/
     stream_run.has_side_effects = true;
     b.step("stream-test", "GPU world streaming self-test: upload, dirty bits, download, save, reload").dependOn(&stream_run.step);
     // ---- end world streaming ----
     // ---- particles (M4): GPU tests of particles, readback mirror, events ----
     const gpu_test_run = b.addRunArtifact(verify_exe.compile);
     gpu_test_run.addArgs(&.{ "--headless", "--gpu-tests" });
+    gpu_test_run.setCwd(b.path(".")); // materials/
     gpu_test_run.addPassthruArgs();
     b.step("gpu-test", "GPU tests: particles land and conserve cells, readback mirror vs synchronous readback, events one tick late").dependOn(&gpu_test_run.step);
     if (gpu_tests) test_step.dependOn(&gpu_test_run.step);
@@ -254,6 +263,7 @@ pub fn build(b: *std.Build) void {
     });
     const bench_run = b.addRunArtifact(bench_exe.compile);
     bench_run.addArgs(&.{ "--headless", "--bench" });
+    bench_run.setCwd(b.path(".")); // materials/
     bench_run.addPassthruArgs();
     bench_run.has_side_effects = true;
     b.step("bench", "Run fixed benchmark scenes headless (ReleaseFast) and print per-pass GPU ms").dependOn(&bench_run.step);
@@ -261,9 +271,18 @@ pub fn build(b: *std.Build) void {
     // ---- air field scenarios (M5): sealed room, corridor blast ----
     const air_test_run = b.addRunArtifact(bench_exe.compile);
     air_test_run.addArgs(&.{ "--headless", "--air-test" });
+    air_test_run.setCwd(b.path(".")); // materials/
     air_test_run.addPassthruArgs();
     air_test_run.has_side_effects = true;
     b.step("air-test", "Air field scenarios 3 and 4 (docs/04-fluids.md) headless on the GPU").dependOn(&air_test_run.step);
+
+    // ---- scenarios: headless GPU regression worlds (ReleaseSafe, reuses the verify binary) ----
+    const scenarios_run = b.addRunArtifact(verify_exe.compile);
+    scenarios_run.addArgs(&.{ "--headless", "--scenarios", "scenarios" });
+    scenarios_run.setCwd(b.path("."));
+    scenarios_run.addPassthruArgs();
+    scenarios_run.has_side_effects = true;
+    b.step("scenarios", "Run every scenarios/*.zon headless on the GPU and check its assertions").dependOn(&scenarios_run.step);
 }
 
 /// Shared imports with Box2D and the bodies layer built in `optimize`.

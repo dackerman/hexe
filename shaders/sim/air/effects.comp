@@ -204,16 +204,16 @@ void main() {
             uint m = cell_material(cl);
             if (m == MATERIAL_AIR || (cl & (CELL_FLAG_PARTICLE | CELL_FLAG_BODY)) != 0u) continue;
             MaterialGpu mt = MATERIALS[m];
-            uint pe = mat_pressure_event(mt);
+            uint pe = mt.pressure_event;
             if (!event_done && pe != 0u && over > float(pe)) {
                 append_event(p, AIR_EVENT_PRESSURE, uint(over));
                 event_done = true;
             }
-            uint thr = mat_blast_threshold(mt);
-            uint resp = mat_blast_response(mt);
+            uint thr = mt.blast_threshold;
+            uint resp = mt.blast_response;
             bool fly = resp == BLAST_FLY;
             float units = fly ? units_f : units_w;
-            if (!blast || thr == 0u || resp == BLAST_NONE || units <= float(thr)) continue;
+            if (!blast || thr == 0u || units <= float(thr)) continue;
             float excess = units - float(thr);
             vec2 g = fly ? gf : gw;
             vec2 gdir = dot(g, g) > 0.0 ? normalize(g) : vec2(0.0);
@@ -222,8 +222,7 @@ void main() {
             vec2 v = vel * pc.eject_scale - gdir * min(excess * pc.eject_push, pc.eject_max) + jitter * 0.5;
             float sp = length(v);
             if (sp > pc.eject_max) v *= pc.eject_max / sp;
-            uint rubble = mat_rubble(mt);
-            if (rubble == MATERIAL_NONE) rubble = m;
+            uint rubble = mt.rubble; // its own id when it has none
             // Ejected pixels become ballistic particles (M4 particle buffer);
             // `v` is px/tick, particles take px/s. The BLAST_EJECTS record is
             // kept for statistics only.

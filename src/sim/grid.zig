@@ -90,13 +90,26 @@ pub const Grid = struct {
 
     /// Replace the GPU material table. Waits for the GPU to go idle; call
     /// between frames (hot reload).
-    pub fn uploadMaterials(self: *Grid, table: *const materials.Table) !void {
+    pub fn uploadMaterials(self: *Grid, tables: *const materials.Tables) !void {
         const ctx = self.ctx;
         ctx.waitIdle();
         var staging = try gpu.Buffer.init(ctx, self.materials.size, .{ .transfer_src = true }, .cpu_to_gpu);
         defer staging.deinit(ctx);
-        @memcpy(staging.bytes(), std.mem.sliceAsBytes(&table.gpu));
+        @memcpy(staging.bytes(), tables.materialBytes());
         try ctx.runOnce(.compute, copyWhole, .{ ctx, staging.handle, self.materials.handle, self.materials.size });
+    }
+
+    /// Fill the whole cell image with `value` (a world of ambient air:
+    /// `materials.ambientAir`). Waits for the GPU.
+    pub fn clearCells(self: *Grid, value: u32) !void {
+        try self.ctx.runOnce(.compute, recordClear, .{ self.ctx, self.cells.handle, value });
+    }
+
+    fn recordClear(cmd: vk.CommandBuffer, ctx: *gpu.Context, image: vk.Image, value: u32) void {
+        gpu.memory.memoryBarrier(ctx, cmd, .{ .all_commands = true }, .{ .memory_write = true }, .{ .all_transfer = true }, .{ .transfer_write = true });
+        const color = vk.ClearColorValue{ .uint_32 = .{ value, 0, 0, 0 } };
+        ctx.vkd.cmdClearColorImage(cmd, image, .general, &color, &.{gpu.memory.color_range});
+        gpu.memory.memoryBarrier(ctx, cmd, .{ .all_transfer = true }, .{ .transfer_write = true }, .{ .all_commands = true }, .{ .memory_read = true, .memory_write = true });
     }
 
     fn copyWhole(cmd: vk.CommandBuffer, ctx: *gpu.Context, src: vk.Buffer, dst: vk.Buffer, size: u64) void {

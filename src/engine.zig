@@ -37,7 +37,9 @@ pub const Options = struct {
     vsync: bool = true,
     validation: bool = @import("builtin").mode == .debug,
     pipeline: sim_pipeline.Config = .{},
-    table: *const materials.Table,
+    /// The loaded materials: tables to upload (the data layer's packing),
+    /// names for the ids scenes paint with and the bodies layer's roles.
+    library: *const materials.Library,
 };
 
 /// What drives the ticks of one frame.
@@ -100,6 +102,10 @@ pub const Engine = struct {
     profile: ?*Profile = null,
     /// Headless captures (`captureWorld`) add the debug overlay (air field).
     capture_overlay: bool = false,
+    /// Material ids for scenes (`TickSource.scene`).
+    ids: materials.Ids = .{},
+    /// The uploaded tables (owned by the caller's `materials.Library`).
+    tables: *const materials.Tables,
 
     pub const capture_format: vk.Format = .r8g8b8a8_unorm;
 
@@ -116,6 +122,8 @@ pub const Engine = struct {
             .capture_pass = undefined,
             .staging = .{},
             .hud = undefined,
+            .ids = opts.library.ids(),
+            .tables = opts.library.tables,
         };
         try self.ctx.init(gpa, .{
             .validation = opts.validation,
@@ -125,7 +133,7 @@ pub const Engine = struct {
         errdefer self.ctx.deinit();
         const ctx = &self.ctx;
 
-        try self.pipeline.init(ctx, opts.pipeline, gpa, opts.table);
+        try self.pipeline.init(ctx, opts.pipeline, gpa, opts.library);
         errdefer self.pipeline.deinit();
 
         const timeline_info = vk.SemaphoreTypeCreateInfo{ .semaphore_type = .timeline, .initial_value = 0 };
@@ -286,7 +294,7 @@ pub const Engine = struct {
             ctx.descriptors.bind(ctx, cmd, .compute);
             for (0..ticks) |k| {
                 self.list.begin(self.tick);
-                scenes.emit(src.scene, self.tick, src.seed, &self.list);
+                scenes.emit(src.scene, self.tick, src.seed, &self.ids, &self.list);
                 if (k == 0) for (src.extra) |c| self.list.push(c);
                 // ---- bodies (M7): scripted body actions, CPU step, GPU upload ----
                 if (self.pipeline.config.bodies) {
@@ -403,6 +411,16 @@ pub const Engine = struct {
     fn resize(self: *Engine) !void {
         const width, const height = self.window.?.pixelSize();
         try self.swapchain.?.recreate(&self.ctx, width, height);
+    }
+
+    /// Replace the material and reaction tables (hot reload), the ids
+    /// scenes use and the bodies layer's material roles. Waits for the GPU
+    /// to go idle. `lib` must outlive its use by the engine.
+    pub fn reloadTables(self: *Engine, lib: *const materials.Library) !void {
+        try self.finish();
+        try self.pipeline.uploadTables(lib);
+        self.ids = lib.ids();
+        self.tables = lib.tables;
     }
 
     /// Copy the cell image into `out` (world_size^2 words). Waits for the GPU.
