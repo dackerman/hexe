@@ -4,11 +4,12 @@
 // - mass conservation when the obstacles change: a cell that became a wall
 //   (stone painted, a body moving) hands its air to its fluid neighbors
 //   through AIR_SOURCE; a cell that became fluid starts at its neighbors'
-//   mean density and takes that mass from them. Walls made of liquid are
-//   exempt (NODE_LIQUID_WALL): flowing liquid toggles cells every tick, and
-//   each toggle moved a quarter cell of air at once, a gradient the blast
-//   effects read as an explosion. Liquid now appears and disappears
-//   without moving air (docs/decisions/117-integrate-air-liquid-walls.md);
+//   mean density and takes that mass from them. Walls made of liquid or of
+//   body pixels are exempt (NODE_LIQUID_WALL): flowing liquid and moving
+//   bodies toggle cells every tick, and each toggle moved a quarter cell of
+//   air at once, a gradient the blast effects read as an explosion (it broke
+//   the floor under falling bodies). They now appear and disappear without
+//   moving air (docs/decisions/117-integrate-air-soft-walls.md);
 // - wakes the air tiles where walls changed or heat drives convection.
 // A lattice cell is a wall when solid + liquid pixels >= 2 of its 4.
 #include "common.glsl"
@@ -27,11 +28,20 @@ layout(push_constant) uniform PC {
     uint ambient_temp;
     uint first; // nonzero: initialize nodes, no conservation transfers
     uint mark; // nonzero: mark air tiles
+    uvec2 fresh; // 64-bit mask of window chunk slots streamed in this tick
 } pc;
+
+// World streaming replaced the cells of this lattice cell's chunk slot this
+// tick (256 px chunks = 128 lattice cells, 8 x 8 slots, bit y * 8 + x).
+bool fresh_at(ivec2 c) {
+    uvec2 s = (uvec2(c) & uvec2(AIR_MASK)) >> 7u;
+    uint bit = s.y * 8u + s.x;
+    return ((bit < 32u ? pc.fresh.x >> bit : pc.fresh.y >> (bit - 32u)) & 1u) != 0u;
+}
 
 bool wall_at(ivec2 c) {
     ivec2 w = air_wrap(c);
-    return imageLoad(SOLID_COARSE, w).x + imageLoad(LIQUID_COARSE, w).x >= 2u;
+    return coarse_solid(w) + imageLoad(LIQUID_COARSE, w).x >= 2u;
 }
 
 bool open_at(ivec2 c) {
@@ -45,7 +55,7 @@ void main() {
     ivec2 local = air_local(c, pc.seam);
     bool wall = wall_at(c);
     uint node = wall ? NODE_WALL : 0u;
-    if (wall && imageLoad(SOLID_COARSE, air_wrap(c)).x < 2u) node |= NODE_LIQUID_WALL;
+    if (wall && coarse_static(air_wrap(c)) < 2u) node |= NODE_LIQUID_WALL;
     for (int i = 1; i < 9; i++) {
         ivec2 n = local - LBM_E[i];
         if (air_inside(n) && wall_at(c - LBM_E[i])) node |= 1u << uint(i);
@@ -62,6 +72,18 @@ void main() {
     uint old = imageLoad(g_uimages[pc.node_slot], c).x;
     imageStore(g_uimages[pc.node_slot], c, uvec4(node));
     if (pc.first != 0u) return;
+    if (fresh_at(c)) {
+        // A streamed-in chunk: ambient air at rest, no transfers (the old
+        // chunk's air and walls belong to another place).
+        if (pc.mark != 0u) air_mark_tile(uvec2(c) / AIR_TILE);
+        if (!wall) {
+            for (int i = 0; i < 9; i++) {
+                g_air_dist[pc.dist0_slot].f[lbm_index(i, c)] = LBM_W[i];
+                g_air_dist[pc.dist1_slot].f[lbm_index(i, c)] = LBM_W[i];
+            }
+        }
+        return;
+    }
 
     bool was_wall = (old & NODE_WALL) != 0u;
     if (pc.mark != 0u && (force != 0.0 || was_wall != wall)) air_mark_tile(uvec2(c) / AIR_TILE);

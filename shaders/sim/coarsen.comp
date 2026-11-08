@@ -1,8 +1,9 @@
 #version 460
 // Obstacle coarsening (docs/04-fluids.md "Shared: obstacle coarsening"):
 // one thread per 2x2 pixel block, once per tick after movement, over the
-// whole window. Writes per block the number of solid pixels (static phase
-// or body-owned, 0-4) to SOLID_COARSE, liquid pixels to LIQUID_COARSE, and
+// whole window. Writes per block the number of static-phase pixels | the
+// number of body-owned pixels << 3 (0-4 each; coarse_solid() in
+// air_api.glsl sums them) to SOLID_COARSE, liquid pixels to LIQUID_COARSE, and
 // the mean temperature byte to a private image for the air field's
 // buoyancy. Reads cells only; never changes the grid.
 #include "common.glsl"
@@ -18,19 +19,22 @@ void main() {
     ivec2 c = ivec2(gl_GlobalInvocationID.xy);
     ivec2 p = c * 2;
     uint solid = 0u;
+    uint body = 0u;
     uint liquid = 0u;
     uint tsum = 0u;
     for (int k = 0; k < 4; k++) {
         uint cl = imageLoad(CELLS, p + ivec2(k & 1, k >> 1)).x;
         uint phase = mat_phase(MATERIALS[cell_material(cl)].move);
-        if (phase == PHASE_STATIC || cell_has(cl, CELL_FLAG_BODY)) {
+        if (cell_has(cl, CELL_FLAG_BODY)) {
+            body++;
+        } else if (phase == PHASE_STATIC) {
             solid++;
         } else if (phase == PHASE_LIQUID) {
             liquid++;
         }
         tsum += cell_temperature(cl);
     }
-    imageStore(SOLID_COARSE, c, uvec4(solid));
+    imageStore(SOLID_COARSE, c, uvec4(solid | (body << 3)));
     imageStore(LIQUID_COARSE, c, uvec4(liquid));
     imageStore(g_u8_images[pc.temp_slot], c, uvec4((tsum + 2u) >> 2));
 }

@@ -150,6 +150,10 @@ pub const Air = struct {
     /// (docs/decisions/71-air-boundaries.md). Streaming sets it to the
     /// window origin / 2 and must `resetRegion` loaded chunks.
     seam: [2]i32 = .{ 0, 0 },
+    /// Window chunk slots (bit y * 8 + x) world streaming replaced since the
+    /// last prep: their lattice cells restart as ambient air at rest, with
+    /// no wall-change transfers (set by the pipeline from the stream).
+    fresh_slots: u64 = 0,
     /// Write the 256 x 256 field to the CPU each tick.
     field_readback: bool = false,
     /// Slot of the coarsened temperature image (set by the pipeline).
@@ -589,7 +593,7 @@ pub const Air = struct {
         gpu.memory.memoryBarrier(ctx, cmd, .{ .all_transfer = true }, .{ .transfer_write = true }, .{ .compute_shader = true }, .{ .shader_storage_read = true, .shader_storage_write = true });
 
         frame.bindCompute(self.pipes[@backingInt(P.prep)]);
-        frame.push(extern struct { node: u32, temp: u32, d0: u32, d1: u32, seam: [2]i32, buoyancy: f32, ambient: u32, first: u32, mark: u32 }{
+        frame.push(extern struct { node: u32, temp: u32, d0: u32, d1: u32, seam: [2]i32, buoyancy: f32, ambient: u32, first: u32, mark: u32, fresh: [2]u32 }{
             .node = self.node.slot,
             .temp = self.temp_slot,
             .d0 = self.dist[0].slot,
@@ -599,7 +603,9 @@ pub const Air = struct {
             .ambient = self.params.ambient_temp,
             .first = @intFromBool(self.first),
             .mark = 1,
+            .fresh = .{ @truncate(self.fresh_slots), @truncate(self.fresh_slots >> 32) },
         });
+        self.fresh_slots = 0;
         frame.dispatch(size / 16, size / 16, 1);
         frame.barrier();
 

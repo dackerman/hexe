@@ -21,6 +21,9 @@ layout(set = 0, binding = BINDING_STORAGE_IMAGES, r8ui) uniform uimage2D g_u8_im
 layout(set = 0, binding = BINDING_STORAGE_IMAGES, rgba32f) uniform image2D g_f4_images[];
 
 #define SOLID_COARSE g_u8_images[SLOT_IMG_SOLID_COARSE]
+// SOLID_COARSE word: static pixels | body-owned pixels << 3 (coarsen.comp).
+uint coarse_static(ivec2 w) { return imageLoad(SOLID_COARSE, w).x & 7u; }
+uint coarse_solid(ivec2 w) { uint v = imageLoad(SOLID_COARSE, w).x; return (v & 7u) + ((v >> 3) & 7u); }
 #define LIQUID_COARSE g_u8_images[SLOT_IMG_LIQUID_COARSE]
 #define AIR_FIELD g_f4_images[SLOT_IMG_AIR]
 #define AIR_SOURCE g_uimages[SLOT_IMG_AIR_SOURCE]

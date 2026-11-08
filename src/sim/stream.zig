@@ -85,6 +85,9 @@ pub const Stream = struct {
     downloaded: u64 = 0,
 
     stats: Stats = .{},
+    /// Slots (bit y * chunks + x) uploaded since `takeUploaded` (the air
+    /// field resets them).
+    uploaded: u64 = 0,
     /// Tile columns / rows kept asleep so nothing flows across the window's
     /// seams (`setSeams`); `no_tile` = none.
     freeze_cols: [2]u32 = .{ no_tile, no_tile },
@@ -161,6 +164,12 @@ pub const Stream = struct {
         }
     }
 
+    pub fn takeUploaded(self: *Stream) u64 {
+        const u = self.uploaded;
+        self.uploaded = 0;
+        return u;
+    }
+
     pub fn sink(self: *Stream) UploadSink {
         return .{ .ptr = self, .vtable = &.{
             .uploadChunk = uploadChunk,
@@ -222,7 +231,10 @@ pub const Stream = struct {
             // Adjacent chunks' tile rings overlap each other's tiles.
             gpu.memory.computeBarrier(ctx, cmd);
         }
-        for (list) |p| self.ring_value[p.entry] = signal;
+        for (list) |p| {
+            self.ring_value[p.entry] = signal;
+            self.uploaded |= @as(u64, 1) << @intCast(p.slot_y * window.chunks + p.slot_x);
+        }
         self.stats.uploads += list.len;
         self.pending_len = 0;
     }

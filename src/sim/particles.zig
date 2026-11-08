@@ -124,10 +124,10 @@ pub const dt: f32 = 1.0 / 60.0;
 pub const gravity: f32 = 196.0;
 /// Speed cap, px per tick (3600 px/s); the DDA visits at most 2x this.
 pub const max_step: f32 = 60.0;
-/// Ballistic air drag (1/s) at material drag 255: smoke-like particles
-/// follow the air within a few ticks, sand (drag 60) keeps most of its
-/// momentum over a blast's lifetime.
-pub const air_drag: f32 = 6.0;
+/// Ballistic air drag (1/s) at material drag 255, a small term: water
+/// spray (drag 200) follows a blast's wind over a second, dirt (70) and sand
+/// (60) fall at their 600-700 px/s terminal speed in still air.
+pub const air_drag: f32 = 2.0;
 /// CPU spawns accepted per frame (`spawn`).
 pub const cpu_spawn_capacity = 4096;
 

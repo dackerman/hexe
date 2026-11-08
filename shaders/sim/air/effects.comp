@@ -73,7 +73,7 @@ float rho_or(ivec2 c, float fallback) {
 
 bool liquid_wall_at(ivec2 c) {
     ivec2 w = air_wrap(c);
-    return air_inside(air_local(c, pc.seam)) && imageLoad(SOLID_COARSE, w).x < 2u && !fluid_at(c);
+    return air_inside(air_local(c, pc.seam)) && coarse_solid(w) < 2u && !fluid_at(c);
 }
 
 // Nearest fluid cell from c along dir within `search`: density and distance.

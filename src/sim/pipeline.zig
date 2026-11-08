@@ -86,7 +86,7 @@ pub const Shared = struct {
     tile_list: *gpu.Buffer,
     /// Coarsened obstacles for the fluid solvers (src/sim/coarsen.zig),
     /// R8_UINT 1024 x 1024: solid pixels (static or body-owned) per 2 x 2
-    /// block, 0-4 (SLOT_IMG_SOLID_COARSE), and liquid pixels per block
+    /// block: static | body << 3, 0-4 each (SLOT_IMG_SOLID_COARSE), and liquid pixels per block
     /// (SLOT_IMG_LIQUID_COARSE). Written once per tick after movement.
     solid_coarse: ?*gpu.Image = null,
     liquid_coarse: ?*gpu.Image = null,
@@ -279,7 +279,9 @@ pub const Pipeline = struct {
         frame.substep = 0;
         // 4. coarsen solid mask (M5)
         self.coarsen.record(frame);
-        // 5. air field (M5): LBM steps, blast thresholds, events
+        // 5. air field (M5): LBM steps, blast thresholds, events; chunks
+        //    streamed in restart as ambient air
+        self.air.fresh_slots |= self.stream.takeUploaded();
         self.air.record(frame);
         // 6. liquid solver (M6), then ballistic particles and the spawn
         //    queue (M4)
