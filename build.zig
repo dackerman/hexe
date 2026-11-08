@@ -54,4 +54,28 @@ pub fn build(b: *std.Build) void {
     run_gendocs.addArgs(&.{ "materials", "docs/materials.md" });
     b.step("docs", "Regenerate docs/materials.md from materials/").dependOn(&run_gendocs.step);
     // --- end data ---
+
+    // --- world ---
+    const world_mod = b.createModule(.{
+        .root_source_file = b.path("src/world/world.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    exe_mod.addImport("world", world_mod);
+    const world_tests = b.addTest(.{ .root_module = world_mod });
+    test_step.dependOn(&b.addRunArtifact(world_tests).step);
+
+    const worldgen_exe = b.addExecutable(.{
+        .name = "worldgen",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/worldgen.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "world", .module = world_mod }},
+        }),
+    });
+    const worldgen_run = b.addRunArtifact(worldgen_exe);
+    worldgen_run.addPassthruArgs();
+    b.step("worldgen", "Generate a procgen preview image (world)").dependOn(&worldgen_run.step);
+    // --- end world ---
 }
