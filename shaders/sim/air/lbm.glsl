@@ -20,12 +20,21 @@ const int LBM_OPP[9] = int[9](0, 3, 4, 1, 2, 7, 8, 5, 6);
 //   bit 10     pixels of this wall cell were removed by the blast this tick:
 //              if it becomes fluid, it does not draw its air from its
 //              neighbors (no vacuum where debris was thrown out)
-//   bit 11     the wall is liquid or body pixels (prep.comp: no air transfer)
+//   bit 11     the wall is liquid or body pixels ("soft"): pending air
+//              moves through it (pending.comp)
+//   bits 12-14 ticks since this cell last changed between wall and fluid,
+//              saturating at 7 (pending.comp moves air only out of settled
+//              cells)
+//   bit 15     the wall has body pixels (prep.comp: its changes move no air)
 //   bits 16-31 vertical body force (f16, lattice units, +y down)
 #define NODE_WALL 0x200u
 #define NODE_BLASTED 0x400u
 // The wall is there because of liquid or body pixels (fewer than 2 static).
 #define NODE_LIQUID_WALL 0x800u
+#define NODE_AGE_SHIFT 12u
+#define NODE_AGE_MAX 7u
+#define NODE_BODY_WALL 0x8000u
+uint node_age(uint node) { return (node >> NODE_AGE_SHIFT) & NODE_AGE_MAX; }
 
 HEXE_BUFFER(AirDistBlock, , float f[];, g_air_dist);
 

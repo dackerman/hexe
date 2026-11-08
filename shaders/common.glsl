@@ -485,8 +485,10 @@ HEXE_BUFFER(CommandBlock, readonly, Command commands[];, g_command_buffers);
 //   SLOT_IMG_LIQUID_COARSE r8ui:   liquid pixels per 2x2 block, 0-4
 //   SLOT_IMG_AIR           rgba32f: x density (ambient 1.0), yz velocity in
 //                                   pixels per tick, w 1.0 on wall cells
-//   SLOT_IMG_AIR_SOURCE    r32ui:  per lattice cell mass to add next step,
-//                                   int32 fixed point (AIR_MASS_ONE = 1.0)
+//   SLOT_IMG_AIR_SOURCE    r32ui:  per lattice cell mass to add, int32
+//                                   fixed point (AIR_MASS_ONE = 1.0); the
+//                                   air prep moves it into its pending store
+//                                   (rate-limited, decision 107)
 //   the debug overlay image (SLOT_IMG_DEBUG_OVERLAY, owned by the
 //   renderer) gets air pressure / velocity while Frame.overlay is
 //   OVERLAY_AIR_PRESSURE / OVERLAY_AIR_VELOCITY (shaders/sim/air/overlay.comp)

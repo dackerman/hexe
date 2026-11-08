@@ -34,6 +34,10 @@ pub const Scene = enum {
     /// Air field demo (M5): an explosion in the open beside a wall and one
     /// in a corridor ending in a room, sand piles and smoke to throw.
     air_demo,
+    /// Air field (decision 107): a sealed 96 x 96 bedrock room half full of
+    /// water, fed through a 1 px pipe in its ceiling from an open reservoir
+    /// above; the water flooding in compresses the air pocket.
+    air_flood,
     /// Bench (M5): stone terrain with rooms and corridors, an explosion
     /// every 20 ticks at rotating spots, heat sources; the air field stays
     /// fully active.
@@ -79,6 +83,7 @@ pub fn emit(scene: Scene, tick: u32, seed: u32, m: *const Ids, list: *commands.C
         .bench_static => if (tick == 0) benchStatic(m, list),
         .bench_active => if (tick == 0) list.fillRect(0, 0, cell.world_size, cell.world_size, m.sand, .{ .coverage = 128 }),
         .air_demo => airDemo(tick, m, list),
+        .air_flood => if (tick == 0) airFlood(m, list),
         .bench_air => benchAir(tick, m, list),
         .bodies_crate, .bodies_slab, .bodies_beam, .bodies_water, .bodies_bench => bodies_scenes.terrain(scene, tick, m, list),
         .bench_fire => benchFire(tick, m, list),
@@ -284,6 +289,29 @@ fn airDemo(tick: u32, m: *const Ids, list: *commands.CommandList) void {
         list.explosion(560, 1380, 12, 1.0);
         list.explosion(930, 1195, 12, 1.0);
     }
+}
+
+/// `air_flood` geometry: the room interior is the 96 x 96 px square at
+/// (`air_flood_room[0]`, `air_flood_room[1]`), 8 px aligned (the 8 x 8 px
+/// field readback cells), in an 8 px bedrock shell (bedrock: a stone shell
+/// would correctly start to chip at 0.4 overpressure, decision 107). Water
+/// fills its lower half; the reservoir above (96 x 64 px, 29 px of water,
+/// open top) drains into it through a 1 px pipe in the ceiling, which ends
+/// with the room 80 % full: Boyle's law says 2.5 x ambient.
+pub const air_flood_room = [2]i32{ 976, 1000 };
+pub const air_flood_pipe_x = air_flood_room[0] + 47;
+
+fn airFlood(m: *const Ids, list: *commands.CommandList) void {
+    const x = air_flood_room[0];
+    const y = air_flood_room[1];
+    // Shell and reservoir walls.
+    list.fillRect(x - 8, y - 72, x + 104, y + 104, m.bedrock, .{});
+    list.fillRect(x, y - 72, x + 96, y - 8, materials.air, .{});
+    list.fillRect(x, y, x + 96, y + 96, materials.air, .{});
+    list.fillRect(x, y + 48, x + 96, y + 96, m.water, .{});
+    list.fillRect(x, y - 37, x + 96, y - 8, m.water, .{});
+    // The pipe through the 8 px ceiling.
+    list.fillRect(air_flood_pipe_x, y - 8, air_flood_pipe_x + 1, y, materials.air, .{});
 }
 
 fn benchAir(tick: u32, m: *const Ids, list: *commands.CommandList) void {

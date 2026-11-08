@@ -27,7 +27,7 @@ Dev machine: RTX 4090, Ryzen 7950X, 61 GB RAM, Linux, Wayland desktop.
 | `zig build verify-determinism` | GPU grid vs the CPU reference, bit for bit, cells and event sets (ReleaseSafe) |
 | `zig build scenarios` | headless GPU scenario regression suite under `scenarios/` |
 | `zig build gpu-test` | GPU tests: particles land and conserve cells, readback mirror, events one tick late |
-| `zig build air-test` | air field scenarios (sealed room, corridor blast) with their own measurements |
+| `zig build air-test` | air field scenarios (sealed room, corridor blast, flooding a sealed room, no blasts from flowing liquid and bodies) with their own measurements |
 | `zig build stream-test` | world streaming GPU round trip: upload, dirty bits, download, save, reload |
 | `zig build liquid-test` | liquid solver scenarios (U-tube, dam break, pool sleep, determinism, reactions coupling) |
 | `zig build bench` | fixed benchmark scenes headless (ReleaseFast), per-pass GPU ms against budgets |

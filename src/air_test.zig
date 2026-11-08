@@ -19,6 +19,13 @@
 //!    plugs every 8 px. Asserts the farthest destroyed plug in the corridor
 //!    is at least twice as far as in the open. Also reports the plugs at the
 //!    scenario file's distances 40, 80, 120, 160.
+//! Flooding (docs/decisions/107-air-soft-wall-compression.md): the
+//!    `air_flood` scene, a sealed 96 x 96 room half full of water fed
+//!    through a 1 px pipe. Asserts the pocket's density rises monotonically
+//!    to >= 1.15 at 3/4 full, ends at Boyle's law, and nothing is thrown.
+//! Quiet scenes (decisions 117, 107): `lighting`, `bodies_slab` and the
+//!    `liquid_dam` dam break (FLIP and cellular) with the air on: no blast
+//!    ejects, and no pixel loaded to its blast threshold.
 const std = @import("std");
 const builtin = @import("builtin");
 const Cli = @import("main.zig").Cli;
@@ -28,6 +35,7 @@ const commands = @import("sim/commands.zig");
 const materials = @import("sim/materials.zig");
 const data = @import("data");
 const abi = @import("sim/air_abi.zig");
+const scenes = @import("sim/scenes.zig");
 
 const W = cell.world_size;
 
@@ -82,12 +90,16 @@ const Ctx = struct {
     shots: ?[]const u8,
 
     fn newEngine(self: *Ctx) !*Engine {
+        return self.newEngineWith(.{});
+    }
+
+    fn newEngineWith(self: *Ctx, opts: struct { bodies: bool = false, liquid: bool = false }) !*Engine {
         const engine = try self.gpa.create(Engine);
         errdefer self.gpa.destroy(engine);
         try engine.init(self.gpa, .{
             .library = &self.lib,
             .validation = self.cli.validation orelse false,
-            .pipeline = .{ .sleep = self.cli.sleep, .air = true, .air_sleep = self.cli.air_sleep },
+            .pipeline = .{ .sleep = self.cli.sleep, .air = true, .air_sleep = self.cli.air_sleep, .bodies = opts.bodies, .liquid = opts.liquid },
         });
         // Screenshots show the air pressure overlay (the renderer's mode 2).
         if (self.shots != null) engine.renderer.settings.overlay = .air_pressure;
@@ -107,6 +119,20 @@ const Ctx = struct {
             while (xx < x + w) : (xx += 1) {
                 const c = self.cells[@as(usize, cell.wrap(yy)) * W + cell.wrap(xx)];
                 if (cell.material(c) == material) n += 1;
+            }
+        }
+        return n;
+    }
+
+    /// 2x2 blocks (lattice cells, `x`, `y` even) with fewer than 2 pixels
+    /// of `material`: open air where the rest is air.
+    fn openBlocks(self: *const Ctx, material: u8, x: i32, y: i32, w: i32, h: i32) u32 {
+        var n: u32 = 0;
+        var by = y;
+        while (by < y + h) : (by += 2) {
+            var bx = x;
+            while (bx < x + w) : (bx += 2) {
+                if (self.count(material, bx, by, 2, 2) < 2) n += 1;
             }
         }
         return n;
@@ -138,6 +164,8 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, shipped: *const materia
     var failures: u32 = 0;
     failures += try sealedRoom(&ctx);
     failures += try corridorBlast(&ctx);
+    failures += try floodRoom(&ctx);
+    failures += try quietScenes(&ctx);
     if (failures == 0) {
         std.debug.print("air-test: PASS\n", .{});
         return 0;
@@ -393,4 +421,141 @@ fn blastRun(ctx: *Ctx, in_corridor: bool) !BlastResult {
         }
     }
     return r;
+}
+
+// ---------------------------------------------------------------------------
+// Flooding a sealed room (docs/decisions/107-air-soft-wall-compression.md)
+// ---------------------------------------------------------------------------
+
+const FloodResult = struct {
+    /// Room air density when the room is 3/4 full (null: never), the tick,
+    /// and what Boyle's law says for that fill.
+    at_three_quarters: ?f32 = null,
+    tick_three_quarters: u32 = 0,
+    boyle_three_quarters: f32 = 0,
+    monotonic: bool = true,
+    dip_tick: u32 = 0,
+    dip: [2]f32 = .{ 0, 0 },
+    /// When the reservoir has drained (fill stopped rising) and 200 ticks
+    /// later: fill, density, Boyle.
+    final_fill: f32 = 0,
+    final_density: f32 = 0,
+    final_boyle: f32 = 0,
+    ticks: u32 = 0,
+    ejects: u64 = 0,
+    peak_fly: u32 = 0,
+    peak_solid: u32 = 0,
+};
+
+/// Water in the room interior (fill fraction) and the room's mean air
+/// density, every `flood_every` ticks.
+const flood_every = 4;
+const flood_max_ticks = 3000;
+const room_px: f32 = 96 * 96;
+
+fn floodRun(ctx: *Ctx, pending: bool, shots: bool) !FloodResult {
+    const engine = try ctx.newEngine();
+    defer ctx.freeEngine(engine);
+    const air = &engine.pipeline.air;
+    air.field_readback = true;
+    if (!pending) air.params.pending_cap = 0;
+    // Screenshots: red = overpressure 1:1, so the pocket does not saturate
+    // at 1.25 (gain 4) on its way to 2.5.
+    if (shots) air.params.overlay_pressure_gain = 1.0;
+    const rx, const ry = scenes.air_flood_room;
+    var r: FloodResult = .{};
+    var prev: f32 = 1.0;
+    var v0: f32 = 0;
+    var last_fill: f32 = 0;
+    var still: u32 = 0;
+    var t: u32 = 0;
+    while (t < flood_max_ticks) : (t += flood_every) {
+        try engine.frame(flood_every, .{ .scene = .air_flood }, null);
+        try engine.finish();
+        try engine.readbackCells(ctx.cells);
+        const tick = t + flood_every;
+        const water: f32 = @floatFromInt(ctx.count(ctx.ids.water, rx, ry, 96, 96));
+        const fill = water / room_px;
+        const rho = if (air.field()) |f| roomMean(f, rx, ry, 96, 96) else 1.0;
+        // Boyle's law on the air field's own volume: lattice cells with
+        // fewer than 2 water pixels (the wall rule).
+        const v: f32 = @floatFromInt(ctx.openBlocks(ctx.ids.water, rx, ry, 96, 96));
+        if (t == 0) v0 = v;
+        // Monotonic within 2e-3 of ambient until the room is 3/4 full (the
+        // falling stream and the splashes stir the pocket a little).
+        if (r.at_three_quarters == null and t > 0 and rho + 2e-3 < prev and r.monotonic) {
+            r.monotonic = false;
+            r.dip_tick = tick;
+            r.dip = .{ prev, rho };
+        }
+        prev = @max(prev, rho);
+        if (r.at_three_quarters == null and fill >= 0.75) {
+            r.at_three_quarters = rho;
+            r.tick_three_quarters = tick;
+            r.boyle_three_quarters = v0 / v;
+        }
+        if (shots and (tick == 4 or tick % 200 == 0)) try ctx.shot(engine, "flood", tick, .{ .x = rx - 40, .y = ry - 80, .w = 176, .h = 192 });
+        r.final_fill = fill;
+        r.final_density = rho;
+        r.final_boyle = v0 / v;
+        r.ticks = tick;
+        // Done 200 ticks after the reservoir ran dry.
+        still = if (fill > last_fill + 0.5 / room_px) 0 else still + flood_every;
+        last_fill = @max(last_fill, fill);
+        if (r.at_three_quarters != null and still >= 200) break;
+    }
+    r.ejects = air.total_ejects;
+    r.peak_fly = air.max_fly_load;
+    r.peak_solid = air.max_solid_load;
+    return r;
+}
+
+fn floodRoom(ctx: *Ctx) !u32 {
+    std.debug.print("\n== flooding a sealed 96x96 room half full of water through a 1 px pipe (cellular water, bedrock shell)\n", .{});
+    const legacy = try floodRun(ctx, false, false);
+    const r = try floodRun(ctx, true, true);
+    std.debug.print("  pending store off (decision 117): room density {d:.4} at fill {d:.2} (Boyle {d:.4}), {d} blast ejects\n", .{ legacy.final_density, legacy.final_fill, legacy.final_boyle, legacy.ejects });
+    std.debug.print("  3/4 full at tick {d}: room density {d:.4} (Boyle {d:.4}); drained at fill {d:.3}, tick {d}: {d:.4} (Boyle {d:.4})\n", .{ r.tick_three_quarters, r.at_three_quarters orelse 0, r.boyle_three_quarters, r.final_fill, r.ticks, r.final_density, r.final_boyle });
+    std.debug.print("  peak blast load: loose {d}, solid {d} (thousandths of the pixel's threshold)\n", .{ r.peak_fly, r.peak_solid });
+    var fails: u32 = 0;
+    fails += check(r.at_three_quarters != null, "the room fills to 3/4 within {d} ticks", .{flood_max_ticks});
+    fails += check(r.monotonic, "room air density rises monotonically (2e-3 tolerance) until 3/4 full{s}", .{if (r.monotonic) "" else " -- dip"});
+    if (!r.monotonic) std.debug.print("        first dip at tick {d}: {d:.5} -> {d:.5}\n", .{ r.dip_tick, r.dip[0], r.dip[1] });
+    const rho = r.at_three_quarters orelse 0;
+    fails += check(rho >= 1.15, "compressed: {d:.4} at 3/4 full (>= 1.15)", .{rho});
+    const err = @abs(r.final_density - r.final_boyle) / r.final_boyle;
+    fails += check(err < 0.02, "all the displaced air reached the pocket: {d:.4} vs Boyle {d:.4} ({d:.2}% off, < 2%)", .{ r.final_density, r.final_boyle, err * 100 });
+    fails += check(r.ejects == 0 and r.peak_fly < 1000, "no blast ejects while flooding ({d}), loads below the thresholds", .{r.ejects});
+    return fails;
+}
+
+// ---------------------------------------------------------------------------
+// Flowing liquid, moving bodies, condensing steam: no blasts
+// (docs/decisions/117-integrate-air-soft-walls.md, 107)
+// ---------------------------------------------------------------------------
+
+const Quiet = struct { ejects: u64, fly: u32, solid: u32 };
+
+fn quietScene(ctx: *Ctx, scene: scenes.Scene, ticks: u32, opts: struct { bodies: bool = false, liquid: bool = false }) !Quiet {
+    const engine = try ctx.newEngineWith(.{ .bodies = opts.bodies, .liquid = opts.liquid });
+    defer ctx.freeEngine(engine);
+    var t: u32 = 0;
+    while (t < ticks) : (t += 1) try engine.frame(1, .{ .scene = scene, .seed = 1 }, null);
+    try engine.finish();
+    const air = &engine.pipeline.air;
+    return .{ .ejects = air.total_ejects, .fly = air.max_fly_load, .solid = air.max_solid_load };
+}
+
+fn quietCheck(name: []const u8, q: Quiet) u32 {
+    return check(q.ejects == 0 and q.fly < 1000 and q.solid < 1000, "{s}: {d} blast ejects, peak load loose {d}, solid {d} (thousandths of the threshold)", .{ name, q.ejects, q.fly, q.solid });
+}
+
+fn quietScenes(ctx: *Ctx) !u32 {
+    std.debug.print("\n== flowing liquid, moving bodies and condensing steam throw nothing and break nothing\n", .{});
+    var fails: u32 = 0;
+    fails += quietCheck("lighting, 400 ticks (lava pool, water tank, steam under a glass pane, flame)", try quietScene(ctx, .lighting, 400, .{}));
+    fails += quietCheck("bodies_slab, 500 ticks (a slab falls and shatters)", try quietScene(ctx, .bodies_slab, 500, .{ .bodies = true }));
+    fails += quietCheck("liquid_dam, 400 ticks, FLIP (dam break)", try quietScene(ctx, .liquid_dam, 400, .{ .liquid = true }));
+    fails += quietCheck("liquid_dam, 400 ticks, cellular (dam break)", try quietScene(ctx, .liquid_dam, 400, .{}));
+    return fails;
 }

@@ -28,3 +28,8 @@ removing liquids from the wall definition (air would flow through water).
 **Consequences**: liquid flooding a sealed room no longer compresses its
 air, and a body moving into a sealed room neither. The sealed-room harness
 gets its pressure from emulated and real steam, not from water.
+
+**Superseded** for liquid walls, static walls and gas sources by
+docs/decisions/107-air-soft-wall-compression.md: their mass goes through a
+rate-limited pending store, so flooding compresses sealed rooms again
+without fake blasts; walls with body pixels still move no air.

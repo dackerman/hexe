@@ -6,8 +6,10 @@
 //                            per tick, w 1.0 if the cell is a wall
 //   air_velocity(px)         the velocity alone, pixels per tick
 //   air_emit_mass(px, m)     add m (AIR_MASS_ONE = one lattice cell of
-//                            ambient air; negative removes) at pixel px,
-//                            applied in the next LBM step; wakes the tile
+//                            ambient air; negative removes) at pixel px;
+//                            wakes the tile. It enters the air through the
+//                            pending store, at most Params.pending_cap per
+//                            cell per tick around px (decision 107)
 //   air_gas_created(px, mat) call when a pass turns a cell into `mat`: adds
 //                            AIR_GAS_CELL_MASS if mat has feeds_air
 //   air_gas_removed(px, mat) the reverse, when such a gas cell disappears

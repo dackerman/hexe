@@ -1,15 +1,22 @@
 #version 460
 // Air field, once per tick after coarsening, over the whole lattice:
-// - node word per cell: wall flag, which pull sources are walls, buoyancy;
-// - mass conservation when the obstacles change: a cell that became a wall
-//   (stone painted, a body moving) hands its air to its fluid neighbors
-//   through AIR_SOURCE; a cell that became fluid starts at its neighbors'
-//   mean density and takes that mass from them. Walls made of liquid or of
-//   body pixels are exempt (NODE_LIQUID_WALL): flowing liquid and moving
-//   bodies toggle cells every tick, and each toggle moved a quarter cell of
-//   air at once, a gradient the blast effects read as an explosion (it broke
-//   the floor under falling bodies). They now appear and disappear without
-//   moving air (docs/decisions/117-integrate-air-soft-walls.md);
+// - node word per cell: wall flag, which pull sources are walls, buoyancy,
+//   soft (liquid or body) and body flags, ticks since the cell last changed;
+// - mass conservation when the obstacles change, through the pending store
+//   (docs/decisions/107-air-soft-wall-compression.md): a cell that became a
+//   wall books the air it covered (+rho), a cell that became fluid starts at
+//   its fluid neighbors' mean density and, if it was liquid, books that as
+//   a debt (-rho); pending.comp lets the store into the air at a bounded
+//   rate. Before 107 the mass moved at once (a quarter cell into each
+//   neighbor), a gradient the blast effects read as an explosion whenever
+//   liquid flowed, a body moved or a wall was removed beside a pool
+//   (docs/decisions/117-integrate-air-soft-walls.md). Walls with body
+//   pixels move no air (117: a falling body would carry its displaced air
+//   inside it and squeeze it into the cracks it lands on); rock that opens
+//   (dug, burnt, blasted) starts at the mean without a debt;
+// - every other mass source of the tick (AIR_SOURCE: gas created or
+//   removed by reactions) moves into the pending store too, so a steam
+//   puff condensing under a pane does not implode and throw its droplets;
 // - wakes the air tiles where walls changed or heat drives convection.
 // A lattice cell is a wall when solid + liquid pixels >= 2 of its 4.
 #include "common.glsl"
@@ -29,6 +36,9 @@ layout(push_constant) uniform PC {
     uint first; // nonzero: initialize nodes, no conservation transfers
     uint mark; // nonzero: mark air tiles
     uvec2 fresh; // 64-bit mask of window chunk slots streamed in this tick
+    uint pending_slot; // pending store read by this tick's pending.comp (int32)
+    uint pending_other; // the other ping-pong half (cleared on `first`)
+    uint pending; // nonzero: wall changes and sources go through the pending store
 } pc;
 
 // World streaming replaced the cells of this lattice cell's chunk slot this
@@ -44,18 +54,16 @@ bool wall_at(ivec2 c) {
     return coarse_solid(w) + imageLoad(LIQUID_COARSE, w).x >= 2u;
 }
 
-bool open_at(ivec2 c) {
-    return air_inside(air_local(c, pc.seam)) && !wall_at(c);
-}
-
 const ivec2 N4[4] = ivec2[4](ivec2(1, 0), ivec2(0, 1), ivec2(-1, 0), ivec2(0, -1));
 
 void main() {
     ivec2 c = ivec2(gl_GlobalInvocationID.xy);
     ivec2 local = air_local(c, pc.seam);
+    ivec2 w = air_wrap(c);
     bool wall = wall_at(c);
     uint node = wall ? NODE_WALL : 0u;
-    if (wall && coarse_static(air_wrap(c)) < 2u) node |= NODE_LIQUID_WALL;
+    if (wall && coarse_static(w) < 2u) node |= NODE_LIQUID_WALL;
+    if (wall && coarse_solid(w) > coarse_static(w)) node |= NODE_BODY_WALL;
     for (int i = 1; i < 9; i++) {
         ivec2 n = local - LBM_E[i];
         if (air_inside(n) && wall_at(c - LBM_E[i])) node |= 1u << uint(i);
@@ -70,11 +78,21 @@ void main() {
     node |= packHalf2x16(vec2(force, 0.0)) << 16;
 
     uint old = imageLoad(g_uimages[pc.node_slot], c).x;
+    bool was_wall = (old & NODE_WALL) != 0u;
+    bool fresh = pc.first == 0u && fresh_at(c);
+    uint age = pc.first != 0u || fresh ? NODE_AGE_MAX : was_wall != wall ? 0u : min(node_age(old) + 1u, NODE_AGE_MAX);
+    node |= age << NODE_AGE_SHIFT;
     imageStore(g_uimages[pc.node_slot], c, uvec4(node));
-    if (pc.first != 0u) return;
-    if (fresh_at(c)) {
-        // A streamed-in chunk: ambient air at rest, no transfers (the old
-        // chunk's air and walls belong to another place).
+    if (pc.first != 0u) {
+        imageStore(g_uimages[pc.pending_slot], c, uvec4(0u));
+        imageStore(g_uimages[pc.pending_other], c, uvec4(0u));
+        return;
+    }
+    if (fresh) {
+        // A streamed-in chunk: ambient air at rest, nothing pending, no
+        // transfers (the old chunk's air and walls belong to another place).
+        imageStore(g_uimages[pc.pending_slot], c, uvec4(0u));
+        imageStore(AIR_SOURCE, c, uvec4(0u));
         if (pc.mark != 0u) air_mark_tile(uvec2(c) / AIR_TILE);
         if (!wall) {
             for (int i = 0; i < 9; i++) {
@@ -85,52 +103,64 @@ void main() {
         return;
     }
 
-    bool was_wall = (old & NODE_WALL) != 0u;
     if (pc.mark != 0u && (force != 0.0 || was_wall != wall)) air_mark_tile(uvec2(c) / AIR_TILE);
-    if (was_wall == wall) return;
 
-    if (wall) {
-        if ((node & NODE_LIQUID_WALL) != 0u) return; // liquid: no transfer
-        // Became a wall: push this cell's air into its fluid neighbors.
-        float rho = imageLoad(AIR_FIELD, c).x;
-        int k = 0;
-        for (int j = 0; j < 4; j++) k += open_at(c + N4[j]) ? 1 : 0;
-        if (k == 0) return;
-        int share = int(rho * float(AIR_MASS_ONE) / float(k));
-        for (int j = 0; j < 4; j++) {
-            if (open_at(c + N4[j])) imageAtomicAdd(AIR_SOURCE, air_wrap(c + N4[j]), uint(share));
-        }
-    } else {
-        // Became fluid: start at the neighbors' mean density, taken from them.
-        float sum = 0.0;
-        int k = 0;
-        for (int j = 0; j < 4; j++) {
-            ivec2 n = c + N4[j];
-            if (!open_at(n)) continue;
-            vec4 a = imageLoad(AIR_FIELD, air_wrap(n));
-            if (a.w != 0.0) continue; // was a wall last tick too
-            sum += a.x;
-            k++;
-        }
-        float rho = k > 0 ? sum / float(k) : 1.0;
-        // Debris thrown out by the blast: the air that fills in is not taken
-        // from the neighbors (that vacuum would throw the next layer, and so
-        // on). Mass is created; the particles stand in for the volume.
-        if (k > 0 && (old & (NODE_BLASTED | NODE_LIQUID_WALL)) == 0u) {
-            int share = int(rho * float(AIR_MASS_ONE) / float(k));
+    // Mass to book into the pending store: this tick's sources, then the
+    // wall change.
+    int booked = 0;
+    if (pc.pending != 0u) {
+        booked = int(imageLoad(AIR_SOURCE, c).x);
+        if (booked != 0) imageStore(AIR_SOURCE, c, uvec4(0u));
+    }
+    if (was_wall != wall) {
+        if (wall) {
+            // Became a wall: the air it covered waits in the pending store.
+            if ((node & NODE_BODY_WALL) == 0u) booked += int(imageLoad(AIR_FIELD, c).x * float(AIR_MASS_ONE));
+        } else {
+            // Became fluid: start at the fluid neighbors' mean density.
+            float sum = 0.0;
+            int k = 0;
             for (int j = 0; j < 4; j++) {
                 ivec2 n = c + N4[j];
-                if (!open_at(n)) continue;
-                if (imageLoad(AIR_FIELD, air_wrap(n)).w != 0.0) continue;
-                imageAtomicAdd(AIR_SOURCE, air_wrap(n), uint(-share));
+                if (!air_inside(local + N4[j])) continue;
+                vec4 a = imageLoad(AIR_FIELD, air_wrap(n));
+                if (wall_at(n) || a.w != 0.0) continue; // a wall now or last tick
+                sum += a.x;
+                k++;
             }
+            // No fluid 4-neighbor (a bubble opening inside a pool): the
+            // nearest fluid within two cells, so a cell that opens in a
+            // pressurized pocket does not start at ambient.
+            for (int r = 1; r <= 2 && k == 0; r++) {
+                for (int dy = -r; dy <= r; dy++) {
+                    for (int dx = -r; dx <= r; dx++) {
+                        if (max(abs(dx), abs(dy)) != r || !air_inside(local + ivec2(dx, dy))) continue;
+                        vec4 a = imageLoad(AIR_FIELD, air_wrap(c + ivec2(dx, dy)));
+                        if (a.w != 0.0) continue;
+                        sum += a.x;
+                        k++;
+                    }
+                }
+            }
+            float rho = k > 0 ? sum / float(k) : 1.0;
+            // The debt, for liquid only. None for debris the blast threw out
+            // (the particles stand in for the volume, and each blown-out
+            // layer would leave a vacuum that throws the next), a body that
+            // moved away, or rock dug out by a command (the room it opens
+            // into pays nothing: a debt paid where the hole is turns a hole
+            // that something later covers into a vacuum).
+            if ((old & (NODE_LIQUID_WALL | NODE_BLASTED | NODE_BODY_WALL)) == NODE_LIQUID_WALL) booked -= int(rho * float(AIR_MASS_ONE));
+            for (int i = 0; i < 9; i++) {
+                float f = LBM_W[i] * rho;
+                g_air_dist[pc.dist0_slot].f[lbm_index(i, c)] = f;
+                g_air_dist[pc.dist1_slot].f[lbm_index(i, c)] = f;
+            }
+            // AIR_FIELD is left alone (neighbors read the old values in this
+            // dispatch); the LBM step rewrites it.
         }
-        for (int i = 0; i < 9; i++) {
-            float f = LBM_W[i] * rho;
-            g_air_dist[pc.dist0_slot].f[lbm_index(i, c)] = f;
-            g_air_dist[pc.dist1_slot].f[lbm_index(i, c)] = f;
-        }
-        // AIR_FIELD is left alone (neighbors read the old values in this
-        // dispatch); the LBM step rewrites it.
+    }
+    if (pc.pending != 0u && booked != 0) {
+        int p = int(imageLoad(g_uimages[pc.pending_slot], c).x);
+        imageStore(g_uimages[pc.pending_slot], c, uvec4(uint(p + booked)));
     }
 }

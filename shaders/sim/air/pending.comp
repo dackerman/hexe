@@ -1,0 +1,167 @@
+#version 460
+// The air field's pending store (docs/decisions/107-air-soft-wall-
+// compression.md): mass that waits to enter the air, released gradually.
+// Once per tick after prep, over the whole lattice; one thread per cell.
+//
+// prep.comp books into the store (int32 fixed point, AIR_MASS_ONE = one
+// cell of ambient air) instead of moving air at once: + the air a new wall
+// covers, - the air a liquid wall that opens starts with (its fluid
+// neighbors' mean density), and the tick's AIR_SOURCE (gas created or
+// removed by reactions). Moving it at once made gradients the blast
+// effects read as explosions (decision 117).
+//
+// This pass moves the store toward the air and lets it in:
+// - an open cell releases up to `cap` per tick into its own AIR_SOURCE and
+//   diffuses a fifth of the rest to each open 4-neighbor: air comes in at
+//   most `cap` per cell per tick, and a backlog spreads over more cells
+//   (more release) instead of piling into one;
+// - a wall cell with open 4-neighbors passes all of it to them, shared
+//   equally (the remainder to the first in N4 order);
+// - a wall cell with no open 4-neighbor (buried in a pool, inside a body)
+//   passes all of it to the soft wall above if there is one (the air rises
+//   like a bubble), else equally to its soft 4-neighbors; with none it
+//   stays.
+// A cell that changed between wall and fluid in the last `settle` ticks
+// keeps what it has, so a wall that flickers on and off as liquid flows or
+// a body moves books +rho, -rho, ... and nothing reaches the air. Credit
+// and debt take the same paths (no up/down bias in the air), so a body
+// that jitters over a gap does not pump air into it.
+//
+// Gather form for determinism: each cell evaluates the same `plan` for
+// itself and its four neighbors and keeps what it is owed; pending is read
+// from `src` and written to `dst` (ping-pong), no atomics on it. Mass is
+// conserved exactly (integer shares). Cells across the window seam take
+// nothing. Releases wake the air tile.
+#include "common.glsl"
+#include "sim/air/air_api.glsl"
+#include "sim/air/lbm.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PC {
+    ivec2 seam;
+    uint node_slot;
+    uint src_slot; // pending in (r32ui holding int32)
+    uint dst_slot; // pending out
+    int cap; // largest release per cell per tick, fixed point
+    uint settle; // a cell releases once it has kept its wall state this many ticks
+    uint mark;
+} pc;
+
+const ivec2 N4[4] = ivec2[4](ivec2(1, 0), ivec2(0, 1), ivec2(-1, 0), ivec2(0, -1));
+const int UP = 3; // N4[3] = (0, -1)
+
+shared bool s_released;
+
+uint node_at(ivec2 c) { return imageLoad(g_uimages[pc.node_slot], air_wrap(c)).x; }
+int pending_at(ivec2 c) { return int(imageLoad(g_uimages[pc.src_slot], air_wrap(c)).x); }
+
+// `l` is c's window-local coordinate, unwrapped (outside the window when
+// it is across the seam).
+bool is_open(ivec2 c, ivec2 l) { return air_inside(l) && (node_at(c) & NODE_WALL) == 0u; }
+bool is_soft(ivec2 c, ivec2 l) { return air_inside(l) && (node_at(c) & NODE_LIQUID_WALL) != 0u; }
+
+// What cell x does with its pending p: `release` into its own AIR_SOURCE
+// (open cells), `move` to the neighbors in `targets` (their pending; each
+// gets move / n, the first also the remainder), the rest stays.
+struct Plan {
+    int release;
+    int move;
+    uint targets; // bit j: N4[j]
+    int n;
+};
+
+Plan plan(ivec2 x, ivec2 xl, int p) {
+    Plan r = Plan(0, 0, 0u, 0);
+    if (p == 0) return r;
+    uint node = node_at(x);
+    bool settled = node_age(node) >= pc.settle;
+    if ((node & NODE_WALL) == 0u) {
+        if (!settled) return r;
+        r.release = clamp(p, -pc.cap, pc.cap);
+        // The rest diffuses: a fifth to each open 4-neighbor.
+        int d = (p - r.release) / 5;
+        if (d == 0) return r;
+        for (int j = 0; j < 4; j++) {
+            if (is_open(x + N4[j], xl + N4[j])) {
+                r.targets |= 1u << uint(j);
+                r.n++;
+            }
+        }
+        r.move = d * r.n;
+        return r;
+    }
+    for (int j = 0; j < 4; j++) {
+        if (is_open(x + N4[j], xl + N4[j])) {
+            r.targets |= 1u << uint(j);
+            r.n++;
+        }
+    }
+    if (r.n > 0) {
+        if (!settled) {
+            r.targets = 0u;
+            r.n = 0;
+        } else {
+            r.move = p;
+        }
+        return r;
+    }
+    if (is_soft(x + N4[UP], xl + N4[UP])) {
+        r.move = p;
+        r.targets = 1u << uint(UP);
+        r.n = 1;
+        return r;
+    }
+    for (int j = 0; j < 4; j++) {
+        if (is_soft(x + N4[j], xl + N4[j])) {
+            r.targets |= 1u << uint(j);
+            r.n++;
+        }
+    }
+    if (r.n > 0) r.move = p;
+    return r;
+}
+
+// Share of plan `r` for target j.
+int share(Plan r, int j) {
+    if ((r.targets & (1u << uint(j))) == 0u) return 0;
+    int s = r.move / r.n;
+    int first = findLSB(r.targets);
+    return j == first ? r.move - s * (r.n - 1) : s;
+}
+
+void main() {
+    if (gl_LocalInvocationIndex == 0u) s_released = false;
+    barrier();
+
+    ivec2 c = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 lc = air_local(c, pc.seam);
+    int p = pending_at(c);
+    int pn[4];
+    bool any = p != 0;
+    for (int j = 0; j < 4; j++) {
+        ivec2 n = c + N4[j];
+        pn[j] = air_inside(lc + N4[j]) ? pending_at(n) : 0;
+        any = any || pn[j] != 0;
+    }
+    if (any) {
+        Plan self = plan(c, lc, p);
+        int keep = p - self.release - self.move;
+        int source = self.release;
+        for (int j = 0; j < 4; j++) {
+            if (pn[j] == 0) continue;
+            // c is n's neighbor in direction (j + 2) & 3.
+            keep += share(plan(c + N4[j], lc + N4[j], pn[j]), (j + 2) & 3);
+        }
+        imageStore(g_uimages[pc.dst_slot], c, uvec4(uint(keep)));
+        if (source != 0) {
+            imageAtomicAdd(AIR_SOURCE, c, uint(source));
+            s_released = true;
+        }
+    } else {
+        imageStore(g_uimages[pc.dst_slot], c, uvec4(0u));
+    }
+
+    barrier();
+    if (gl_LocalInvocationIndex == 0u && s_released && pc.mark != 0u) air_mark_tile(gl_WorkGroupID.xy);
+}
