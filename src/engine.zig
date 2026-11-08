@@ -467,18 +467,15 @@ pub const Engine = struct {
         const ctx = &self.ctx;
         gpu.memory.memoryBarrier(ctx, cmd, .{ .all_commands = true }, .{ .memory_write = true }, .{ .all_commands = true }, .{ .memory_read = true });
         gpu.memory.imageBarrier(ctx, cmd, self.capture_image.handle, .undefined, .color_attachment_optimal, .{}, .{}, .{ .color_attachment_output = true }, .{ .color_attachment_write = true });
-        // The GPU is idle: render straight from the live images.
-        var saved = self.hud.used;
-        var saved_world = self.hud.world_used;
+        // The GPU is idle: render straight from the live images. Without
+        // `hud`, the HUD text (lines and signs) is hidden for this capture.
+        const saved = .{ self.hud.used, self.hud.world_used };
         if (!hud) {
             self.hud.used = 0;
             self.hud.world_used = 0;
         }
         self.renderer.record(cmd, 0, self.renderer.liveSources(&self.pipeline.shared), view, .{ .view = self.capture_image.view, .extent = extent, .kind = .capture }, &self.hud, null, self.tick);
-        self.hud.used = saved;
-        self.hud.world_used = saved_world;
-        _ = &saved;
-        _ = &saved_world;
+        self.hud.used, self.hud.world_used = saved;
         gpu.memory.imageBarrier(ctx, cmd, self.capture_image.handle, .color_attachment_optimal, .transfer_src_optimal, .{ .color_attachment_output = true }, .{ .color_attachment_write = true }, .{ .all_transfer = true }, .{ .transfer_read = true });
         ctx.vkd.cmdCopyImageToBuffer(cmd, self.capture_image.handle, .transfer_src_optimal, self.staging.handle, &.{.{
             .buffer_offset = 0,
