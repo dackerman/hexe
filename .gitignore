@@ -1,0 +1,7 @@
+.zig-cache/
+zig-out/
+*.spv
+/saves/
+/screenshots/
+/profiles/
+.worktrees/
