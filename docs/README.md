@@ -12,6 +12,7 @@ check before changing anything structural.
 | [04-fluids.md](04-fluids.md) | the air field and liquid solver in detail, coupling, sleep and wake, first scenarios |
 | [05-milestones.md](05-milestones.md) | build order with done criteria |
 | [06-decisions.md](06-decisions.md) | why each major choice was made and what would reopen it |
+| [07-tech-demo.md](07-tech-demo.md) | the first playable level: zones, tools, controls, enemies, what must be visible |
 | [08-engineering.md](08-engineering.md) | toolchain, build targets, code and shader conventions, testing, decision recording, git |
 | [decisions/](decisions/) | implementation-time decisions, one file each |
 
