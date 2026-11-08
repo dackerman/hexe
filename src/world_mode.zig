@@ -156,6 +156,7 @@ pub const Session = struct {
         self.st.cam = c;
         const t0 = Io.Timestamp.now(io, .awake);
         try self.st.loadAll();
+        self.updateSeams();
         log.info("window loaded around {d},{d} in {d:.1} ms ({d} workers)", .{
             c[0], c[1], @as(f64, @floatFromInt(t0.untilNow(io, .awake).nanoseconds)) / 1e6, self.prefetch.workerCount(),
         });
@@ -177,9 +178,24 @@ pub const Session = struct {
     pub fn tick(self: *Session, cam: [2]i32) !void {
         const t0 = Io.Timestamp.now(self.io, .awake);
         _ = try self.st.tick(cam[0], cam[1]);
+        self.updateSeams();
         const ns: u64 = @intCast(t0.untilNow(self.io, .awake).nanoseconds);
         self.last_tick_ns = ns;
         self.timing.add(ns);
+    }
+
+    /// The window's seams for the GPU (docs/decisions/64-stream-window-seams.md):
+    /// left of / above the origin slot, and during a move on both sides of
+    /// the row or column being swapped.
+    fn updateSeams(self: *Session) void {
+        const o = window.slotOf(self.st.origin);
+        var sx: [2]?u32 = .{ o.x, null };
+        var sy: [2]?u32 = .{ o.y, null };
+        if (self.st.move) |m| switch (m.axis) {
+            .x => sx = .{ m.slots[0].x, (m.slots[0].x + 1) % window.chunks },
+            .y => sy = .{ m.slots[0].y, (m.slots[0].y + 1) % window.chunks },
+        };
+        self.engine.pipeline.stream.setSeams(sx, sy);
     }
 
     /// Parks every dirty resident chunk and writes the save directory (if

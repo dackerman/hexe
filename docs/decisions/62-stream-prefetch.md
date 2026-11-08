@@ -17,5 +17,6 @@ worse priority, never one being generated or acquired.
 **Alternatives**: `std.Thread.Pool` with a job per chunk (no priorities or
 cancellation of stale requests); generating on the GPU (docs/01; later).
 **Consequences**: camera at 600 px/s (10 cells/tick): 0 stalls; main-thread
-streaming mean 0.054 ms/tick, p99 1.4–1.65 ms, max 2.7–3.4 ms (all on
-eviction ticks: sync + download + compress, see 60). Worker memory ~75 MiB.
+streaming mean 0.047–0.066 ms/tick, p99 1.2–1.6 ms, max usually 2–3 ms
+with rare 7–10 ms outliers (all on eviction ticks: device wait + download +
+compress, see 60). Worker memory ~75 MiB.

@@ -85,6 +85,12 @@ pub const Stream = struct {
     downloaded: u64 = 0,
 
     stats: Stats = .{},
+    /// Tile columns / rows kept asleep so nothing flows across the window's
+    /// seams (`setSeams`); `no_tile` = none.
+    freeze_cols: [2]u32 = .{ no_tile, no_tile },
+    freeze_rows: [2]u32 = .{ no_tile, no_tile },
+
+    pub const no_tile = std.math.maxInt(u32);
 
     pub const Stats = struct {
         uploads: u64 = 0,
@@ -143,6 +149,18 @@ pub const Stream = struct {
         self.enabled = true;
     }
 
+    /// World-adjacent slots meet everywhere in the window except at the
+    /// seams: the boundary left of slot column `seam_x[k]` and above slot
+    /// row `seam_y[k]` (null = none). The tile column/row just before each
+    /// seam is kept asleep.
+    pub fn setSeams(self: *Stream, seam_x: [2]?u32, seam_y: [2]?u32) void {
+        const tpc = chunk.size / cell.tile_size;
+        for (0..2) |k| {
+            self.freeze_cols[k] = if (seam_x[k]) |s| (s * tpc + cell.tiles_per_side - 1) % cell.tiles_per_side else no_tile;
+            self.freeze_rows[k] = if (seam_y[k]) |s| (s * tpc + cell.tiles_per_side - 1) % cell.tiles_per_side else no_tile;
+        }
+    }
+
     pub fn sink(self: *Stream) UploadSink {
         return .{ .ptr = self, .vtable = &.{
             .uploadChunk = uploadChunk,
@@ -173,7 +191,11 @@ pub const Stream = struct {
     fn recordDirtyPass(self: *Stream, cmd: vk.CommandBuffer) void {
         const ctx = self.ctx;
         ctx.vkd.cmdBindPipeline(cmd, .compute, self.dirty_pipeline);
-        gpu.pipelines.push(ctx, cmd, extern struct { dirty: u32 }{ .dirty = self.dirty.slot });
+        gpu.pipelines.push(ctx, cmd, extern struct { dirty: u32, pad: u32 = 0, cols: [2]u32, rows: [2]u32 }{
+            .dirty = self.dirty.slot,
+            .cols = self.freeze_cols,
+            .rows = self.freeze_rows,
+        });
         ctx.vkd.cmdDispatch(cmd, cell.tiles_per_side / 16, cell.tiles_per_side / 16, 1);
         gpu.memory.computeBarrier(ctx, cmd);
     }

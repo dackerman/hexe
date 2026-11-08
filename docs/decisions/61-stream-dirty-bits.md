@@ -17,6 +17,6 @@ per-tick readback of the bits (needless traffic, still one tick late).
 **Consequences**: conservative: a change in a border tile marks the
 neighbor chunk's adjacent tiles too, and a sync followed by a tick re-counts
 marks that are still at 8; both only cause extra (lossless) parking. In
-practice settling sand and water dirty most freshly loaded underground
-chunks within seconds (~65 % of streamed chunks get parked, ~6 KiB each).
+practice settling sand and water dirty many freshly loaded underground
+chunks within seconds (37–50 % of streamed chunks get parked, ~9 KiB each).
 New passes get dirty tracking for free as long as they mark tiles.
