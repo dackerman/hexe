@@ -119,12 +119,26 @@ uint hash_salt(uint x, uint y, uint tick, uint salt) {
 
 #define SLOT_IMG_CELLS 0u
 #define SLOT_IMG_OWNER 1u
+// Particles (M4): ballistic particle overlay for rendering, r32ui, cleared
+// each tick (shaders/sim/particles/particles.glsl). 8 keeps clear of 2-7.
+#define SLOT_IMG_PARTICLE_OVERLAY 8u
 #define SLOT_IMG_DYNAMIC_BASE 16u
 
 #define SLOT_BUF_MATERIALS 0u
 #define SLOT_BUF_TILE_MARKS 1u
 #define SLOT_BUF_TILE_LIST 2u
 #define SLOT_BUF_COMMANDS 3u
+// Particles and events (M4), docs/decisions/50-particle-buffer.md. A block at
+// 16-24 so branches numbering 4, 5, ... upward do not collide.
+#define SLOT_BUF_EVENTS 16u
+#define SLOT_BUF_PARTICLE_CTRL 17u
+#define SLOT_BUF_PARTICLE_POS 18u
+#define SLOT_BUF_PARTICLE_VEL 19u
+#define SLOT_BUF_PARTICLE_AFFINE 20u
+#define SLOT_BUF_PARTICLE_META 21u
+#define SLOT_BUF_PARTICLE_BINDING 22u
+#define SLOT_BUF_PARTICLE_FREE 23u
+#define SLOT_BUF_PARTICLE_SPAWN 24u
 #define SLOT_BUF_DYNAMIC_BASE 32u
 
 #define SAMPLER_NEAREST_CLAMP 0u
@@ -167,7 +181,8 @@ void store_cell(ivec2 p, uint c) { imageStore(CELLS, wrap_coord(p), uvec4(c, 0u,
 //   w8  change1  boil_at | boil_to<<8 | ignite_at<<16 | burn_to<<24
 //   w9  burn     burn_ticks(16) | smoke_to<<16 | glow_from<<24
 //   w10 glow     glow_to | reserved
-//   w11-15       reserved
+//   w11 impact2  rubble | restitution<<8 | reserved (particles, M4)
+//   w12-15       reserved
 //   w16-23 ramp  RGBA8 colors, R in the low byte; ramp_len of them valid
 //   w24-31       reserved
 // ---------------------------------------------------------------------------
@@ -187,6 +202,7 @@ void store_cell(ivec2 p, uint c) { imageStore(CELLS, wrap_coord(p), uvec4(c, 0u,
 #define MATERIAL_FLAG_TRANSLUCENT 0x2u
 #define MATERIAL_FLAG_FLAMMABLE 0x4u
 #define MATERIAL_FLAG_EMISSIVE 0x8u
+#define MATERIAL_FLAG_RICOCHET 0x10u
 
 // Movement ordering: a cell sinks into a fluid cell below it with a lower key.
 #define SORT_KEY_AIR 256u
@@ -205,7 +221,8 @@ struct MaterialGpu {
     uint change1;
     uint burn;
     uint glow;
-    uint reserved0[5];
+    uint impact2;
+    uint reserved0[4];
     uint ramp[8];
     uint reserved1[8];
 };
@@ -274,10 +291,31 @@ void mark_tile_and_neighbors(uvec2 t) {
 //   kind, material, x0, y0, x1, y1, flags, seed
 //   CMD_FILL_CIRCLE: center (x0, y0), radius x1 (inclusive: d^2 <= r^2)
 //   CMD_FILL_RECT:   [x0, x1) x [y0, y1), unwrapped coordinates
+//   CMD_FILL_LINE:   segment (x0, y0)-(x1, y1), radius = flags >> 16
+//                    (capsule: distance to the segment <= radius)
+//   CMD_SPRAY:       particles, not cells (shaders/sim/particles/spray.comp):
+//                    origin (x0, y0), count x1, speed y1 & 0xffff px/s,
+//                    speed spread y1 >> 16, direction flags & 0xfff and cone
+//                    half-angle (flags >> 12) & 0xfff in 1/4096 turns (0 = +x,
+//                    1024 = +y = down)
+//   CMD_SET_TEMPERATURE: circle (x0, y0, r = x1), every cell gets degrees C y1
+//   CMD_IGNITE:      circle; flammable cells get CELL_FLAG_BURNING
+//   CMD_EJECT:       circle, center speed y1 px/s with quadratic falloff:
+//                    loose cells fly as particles, solids lose health and
+//                    fly as rubble at zero (the interim explosion)
+//   CMD_INJECT_CHARGE: circle, charge y1; reserved hook, no effect until the
+//                    reactions branch defines the charge encoding
 // Coordinates are world pixels and wrap on the torus.
 // ---------------------------------------------------------------------------
 #define CMD_FILL_CIRCLE 1u
 #define CMD_FILL_RECT 2u
+#define CMD_FILL_LINE 3u
+#define CMD_SPRAY 4u
+#define CMD_SET_TEMPERATURE 5u
+#define CMD_IGNITE 6u
+#define CMD_EJECT 7u
+#define CMD_INJECT_CHARGE 8u
+#define CMD_LINE_RADIUS_SHIFT 16u
 #define CMD_FLAG_ONLY_AIR 0x1u
 #define CMD_COVERAGE_SHIFT 8u
 #define CMD_WORDS 8u

@@ -1,0 +1,32 @@
+#version 460
+// CMD_SPRAY: request `count` ballistic particles of the command's material
+// from (x0, y0) inside a cone (common.glsl "Commands"). One dispatch per
+// spray command, one thread per particle; the particles appear at the end of
+// this tick's particle section and move from the next tick.
+#include "common.glsl"
+#include "sim/particles/particles.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    uint index; // command index in COMMANDS
+} pc;
+
+#define SALT_SPRAY 0x5a7au
+
+void main() {
+    Command c = COMMANDS[pc.index];
+    uint k = gl_GlobalInvocationID.x;
+    if (k >= uint(c.x1)) return;
+    uint h = hash_salt(k & 0xffffu, k >> 16, c.seed, SALT_SPRAY);
+    uint h2 = hash_u32(h ^ 0x68e31da4u);
+    float dir = float(c.flags & 0xfffu) / 4096.0;
+    float cone = float((c.flags >> 12) & 0xfffu) / 4096.0;
+    float a = (dir + cone * (float(h & 0xffffu) / 32767.5 - 1.0)) * 6.28318531;
+    uint y1 = uint(c.y1);
+    float speed = float(y1 & 0xffffu) + float(y1 >> 16) * (float(h >> 16) / 32767.5 - 1.0);
+    vec2 vel = vec2(cos(a), sin(a)) * max(speed, 0.0);
+    vec2 pos = vec2(c.x0, c.y0) + 0.5 + (vec2(float(h2 & 0xffu), float((h2 >> 8) & 0xffu)) / 255.0 - 0.5);
+    uint meta = pmeta_make(c.material, PARTICLE_MODE_BALLISTIC, mat_spawn_temp(MATERIALS[c.material & 0xffu]), h2 >> 28);
+    spawn_particle(pos, vel, meta, PARTICLE_UNBOUND);
+}

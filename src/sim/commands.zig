@@ -21,7 +21,33 @@ pub const Kind = enum(u32) {
     fill_circle = 1,
     /// [x0, x1) x [y0, y1).
     fill_rect = 2,
+    /// Segment (x0, y0)-(x1, y1), radius `flags >> line_radius_shift`:
+    /// every pixel within the radius of the segment (a capsule).
+    fill_line = 3,
+    /// Particles, not cells (src/sim/particles.zig runs it): origin
+    /// (x0, y0), count x1, speed y1 & 0xffff px/s, spread y1 >> 16,
+    /// direction flags & 0xfff, cone half-angle (flags >> 12) & 0xfff, both
+    /// in 1/4096 turns (0 = +x, 1024 = +y = down).
+    spray = 4,
+    /// Circle (x0, y0, r = x1): every cell gets temperature y1 degrees C.
+    set_temperature = 5,
+    /// Circle: flammable cells get the burning flag.
+    ignite = 6,
+    /// Circle, center speed y1 px/s with quadratic falloff: loose cells fly
+    /// as particles, solids with health lose `speed / 4` and fly as rubble
+    /// at zero (the interim explosion until the air field, M5).
+    eject = 7,
+    /// Circle, charge y1. Reserved hook: no effect until the reactions
+    /// branch defines the charge encoding (docs/decisions/54-commands-m4.md).
+    inject_charge = 8,
 };
+
+/// `flags` bits 16-31 of a fill_line: its radius.
+pub const line_radius_shift = 16;
+/// Eject: speed (px/s) below which a loose cell stays put, and the health
+/// damage per px/s of speed (damage = speed >> eject_damage_shift).
+pub const eject_min_speed = 40;
+pub const eject_damage_shift = 2;
 
 /// Only replace air cells (pouring, scenery that must not overwrite).
 pub const flag_only_air: u32 = 0x1;
@@ -59,6 +85,30 @@ pub const Options = struct {
         return (if (o.only_air) flag_only_air else 0) | (@as(u32, o.coverage) << coverage_shift);
     }
 };
+
+/// Most particles one spray command spawns.
+pub const max_spray = 65535;
+
+/// A spray of ballistic particles (`CommandList.spray`).
+pub const Spray = struct {
+    x: i32,
+    y: i32,
+    material: u8,
+    count: u32,
+    /// px/s; each particle gets speed +- spread (uniform).
+    speed: u16,
+    spread: u16 = 0,
+    /// Direction in turns (0 = +x, 0.25 = down, 0.75 = up).
+    direction: f32 = 0.75,
+    /// Half-angle of the cone in turns (0.5 = all directions).
+    cone: f32 = 0.05,
+};
+
+/// Turns (wrapping) -> 12-bit fixed point.
+fn turns(t: f32) u32 {
+    const f = t - @floor(t);
+    return @as(u32, @intFromFloat(f * 4096.0)) & 0xfff;
+}
 
 pub const CommandList = struct {
     items: [capacity]CommandGpu = undefined,
@@ -112,6 +162,66 @@ pub const CommandList = struct {
         });
     }
 
+    /// A thick line: every pixel within `radius` of the segment.
+    pub fn fillLine(self: *CommandList, x0: i32, y0: i32, x1: i32, y1: i32, radius: i32, material: u8, opts: Options) void {
+        self.push(.{
+            .kind = @backingInt(Kind.fill_line),
+            .material = material,
+            .x0 = x0,
+            .y0 = y0,
+            .x1 = x1,
+            .y1 = y1,
+            .flags = opts.flags() | (@as(u32, @intCast(std.math.clamp(radius, 0, max_radius))) << line_radius_shift),
+            .seed = 0,
+        });
+    }
+
+    /// Spawn `s.count` ballistic particles (no cells change this tick).
+    pub fn spray(self: *CommandList, s: Spray) void {
+        if (s.count == 0) return;
+        self.push(.{
+            .kind = @backingInt(Kind.spray),
+            .material = s.material,
+            .x0 = s.x,
+            .y0 = s.y,
+            .x1 = @intCast(@min(s.count, max_spray)),
+            .y1 = @bitCast(@as(u32, s.speed) | (@as(u32, s.spread) << 16)),
+            .flags = turns(s.direction) | (turns(s.cone) << 12),
+            .seed = 0,
+        });
+    }
+
+    pub fn setTemperature(self: *CommandList, cx: i32, cy: i32, radius: i32, celsius: i32) void {
+        self.circleCommand(.set_temperature, cx, cy, radius, 0, celsius);
+    }
+
+    pub fn ignite(self: *CommandList, cx: i32, cy: i32, radius: i32) void {
+        self.circleCommand(.ignite, cx, cy, radius, 0, 0);
+    }
+
+    /// The interim explosion: `speed` px/s at the center.
+    pub fn eject(self: *CommandList, cx: i32, cy: i32, radius: i32, speed: u16) void {
+        self.circleCommand(.eject, cx, cy, radius, 0, speed);
+    }
+
+    /// Reserved hook (no GPU effect yet).
+    pub fn injectCharge(self: *CommandList, cx: i32, cy: i32, radius: i32, charge: u8) void {
+        self.circleCommand(.inject_charge, cx, cy, radius, 0, charge);
+    }
+
+    fn circleCommand(self: *CommandList, kind: Kind, cx: i32, cy: i32, radius: i32, material: u8, y1: i32) void {
+        self.push(.{
+            .kind = @backingInt(kind),
+            .material = material,
+            .x0 = cx,
+            .y0 = cy,
+            .x1 = std.math.clamp(radius, 0, max_radius),
+            .y1 = y1,
+            .flags = 0,
+            .seed = 0,
+        });
+    }
+
     pub fn slice(self: *const CommandList) []const CommandGpu {
         return self.items[0..self.len];
     }
@@ -139,6 +249,22 @@ pub fn bounds(c: CommandGpu) ?Box {
             x1 = c.x1;
             y1 = c.y1;
         },
+        .fill_line => {
+            const r: i32 = @intCast(c.flags >> line_radius_shift);
+            x0 = @min(c.x0, c.x1) - r;
+            y0 = @min(c.y0, c.y1) - r;
+            x1 = @max(c.x0, c.x1) + r + 1;
+            y1 = @max(c.y0, c.y1) + r + 1;
+        },
+        .set_temperature, .ignite, .eject => {
+            x0 = c.x0 - c.x1;
+            y0 = c.y0 - c.x1;
+            x1 = c.x0 + c.x1 + 1;
+            y1 = c.y0 + c.x1 + 1;
+        },
+        // Not per-pixel edits: spray runs in the particle subsystem;
+        // inject_charge is a reserved hook.
+        .spray, .inject_charge => return null,
     }
     if (x1 <= x0 or y1 <= y0) return null;
     const ax = x0 & ~@as(i32, 15);
@@ -156,13 +282,35 @@ pub fn bounds(c: CommandGpu) ?Box {
 
 pub fn insideShape(c: CommandGpu, x: i32, y: i32) bool {
     return switch (@as(Kind, @fromBackingInt(@intCast(c.kind)))) {
-        .fill_circle => blk: {
+        .fill_circle, .set_temperature, .ignite, .eject => blk: {
             const dx = x - c.x0;
             const dy = y - c.y0;
             break :blk dx * dx + dy * dy <= c.x1 * c.x1;
         },
         .fill_rect => x >= c.x0 and y >= c.y0 and x < c.x1 and y < c.y1,
+        .fill_line => insideCapsule(c.x0, c.y0, c.x1, c.y1, @intCast(c.flags >> line_radius_shift), x, y),
+        .spray, .inject_charge => false,
     };
+}
+
+/// Distance from (px, py) to segment a-b at most r. Integer, exact; the
+/// perpendicular case compares cross^2 <= r^2 |b-a|^2 in 64 bits.
+/// Mirrors inside_capsule in shaders/sim/grid/commands.comp.
+pub fn insideCapsule(ax: i32, ay: i32, bx: i32, by: i32, r: i32, px: i32, py: i32) bool {
+    const ux = bx - ax;
+    const uy = by - ay;
+    const wx = px - ax;
+    const wy = py - ay;
+    const len2 = ux * ux + uy * uy;
+    const dot = wx * ux + wy * uy;
+    if (dot <= 0) return wx * wx + wy * wy <= r * r;
+    if (dot >= len2) {
+        const qx = px - bx;
+        const qy = py - by;
+        return qx * qx + qy * qy <= r * r;
+    }
+    const cross: i64 = @as(i64, ux) * wy - @as(i64, uy) * wx;
+    return cross * cross <= @as(i64, r) * r * len2;
 }
 
 /// Applies the uploaded commands. Owns the upload ring at SLOT_BUF_COMMANDS:
@@ -240,4 +388,36 @@ test "command bounds" {
     try std.testing.expect(insideShape(list.items[0], 110, 50));
     try std.testing.expect(!insideShape(list.items[0], 111, 50));
     try std.testing.expect(bounds(.{ .kind = 2, .material = 0, .x0 = 3, .y0 = 3, .x1 = 3, .y1 = 9, .flags = 0, .seed = 0 }) == null);
+}
+
+test "m4 command kinds" {
+    var list: CommandList = .{};
+    list.begin(3);
+    list.fillLine(10, 10, 50, 30, 3, 2, .{});
+    list.spray(.{ .x = 100, .y = 100, .material = 2, .count = 500, .speed = 300, .spread = 50 });
+    list.eject(200, 200, 12, 600);
+    list.setTemperature(0, 0, 4, 500);
+    list.ignite(5, 5, 2);
+    list.injectCharge(5, 5, 2, 9);
+    const line = list.items[0];
+    try std.testing.expectEqual(@as(u32, 3), line.flags >> line_radius_shift);
+    const lb = bounds(line).?;
+    try std.testing.expectEqual(@as(i32, 0), lb.x);
+    try std.testing.expect(lb.x + @as(i32, @intCast(lb.w)) >= 54);
+    try std.testing.expect(insideShape(line, 30, 20)); // on the segment
+    try std.testing.expect(insideShape(line, 30, 23)); // within 3 of it
+    try std.testing.expect(!insideShape(line, 30, 25));
+    try std.testing.expect(insideShape(line, 7, 10)); // round cap
+    try std.testing.expect(!insideShape(line, 6, 10));
+    // Spray is not a per-pixel edit; its encoding round-trips.
+    const sp = list.items[1];
+    try std.testing.expect(bounds(sp) == null);
+    try std.testing.expectEqual(@as(i32, 500), sp.x1);
+    try std.testing.expectEqual(@as(u32, 300), @as(u32, @bitCast(sp.y1)) & 0xffff);
+    try std.testing.expectEqual(@as(u32, 50), @as(u32, @bitCast(sp.y1)) >> 16);
+    try std.testing.expectEqual(@as(u32, 3072), sp.flags & 0xfff); // 0.75 turns = up
+    try std.testing.expectEqual(@as(u32, 204), (sp.flags >> 12) & 0xfff);
+    try std.testing.expect(bounds(list.items[2]) != null);
+    try std.testing.expect(insideShape(list.items[2], 212, 200));
+    try std.testing.expect(bounds(list.items[5]) == null);
 }

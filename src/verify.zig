@@ -25,7 +25,15 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         try engine.init(gpa, .{ .table = &table, .validation = cli.validation orelse false, .pipeline = .{ .sleep = sleep } });
         defer engine.deinit();
         if (n == 0) failures += try accessorTest(gpa, engine);
-        failures += try determinism(gpa, engine, &table, cli, sleep);
+        failures += try determinism(gpa, engine, &table, cli, sleep, .determinism, if (cli.ticks == 0) 300 else cli.ticks);
+        // M4 commands (line, temperature, ignite, eject's cell edits) on a
+        // fresh world, compared right after the eject tick: the particles it
+        // spawned have not moved yet (docs/decisions/54-commands-m4.md).
+        const e2 = try gpa.create(Engine);
+        defer gpa.destroy(e2);
+        try e2.init(gpa, .{ .table = &table, .validation = cli.validation orelse false, .pipeline = .{ .sleep = sleep } });
+        defer e2.deinit();
+        failures += try determinism(gpa, e2, &table, cli, sleep, .determinism_commands, scenes.determinism_commands_ticks);
     }
     if (failures == 0) {
         std.debug.print("verify-determinism: PASS\n", .{});
@@ -70,10 +78,8 @@ fn recordAccessor(cmd: vk.CommandBuffer, ctx: *gpu.Context, pipeline: vk.Pipelin
     gpu.memory.memoryBarrier(ctx, cmd, .{ .compute_shader = true }, .{ .shader_storage_write = true }, .{ .host = true }, .{ .host_read = true });
 }
 
-fn determinism(gpa: std.mem.Allocator, engine: *Engine, table: *const @import("sim/materials.zig").Table, cli: Cli, sleep: bool) !u32 {
-    const ticks: u32 = if (cli.ticks == 0) 300 else cli.ticks;
+fn determinism(gpa: std.mem.Allocator, engine: *Engine, table: *const @import("sim/materials.zig").Table, cli: Cli, sleep: bool, scene: scenes.Scene, ticks: u32) !u32 {
     const seed = cli.seed;
-    const scene: scenes.Scene = .determinism;
 
     for (0..ticks) |_| try engine.frame(1, .{ .scene = scene, .seed = seed }, null);
     const gpu_cells = try gpa.alloc(u32, cell.world_size * cell.world_size);
@@ -105,10 +111,10 @@ fn determinism(gpa: std.mem.Allocator, engine: *Engine, table: *const @import("s
             mismatches += 1;
         }
     }
-    std.debug.print("determinism (sleep {s}, seed {d}, {d} ticks): {d} cells differ; active tiles cpu {d} gpu {d}; stone {d} sand {d} water {d} smoke {d}, {d} moved in last substep\n", .{
-        if (sleep) "on" else "off",      seed,                            ticks,                           mismatches,
-        world.activeTiles(),             engine.last.active_tiles,        counts[materials_builtin.stone], counts[materials_builtin.sand],
-        counts[materials_builtin.water], counts[materials_builtin.smoke], moved,
+    std.debug.print("{s} (sleep {s}, seed {d}, {d} ticks): {d} cells differ; active tiles cpu {d} gpu {d}; stone {d} sand {d} water {d} smoke {d}, {d} moved in last substep\n", .{
+        @tagName(scene),                 if (sleep) "on" else "off", seed,                            ticks,                          mismatches,
+        world.activeTiles(),             engine.last.active_tiles,   counts[materials_builtin.stone], counts[materials_builtin.sand], counts[materials_builtin.water],
+        counts[materials_builtin.smoke], moved,
     });
     return @intFromBool(mismatches != 0);
 }

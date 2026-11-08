@@ -7,6 +7,8 @@
 //!   = / -          zoom in / out (integer)         space         pause
 //!   .              single tick while paused        F1            toggle HUD
 //!   F2             activity tile overlay           F12           screenshot
+//!   Q (hold)       spray sand particles at cursor  E (hold)      spray water particles
+//!   X              eject (interim explosion) at the cursor, brush radius
 //!   Esc            quit
 const std = @import("std");
 const builtin = @import("builtin");
@@ -62,6 +64,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
     var frames: u64 = 0;
 
     while (true) {
+        try engine.poll(); // newest readback before building this frame's commands
         const input = window.poll();
         if (input.quit or input.wasPressed(c.SDL_SCANCODE_ESCAPE)) break;
 
@@ -132,6 +135,13 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
             last_paint = .{ mwx, mwy };
         } else last_paint = null;
 
+        // Particle tools (M4): sprays and the interim explosion.
+        if (input.isDown(c.SDL_SCANCODE_Q) or input.isDown(c.SDL_SCANCODE_E)) {
+            const mat = if (input.isDown(c.SDL_SCANCODE_Q)) materials_builtin.sand else materials_builtin.water;
+            pending.spray(.{ .x = mwx, .y = mwy, .material = mat, .count = 48, .speed = 260, .spread = 90, .direction = 0.75, .cone = 0.08 });
+        }
+        if (input.wasPressed(c.SDL_SCANCODE_X)) pending.eject(mwx, mwy, @max(radius, 4), 1000);
+
         if (input.wasPressed(c.SDL_SCANCODE_F12)) {
             var name_buf: [64]u8 = undefined;
             const name = try std.fmt.bufPrint(&name_buf, "hexe-{d}.png", .{engine.tick});
@@ -188,8 +198,11 @@ pub fn fillHud(engine: *Engine, profile: *const Profile, info: HudInfo) void {
     w.writeAll("gpu ms") catch {};
     for (0..names.count) |i| w.print("  {s} {d:.3}", .{ names.get(i), profile.smooth[i] }) catch {};
     hud.print("{s}", .{w.buffered()});
+    const ps = engine.mirror().particles;
+    hud.print("particles {d} live (cap {d})  spawned {d} landed {d} refused {d} lost {d} impacts {d}", .{ ps.live, ps.capacity, ps.spawned, ps.landed, ps.refused, ps.lost, ps.impacts });
     hud.print("brush {s} r{d}  zoom {d}x  cam {d},{d}  cursor {d},{d}", .{ info.material, info.radius, info.view.scale, info.view.camera_x, info.view.camera_y, info.cursor[0], info.cursor[1] });
     hud.print("1-{d} material  LMB paint  RMB erase  wheel size  WASD pan  =/- zoom  space pause  F2 tiles", .{info.material_count -| 1});
+    hud.print("Q spray sand  E spray water  X eject (explosion) at cursor", .{});
 }
 
 /// Circles every radius/2 pixels from `a` to `b` (at least one).

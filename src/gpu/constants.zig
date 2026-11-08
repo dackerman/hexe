@@ -17,6 +17,7 @@ pub const binding_samplers = 3;
 /// Fixed storage image slots (shared world images).
 pub const slot_img_cells = 0;
 pub const slot_img_owner = 1;
+pub const slot_img_particle_overlay = 8;
 /// First storage image slot handed out by `Descriptors.allocImageSlot`.
 pub const slot_img_dynamic_base = 16;
 
@@ -25,6 +26,16 @@ pub const slot_buf_materials = 0;
 pub const slot_buf_tile_marks = 1;
 pub const slot_buf_tile_list = 2;
 pub const slot_buf_commands = 3;
+// Particles and events (M4), docs/decisions/50-particle-buffer.md.
+pub const slot_buf_events = 16;
+pub const slot_buf_particle_ctrl = 17;
+pub const slot_buf_particle_pos = 18;
+pub const slot_buf_particle_vel = 19;
+pub const slot_buf_particle_affine = 20;
+pub const slot_buf_particle_meta = 21;
+pub const slot_buf_particle_binding = 22;
+pub const slot_buf_particle_free = 23;
+pub const slot_buf_particle_spawn = 24;
 /// First storage buffer slot handed out by `Descriptors.allocBufferSlot`.
 pub const slot_buf_dynamic_base = 32;
 
@@ -69,11 +80,21 @@ pub const mirrors = .{
     .{ "BINDING_SAMPLERS", binding_samplers },
     .{ "SLOT_IMG_CELLS", slot_img_cells },
     .{ "SLOT_IMG_OWNER", slot_img_owner },
+    .{ "SLOT_IMG_PARTICLE_OVERLAY", slot_img_particle_overlay },
     .{ "SLOT_IMG_DYNAMIC_BASE", slot_img_dynamic_base },
     .{ "SLOT_BUF_MATERIALS", slot_buf_materials },
     .{ "SLOT_BUF_TILE_MARKS", slot_buf_tile_marks },
     .{ "SLOT_BUF_TILE_LIST", slot_buf_tile_list },
     .{ "SLOT_BUF_COMMANDS", slot_buf_commands },
+    .{ "SLOT_BUF_EVENTS", slot_buf_events },
+    .{ "SLOT_BUF_PARTICLE_CTRL", slot_buf_particle_ctrl },
+    .{ "SLOT_BUF_PARTICLE_POS", slot_buf_particle_pos },
+    .{ "SLOT_BUF_PARTICLE_VEL", slot_buf_particle_vel },
+    .{ "SLOT_BUF_PARTICLE_AFFINE", slot_buf_particle_affine },
+    .{ "SLOT_BUF_PARTICLE_META", slot_buf_particle_meta },
+    .{ "SLOT_BUF_PARTICLE_BINDING", slot_buf_particle_binding },
+    .{ "SLOT_BUF_PARTICLE_FREE", slot_buf_particle_free },
+    .{ "SLOT_BUF_PARTICLE_SPAWN", slot_buf_particle_spawn },
     .{ "SLOT_BUF_DYNAMIC_BASE", slot_buf_dynamic_base },
     .{ "SAMPLER_NEAREST_CLAMP", sampler_nearest_clamp },
     .{ "SAMPLER_LINEAR_CLAMP", sampler_linear_clamp },
@@ -94,6 +115,7 @@ pub const mirrors = .{
     .{ "MATERIAL_FLAG_TRANSLUCENT", materials.flag_translucent },
     .{ "MATERIAL_FLAG_FLAMMABLE", materials.flag_flammable },
     .{ "MATERIAL_FLAG_EMISSIVE", materials.flag_emissive },
+    .{ "MATERIAL_FLAG_RICOCHET", materials.flag_ricochet },
     .{ "SORT_KEY_AIR", materials.sort_key_air },
     .{ "SORT_KEY_DENSE_BASE", materials.sort_key_dense_base },
     .{ "SORT_KEY_STATIC", materials.sort_key_static },
@@ -102,6 +124,13 @@ pub const mirrors = .{
     .{ "TILE_WAKE_TICKS", cell.tile_wake_ticks },
     .{ "CMD_FILL_CIRCLE", @backingInt(commands.Kind.fill_circle) },
     .{ "CMD_FILL_RECT", @backingInt(commands.Kind.fill_rect) },
+    .{ "CMD_FILL_LINE", @backingInt(commands.Kind.fill_line) },
+    .{ "CMD_SPRAY", @backingInt(commands.Kind.spray) },
+    .{ "CMD_SET_TEMPERATURE", @backingInt(commands.Kind.set_temperature) },
+    .{ "CMD_IGNITE", @backingInt(commands.Kind.ignite) },
+    .{ "CMD_EJECT", @backingInt(commands.Kind.eject) },
+    .{ "CMD_INJECT_CHARGE", @backingInt(commands.Kind.inject_charge) },
+    .{ "CMD_LINE_RADIUS_SHIFT", commands.line_radius_shift },
     .{ "CMD_FLAG_ONLY_AIR", commands.flag_only_air },
     .{ "CMD_COVERAGE_SHIFT", commands.coverage_shift },
     .{ "CMD_WORDS", @sizeOf(commands.CommandGpu) / 4 },

@@ -1,0 +1,46 @@
+#version 460
+// Single-thread bookkeeping around spawn.comp.
+//   stage 0 (prepare): indirect args for spawn.comp from this tick's
+//            request count.
+//   stage 1 (finalize): consume the spawned indices from the free stack,
+//            reset the queue, snapshot the spawn limit for the next tick,
+//            update live count and the indirect args for passes over
+//            particle indices. When no particle is live, schedule
+//            rebuild.comp (sorted free stack, high water back to 0) so an
+//            idle particle system costs nothing.
+#include "common.glsl"
+#include "sim/particles/particles.glsl"
+
+layout(local_size_x = 1) in;
+
+layout(push_constant) uniform PC {
+    uint stage;
+} pc;
+
+void main() {
+    uint n = min(PCTRL[PCTRL_SPAWN_COUNT], PCTRL[PCTRL_SPAWN_LIMIT]);
+    if (pc.stage == 0u) {
+        PCTRL[PCTRL_SPAWN_DISPATCH + 0u] = (n + PARTICLE_GROUP - 1u) / PARTICLE_GROUP;
+        PCTRL[PCTRL_SPAWN_DISPATCH + 1u] = 1u;
+        PCTRL[PCTRL_SPAWN_DISPATCH + 2u] = 1u;
+        return;
+    }
+    uint free_count = PCTRL[PCTRL_FREE_COUNT] - n;
+    uint capacity = PCTRL[PCTRL_CAPACITY];
+    PCTRL[PCTRL_FREE_COUNT] = free_count;
+    PCTRL[PCTRL_SPAWNED] += n;
+    PCTRL[PCTRL_SPAWN_COUNT] = 0u;
+    PCTRL[PCTRL_SPAWN_LIMIT] = min(free_count, PCTRL[PCTRL_QUEUE_CAPACITY]);
+    PCTRL[PCTRL_LIVE] = capacity - free_count;
+    uint rebuild = 0u;
+    if (free_count == capacity && PCTRL[PCTRL_HIGH_WATER] != 0u) {
+        PCTRL[PCTRL_HIGH_WATER] = 0u;
+        rebuild = (capacity + PARTICLE_GROUP - 1u) / PARTICLE_GROUP;
+    }
+    PCTRL[PCTRL_REBUILD_DISPATCH + 0u] = rebuild;
+    PCTRL[PCTRL_REBUILD_DISPATCH + 1u] = 1u;
+    PCTRL[PCTRL_REBUILD_DISPATCH + 2u] = 1u;
+    PCTRL[PCTRL_DISPATCH + 0u] = (PCTRL[PCTRL_HIGH_WATER] + PARTICLE_GROUP - 1u) / PARTICLE_GROUP;
+    PCTRL[PCTRL_DISPATCH + 1u] = 1u;
+    PCTRL[PCTRL_DISPATCH + 2u] = 1u;
+}

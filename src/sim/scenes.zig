@@ -22,6 +22,17 @@ pub const Scene = enum {
     bench_mixed,
     /// Debug noise (pipeline Config.noise); emits nothing.
     noise,
+    /// M4: sand sprayed as particles onto a floor, then an interim explosion
+    /// (eject) throws a dirt hill; debris arcs, chips a stone pillar,
+    /// ricochets off steel, splashes a pool, lands and piles.
+    particles_demo,
+    /// M4 bench: 100K sand particles falling forever (no floor, torus).
+    bench_particles,
+    /// M4 bench: a steady sand rain onto a stone floor (spawn, fall, land).
+    bench_particles_rain,
+    /// M4 determinism: fill line, set temperature, ignite and the cell side
+    /// of eject, compared before any particle lands (verify.zig).
+    determinism_commands,
 };
 
 pub fn emit(scene: Scene, tick: u32, seed: u32, list: *commands.CommandList) void {
@@ -36,6 +47,73 @@ pub fn emit(scene: Scene, tick: u32, seed: u32, list: *commands.CommandList) voi
             list.fillRect(0, 0, W, W, m.sand, .{ .coverage = 80, .only_air = true });
             list.fillRect(0, 0, W, W, m.smoke, .{ .coverage = 90, .only_air = true });
         },
+        .particles_demo => particlesDemo(tick, list),
+        .bench_particles => if (tick == 0) {
+            var i: i32 = 0;
+            while (i < 16) : (i += 1) {
+                list.spray(.{ .x = 64 + i * 128, .y = 300, .material = m.sand, .count = 6250, .speed = 400, .spread = 200, .direction = 0.75, .cone = 0.25 });
+            }
+        },
+        .bench_particles_rain => {
+            if (tick == 0) list.fillRect(0, 1900, W, W, m.stone, .{});
+            var i: i32 = 0;
+            while (i < 8) : (i += 1) {
+                list.spray(.{ .x = 128 + i * 256, .y = 1200, .material = m.sand, .count = 75, .speed = 150, .spread = 100, .direction = 0.25, .cone = 0.2 });
+            }
+        },
+        .determinism_commands => determinismCommands(tick, list),
+    }
+}
+
+/// Last tick of `determinism_commands` that edits cells; compare after it.
+pub const determinism_commands_ticks = 8;
+
+fn particlesDemo(tick: u32, list: *commands.CommandList) void {
+    if (tick == 0) {
+        // A closed cave, so debris thrown high does not wrap the torus.
+        list.fillRect(500, 560, 1560, 600, m.stone, .{}); // ceiling
+        list.fillRect(500, 560, 540, 1300, m.stone, .{});
+        list.fillRect(1520, 560, 1560, 1300, m.stone, .{});
+        list.fillRect(500, 1240, 1560, 1300, m.stone, .{}); // floor
+        list.fillRect(560, 1100, 580, 1240, m.stone, .{}); // basin wall
+        list.fillRect(720, 1180, 740, 1240, m.stone, .{});
+        list.fillRect(580, 1200, 720, 1240, m.water, .{}); // pool
+        list.fillCircle(1000, 1240, 90, m.dirt, .{ .only_air = true }); // dirt hill
+        list.fillRect(1180, 1080, 1210, 1240, m.stone, .{}); // pillar to chip
+        list.fillLine(1300, 1060, 1420, 1000, 4, m.steel, .{}); // ricochet plate
+    }
+    // Sand sprayed up and to the right for two seconds.
+    if (tick < 120) list.spray(.{ .x = 660, .y = 1080, .material = m.sand, .count = 60, .speed = 330, .spread = 90, .direction = 0.86, .cone = 0.04 });
+    // The interim explosion at the foot of the hill.
+    if (tick == 180) list.eject(1000, 1236, 110, 950);
+}
+
+fn determinismCommands(tick: u32, list: *commands.CommandList) void {
+    const ox: i32 = 900;
+    const oy: i32 = 900;
+    switch (tick) {
+        0 => {
+            list.fillRect(ox, oy + 200, ox + 300, oy + 220, m.stone, .{});
+            list.fillCircle(ox + 150, oy + 200, 40, m.sand, .{ .only_air = true });
+            list.fillRect(ox + 20, oy + 150, ox + 60, oy + 200, m.water, .{});
+            list.fillRect(ox + 240, oy + 120, ox + 260, oy + 200, m.stone, .{});
+            list.fillCircle(ox + 200, oy + 100, 10, m.smoke, .{});
+        },
+        2 => {
+            list.fillLine(ox + 10, oy + 50, ox + 290, oy + 140, 3, m.dirt, .{});
+            list.fillLine(-30, 40, 30, -20, 5, m.stone, .{ .coverage = 128 }); // across the seam
+        },
+        4 => {
+            list.setTemperature(ox + 150, oy + 190, 30, 600);
+            list.setTemperature(0, 0, 12, -30);
+        },
+        5 => list.ignite(ox + 150, oy + 190, 20),
+        7 => {
+            list.eject(ox + 150, oy + 200, 30, 900); // sand pile and the floor under it
+            list.eject(ox + 250, oy + 160, 18, 2000); // through the stone post
+            list.eject(ox + 40, oy + 175, 12, 300); // into the water
+        },
+        else => {},
     }
 }
 

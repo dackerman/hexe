@@ -1,0 +1,43 @@
+#version 460
+// Readback: 1-bit solid and liquid masks of the whole window, written
+// straight into this frame slot's host-visible buffer (src/sim/readback.zig).
+// Bit b of word (y * 64 + x / 32) is cell (x, y) with b = x % 32. Solid =
+// static phase or body-owned; liquid = liquid phase (incl. particle-backed)
+// and not body-owned. One workgroup per 256 cells of a row.
+#include "common.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    uint out_slot;
+} pc;
+
+#define MASK_WORDS 131072u
+
+HEXE_BUFFER(MaskBlock, writeonly, uint words[];, g_mask_out);
+
+shared uint s_solid[8];
+shared uint s_liquid[8];
+
+void main() {
+    uint lx = gl_LocalInvocationID.x;
+    if (lx < 8u) {
+        s_solid[lx] = 0u;
+        s_liquid[lx] = 0u;
+    }
+    barrier();
+    uint x = gl_WorkGroupID.x * 256u + lx;
+    uint y = gl_WorkGroupID.y;
+    uint c = imageLoad(CELLS, ivec2(x, y)).x;
+    uint phase = mat_phase(MATERIALS[cell_material(c)].move);
+    bool body = cell_has(c, CELL_FLAG_BODY);
+    uint bit = 1u << (lx & 31u);
+    if (phase == PHASE_STATIC || body) atomicOr(s_solid[lx >> 5], bit);
+    else if (phase == PHASE_LIQUID) atomicOr(s_liquid[lx >> 5], bit);
+    barrier();
+    if (lx < 8u) {
+        uint word = y * (WORLD_SIZE / 32u) + gl_WorkGroupID.x * 8u + lx;
+        g_mask_out[pc.out_slot].words[word] = s_solid[lx];
+        g_mask_out[pc.out_slot].words[MASK_WORDS + word] = s_liquid[lx];
+    }
+}

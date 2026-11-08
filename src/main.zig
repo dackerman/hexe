@@ -5,6 +5,7 @@
 //!        [--scene name] [--seed n] [--profile out.csv] [--no-sleep]
 //!   hexe --headless --bench                (zig build bench)
 //!   hexe --headless --verify-determinism   (zig build verify-determinism)
+//!   hexe --headless --gpu-tests            (zig build gpu-test)
 const std = @import("std");
 const builtin = @import("builtin");
 const Engine = @import("engine.zig").Engine;
@@ -17,6 +18,7 @@ const cell = @import("sim/cell.zig");
 const View = @import("render/world.zig").View;
 const bench = @import("bench.zig");
 const verify = @import("verify.zig");
+const gpu_tests = @import("gpu_tests.zig");
 
 pub const std_options: std.Options = .{
     .log_level = if (builtin.mode == .debug) .info else .info,
@@ -35,6 +37,7 @@ pub const Cli = struct {
     validation: ?bool = null,
     bench: bool = false,
     verify: bool = false,
+    gpu_tests: bool = false,
     width: u32 = 1600,
     height: u32 = 900,
     /// Headless: also write the window view (camera, zoom, HUD) as PNG.
@@ -55,6 +58,7 @@ fn usage() void {
         \\  --zoom N                integer zoom (default 2)
         \\  --center X,Y            world pixel at the view center
         \\  --scene NAME            empty|sandbox|determinism|bench_static|bench_active|bench_mixed|noise
+        \\                          particles_demo|bench_particles|bench_particles_rain|determinism_commands
         \\  --seed N                scene seed (default 1)
         \\  --profile PATH          per-tick per-pass GPU ms as CSV (tick,pass,ms)
         \\  --no-sleep              disable activity tiles (simulate every tile)
@@ -63,6 +67,7 @@ fn usage() void {
         \\  --size WxH              window size (default 1600x900)
         \\  --bench                 run the benchmark scenes (with --headless)
         \\  --verify-determinism    CPU reference vs GPU, bit for bit
+        \\  --gpu-tests             particle, readback mirror and event queue tests on the GPU
         \\
     , .{});
 }
@@ -122,6 +127,8 @@ fn parseCli(args: []const [:0]const u8) !Cli {
             cli.bench = true;
         } else if (std.mem.eql(u8, a, "--verify-determinism")) {
             cli.verify = true;
+        } else if (std.mem.eql(u8, a, "--gpu-tests")) {
+            cli.gpu_tests = true;
         } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
             usage();
             std.process.exit(0);
@@ -141,6 +148,7 @@ pub fn main(init: std.process.Init) !u8 {
     const cli = parseCli(args) catch return 2;
 
     if (cli.verify) return verify.run(gpa, io, cli);
+    if (cli.gpu_tests) return gpu_tests.run(gpa, io, cli);
     if (cli.bench) return bench.run(gpa, io, cli);
     if (!cli.headless) return app.run(gpa, io, cli);
     return runHeadless(gpa, io, cli);
@@ -174,7 +182,11 @@ fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
     engine.profile = &profile;
 
     const start = std.Io.Timestamp.now(io, .awake);
-    for (0..cli.ticks) |_| try engine.frame(1, .{ .scene = cli.scene, .seed = cli.seed }, null);
+    var peak_particles: u32 = 0;
+    for (0..cli.ticks) |_| {
+        try engine.frame(1, .{ .scene = cli.scene, .seed = cli.seed }, null);
+        peak_particles = @max(peak_particles, engine.mirror().particles.live);
+    }
     try engine.finish();
     const elapsed_ms = @as(f64, @floatFromInt(start.untilNow(io, .awake).nanoseconds)) / 1e6;
 
@@ -183,6 +195,8 @@ fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         std.debug.print("  {s:<10} {d:8.4} ms/tick (min {d:.4}, max {d:.4})\n", .{ engine.names.get(i), profile.mean(i), profile.min[i], profile.max[i] });
     }
     std.debug.print("  {s:<10} {d:8.4} ms/tick, active tiles at end: {d}\n", .{ "grid", profile.gridMean(), engine.last.active_tiles });
+    const ps = engine.mirror().particles;
+    std.debug.print("  particles: {d} live at end (tick {d}), peak {d}; last tick spawned {d} landed {d} refused {d} lost {d} impacts {d}\n", .{ ps.live, engine.mirror().tick, peak_particles, ps.spawned, ps.landed, ps.refused, ps.lost, ps.impacts });
     if (cli.screenshot) |path| try engine.screenshot(io, path, cli.crop);
     if (cli.view_screenshot) |path| {
         const center = cli.center orelse .{ cell.world_size / 2, cell.world_size / 2 };
@@ -213,6 +227,8 @@ test {
     _ = @import("sim/commands.zig");
     _ = @import("sim/scenes.zig");
     _ = @import("sim/reference/grid.zig");
+    _ = @import("sim/particles.zig");
+    _ = @import("sim/readback.zig");
     _ = @import("render/font.zig");
     _ = @import("util/png.zig");
 }

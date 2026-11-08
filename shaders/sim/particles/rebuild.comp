@@ -1,0 +1,15 @@
+#version 460
+// Reset the free stack to capacity-1 .. 0 (top = index 0) once every
+// particle is free, so new particles fill low indices and the high-water
+// mark (and the cost of every pass over particle indices) starts from zero.
+// Scheduled by control.comp; indirect dispatch from PCTRL_REBUILD_DISPATCH.
+#include "common.glsl"
+#include "sim/particles/particles.glsl"
+
+layout(local_size_x = 256) in;
+
+void main() {
+    uint j = gl_GlobalInvocationID.x;
+    uint capacity = PCTRL[PCTRL_CAPACITY];
+    if (j < capacity) P_FREE[j] = capacity - 1u - j;
+}

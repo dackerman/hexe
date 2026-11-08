@@ -25,6 +25,8 @@ const commands = @import("commands.zig");
 const Grid = @import("grid.zig").Grid;
 const Noise = @import("noise.zig").Noise;
 const materials = @import("materials.zig");
+const Particles = @import("particles.zig").Particles;
+const Readback = @import("readback.zig").Readback;
 
 pub const frames_in_flight = 2;
 /// Most ticks recorded into one frame (catch-up after a slow frame).
@@ -36,6 +38,11 @@ pub const Config = struct {
     sleep: bool = true,
     /// Debug: replace the simulation with animated noise (M0 bring-up).
     noise: bool = false,
+    /// Particle buffer capacity, spawn requests per tick, and the default
+    /// per-material live budget (0 = capacity / 4); docs/decisions/50.
+    particle_capacity: u32 = 1 << 20,
+    particle_queue: u32 = 1 << 18,
+    particle_budget: u32 = 0,
 };
 
 /// World-wide GPU resources every pass may use. All live at fixed bindless
@@ -66,6 +73,8 @@ pub const Frame = struct {
     substep: u32 = 0,
     /// Frame-in-flight slot, for per-slot resources.
     slot: u32,
+    /// Index of this tick within the frame (0..max_ticks_per_frame-1).
+    tick_in_frame: u32 = 0,
     shared: *const Shared,
     timer: *gpu.timestamps.Recorder,
     /// This tick's commands as uploaded; `command_base` is the index of the
@@ -126,6 +135,8 @@ pub const Pipeline = struct {
     grid: Grid,
     applier: commands.Applier,
     noise: Noise,
+    particles: Particles,
+    readback: Readback,
     // ---- end subsystems ----
 
     /// In place: `shared` points into `self`.
@@ -139,12 +150,18 @@ pub const Pipeline = struct {
         errdefer self.applier.deinit();
         self.noise = try Noise.init(ctx, config, alloc);
         errdefer self.noise.deinit();
+        self.particles = try Particles.init(ctx, config, alloc);
+        errdefer self.particles.deinit();
+        self.readback = try Readback.init(ctx, config, alloc);
+        errdefer self.readback.deinit();
         // ---- end subsystem init ----
         self.shared = self.grid.shared();
     }
 
     pub fn deinit(self: *Pipeline) void {
         // ---- subsystem deinit (reverse order) ----
+        self.readback.deinit();
+        self.particles.deinit();
         self.noise.deinit();
         self.applier.deinit();
         self.grid.deinit();
@@ -158,8 +175,12 @@ pub const Pipeline = struct {
             return;
         }
         // ---- tick order ----
+        // 1'. per-tick resets: event queue, particle counters (M4)
+        self.readback.recordBegin(frame);
+        self.particles.recordBegin(frame);
         // 2. apply edits
         self.applier.record(frame);
+        self.particles.recordCommands(frame); // spray commands, CPU spawns (M4)
         //    rasterize bodies (M7)
         // 7'. activity compaction: tiles marked last tick and by this tick's
         //     edits form this tick's active list (docs/decisions/10-activity-tiles.md)
@@ -173,8 +194,10 @@ pub const Pipeline = struct {
         frame.substep = 0;
         // 4. coarsen solid mask (M5)
         // 5. air field (M5)
-        // 6. liquid solver, particles (M4, M6)
+        // 6. liquid solver (M6); ballistic particles and spawn queue (M4)
+        self.particles.record(frame);
         // 7. readback buffers, event queue (M4)
+        self.readback.record(frame, &self.particles);
         // ---- end tick order ----
     }
 };
