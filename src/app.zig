@@ -10,6 +10,10 @@
 //!   F5             save (--world --save DIR)    Esc           quit
 //!   F3             air field overlay (M5)          E             explosion at the cursor
 //!   Esc            quit
+//! Bodies (M7, docs/decisions/99-bodies-gpu-sandbox-keys.md):
+//!   C  concrete crate at the cursor     X  wood crate at the cursor
+//!   V  stone slab at the cursor         B  steel beam: then click both ends
+//!   (right mouse, the eject tool, cuts bodies and makes loose terrain fall)
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("sdl");
@@ -25,13 +29,16 @@ const materials = @import("sim/materials.zig");
 const max_ticks_per_frame = @import("sim/pipeline.zig").max_ticks_per_frame;
 const Profile = @import("profile.zig").Profile;
 const world_mode = @import("world_mode.zig");
+const bodies_materials = @import("sim/bodies_materials.zig");
 
 const tick_ns: i96 = std.time.ns_per_s / 60;
 
 pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
     var window = try Window.init("hexe", cli.width, cli.height);
     defer window.deinit();
-    const table = materials_builtin.table();
+    var table = materials_builtin.table();
+    const bodies_on = cli.bodies orelse true;
+    if (bodies_on) bodies_materials.ensureMaterials(&table);
     const engine = try gpa.create(Engine);
     defer gpa.destroy(engine);
     try engine.init(gpa, .{
@@ -39,12 +46,13 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         .vsync = cli.vsync,
         .table = &table,
         .validation = cli.validation orelse (builtin.mode == .debug),
-        .pipeline = .{ .sleep = cli.sleep, .noise = cli.scene == .noise, .air = cli.air, .air_sleep = cli.air_sleep },
+        .pipeline = .{ .sleep = cli.sleep, .noise = cli.scene == .noise, .air = cli.air, .air_sleep = cli.air_sleep, .bodies = bodies_on },
     });
     defer engine.deinit();
     engine.pipeline.air.overlay = cli.overlay;
     var profile: Profile = .{};
     engine.profile = &profile;
+    var tools: BodyTools = .{};
 
     // World mode (--world): streamed endless world, camera in world cells.
     var session: ?*world_mode.Session = null;
@@ -151,7 +159,12 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         const scale: i32 = @intCast(view.scale);
         const mwx = view.camera_x + @divFloor(@as(i32, @intFromFloat(input.mouse_x)), scale);
         const mwy = view.camera_y + @divFloor(@as(i32, @intFromFloat(input.mouse_y)), scale);
-        if (input.left or input.right) {
+        // Body tools (M7); while placing a beam, left clicks pick its ends.
+        if (bodies_on) tools.update(engine, input, .{ @floatFromInt(mwx), @floatFromInt(mwy) }, .{
+            @floatFromInt(view.camera_x + @as(i32, @intCast(win_w / 2 / view.scale))),
+            @floatFromInt(view.camera_y + @as(i32, @intCast(win_h / 2 / view.scale))),
+        });
+        if ((input.left and !tools.placing_beam and !tools.consumed_click) or input.right) {
             const paint: u8 = if (input.right) materials.air else material;
             const from = last_paint orelse [2]i32{ mwx, mwy };
             strokeLine(&pending, from, .{ mwx, mwy }, radius, paint);
@@ -181,6 +194,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
             .material_count = table.len,
             .world = session,
         });
+        if (show_hud and bodies_on) tools.hud(engine, &profile);
 
         // Streaming runs once per tick, before the ticks are recorded.
         if (session) |s| {
@@ -237,6 +251,56 @@ pub fn fillHud(engine: *Engine, profile: *const Profile, info: HudInfo) void {
     if (info.world) |s| s.hudLines(hud);
     hud.print("1-{d} material  LMB paint  RMB erase  wheel size  WASD pan  =/- zoom  space pause  F2 tiles  F3 air  E boom", .{info.material_count -| 1});
 }
+
+/// Sandbox keys for bodies: crates, slabs, two-click beams.
+const BodyTools = struct {
+    placing_beam: bool = false,
+    beam_start: ?[2]f32 = null,
+    prev_left: bool = false,
+    /// The left button went down this frame for a body tool: do not paint
+    /// until it is released.
+    consumed_click: bool = false,
+
+    fn update(self: *BodyTools, engine: *Engine, input: *const Input, cursor: [2]f32, center: [2]f32) void {
+        const sim = engine.pipeline.bodies.sim;
+        const roles = sim.mats.roles;
+        // Keep bodies in the unwrapped frame around the camera (torus).
+        sim.setCenter(center[0], center[1]);
+        if (input.wasPressed(c.SDL_SCANCODE_C)) _ = sim.spawnCrate(cursor[0], cursor[1], 40, roles.concrete) catch {};
+        if (input.wasPressed(c.SDL_SCANCODE_X)) _ = sim.spawnCrate(cursor[0], cursor[1], 40, roles.wood) catch {};
+        if (input.wasPressed(c.SDL_SCANCODE_V)) _ = sim.dropSlab(cursor[0], cursor[1], 160, 16, roles.stone) catch {};
+        if (input.wasPressed(c.SDL_SCANCODE_B)) {
+            self.placing_beam = !self.placing_beam;
+            self.beam_start = null;
+        }
+        const clicked = input.left and !self.prev_left;
+        self.prev_left = input.left;
+        if (!input.left) self.consumed_click = false;
+        if (self.placing_beam and clicked) {
+            self.consumed_click = true;
+            if (self.beam_start) |a| {
+                sim.placeBeam(a[0], a[1], cursor[0], cursor[1], roles.steel, 6);
+                self.placing_beam = false;
+                self.beam_start = null;
+            } else self.beam_start = cursor;
+        }
+    }
+
+    fn hud(self: *const BodyTools, engine: *Engine, profile: *const Profile) void {
+        const sim = engine.pipeline.bodies.sim;
+        var gpu_ms: f64 = 0;
+        for (0..engine.names.count) |i| {
+            if (std.mem.eql(u8, engine.names.get(i), "bodies")) gpu_ms = profile.smooth[i];
+        }
+        engine.hud.print("bodies {d}  cpu {d:.2} ms  readback {d:.2} ms  gpu {d:.3} ms  C crate  X wood  V slab  B beam{s}", .{
+            sim.bodyCount(),
+            sim.stats.cpu_ms,
+            sim.stats.readback_ms,
+            gpu_ms,
+            if (self.placing_beam) (if (self.beam_start != null) "  [click the beam's end]" else "  [click the beam's start]") else "",
+        });
+    }
+};
 
 /// Circles every radius/2 pixels from `a` to `b` (at least one).
 fn strokeLine(list: *commands.CommandList, a: [2]i32, b: [2]i32, radius: i32, material: u8) void {

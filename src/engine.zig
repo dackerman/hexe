@@ -20,6 +20,7 @@ const cell = @import("sim/cell.zig");
 const commands = @import("sim/commands.zig");
 const materials = @import("sim/materials.zig");
 const scenes = @import("sim/scenes.zig");
+const bodies_scenes = @import("sim/bodies_scenes.zig");
 const readback = @import("sim/readback.zig");
 const WorldPass = @import("render/world.zig").WorldPass;
 const View = @import("render/world.zig").View;
@@ -254,6 +255,10 @@ pub const Engine = struct {
         slot.commands = 0;
         slot.dropped = 0;
 
+        // ---- bodies (M7): ticks before this frame are submitted; a terrain
+        // readback taken while recording it shows their results.
+        if (self.pipeline.config.bodies) self.pipeline.bodies.beginFrame(self.tick);
+        // ---- end bodies ----
         if (ticks > 0) {
             const cmd = slot.sim_cmd;
             try ctx.vkd.beginCommandBuffer(cmd, &.{ .flags = .{ .one_time_submit = true } });
@@ -262,6 +267,12 @@ pub const Engine = struct {
                 self.list.begin(self.tick);
                 scenes.emit(src.scene, self.tick, src.seed, &self.list);
                 if (k == 0) for (src.extra) |c| self.list.push(c);
+                // ---- bodies (M7): scripted body actions, CPU step, GPU upload ----
+                if (self.pipeline.config.bodies) {
+                    bodies_scenes.script(src.scene, self.tick, self.pipeline.bodies.sim, &self.list);
+                    try self.pipeline.bodies.tick(&self.list, .{ .tick = self.tick, .slot = slot_index, .tick_in_frame = @intCast(k) });
+                }
+                // ---- end bodies ----
                 slot.commands += self.list.len;
                 slot.dropped += self.list.dropped;
                 const base = self.pipeline.applier.upload(slot_index, @intCast(k), &self.list);

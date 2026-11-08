@@ -1112,6 +1112,56 @@ pub const BodyWorld = struct {
         return b2.b2Body_IsAwake(s.id);
     }
 
+    // -- integration helpers (M7 world integration, src/sim/bodies_sim.zig) --
+
+    /// Shift a body by (dx, dy) keeping its rotation and velocity. Used to
+    /// keep bodies in an unwrapped frame near the camera on the torus; jointed
+    /// bodies must be shifted together (joints keep local frames).
+    pub fn translateBody(self: *BodyWorld, h: BodyHandle, dx: f32, dy: f32) void {
+        const s = self.slotPtr(h) orelse return;
+        const t = b2.b2Body_GetTransform(s.id);
+        b2.b2Body_SetTransform(s.id, .{ .x = t.p.x + dx, .y = t.p.y + dy }, t.q);
+    }
+
+    pub fn setVelocity(self: *BodyWorld, h: BodyHandle, v: Vec2, angular_velocity: f32) void {
+        const s = self.slotPtr(h) orelse return;
+        b2.b2Body_SetLinearVelocity(s.id, v.b());
+        b2.b2Body_SetAngularVelocity(s.id, angular_velocity);
+    }
+
+    pub fn wakeBody(self: *BodyWorld, h: BodyHandle) void {
+        const s = self.slotPtr(h) orelse return;
+        b2.b2Body_SetAwake(s.id, true);
+    }
+
+    /// Byte offset of a body's bitmap in `pixels` (the GPU atlas mirrors it).
+    pub fn pixelOffset(self: *const BodyWorld, h: BodyHandle) ?u32 {
+        const s = self.slotConst(h) orelse return null;
+        return s.pix_off;
+    }
+
+    /// The beam a body is a segment of.
+    pub fn beamOf(self: *const BodyWorld, h: BodyHandle) ?BeamHandle {
+        const s = self.slotConst(h) orelse return null;
+        if (s.beam == no_beam) return null;
+        return .{ .index = s.beam, .gen = self.beams[s.beam].gen };
+    }
+
+    pub const BeamInfo = struct { material: u8, thickness: u16, segments: u16, seg_len: u16 };
+
+    pub fn beamInfo(self: *BodyWorld, h: BeamHandle) ?BeamInfo {
+        const b = self.beamPtr(h) orelse return null;
+        return .{ .material = b.material, .thickness = b.thickness, .segments = b.segments, .seg_len = b.seg_len };
+    }
+
+    /// Index of a body among its beam's segments.
+    pub fn beamSegmentIndex(self: *BodyWorld, beam: BeamHandle, h: BodyHandle) ?usize {
+        for (self.beamSegments(beam), 0..) |sh, k| {
+            if (sh.eql(h)) return k;
+        }
+        return null;
+    }
+
     /// World pixel → bitmap pixel of body `h`, or null if outside its bitmap.
     pub fn worldToBitmap(self: *const BodyWorld, h: BodyHandle, wx: f32, wy: f32) ?struct { x: u16, y: u16 } {
         const s = self.slotConst(h) orelse return null;

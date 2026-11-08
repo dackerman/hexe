@@ -1,0 +1,138 @@
+#version 460
+// Body rasterization, one mode per dispatch (BODY_MODE_*, bodies.glsl). A
+// workgroup is one 16x16 block of one body's world bounding box; each thread
+// inverse-maps its world pixel center into the body bitmap with 16.16 fixed
+// point math, so rotated bodies have no holes and the result does not depend
+// on float rounding. Per tick the host runs
+//   EXTRACT + RESET -> CLAIM -> WRITE -> CLEAR
+// with barriers in between. Two bodies racing for a pixel: the lowest id wins
+// (atomicMin on a private claim image, values stamped with the tick).
+#include "common.glsl"
+#include "sim/bodies/bodies.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PC {
+    uint upload_slot; // instances and items
+    uint atlas_slot; // bitmap atlas (uint8 material ids)
+    uint claim_slot; // R32_UINT claim image
+    uint stats_slot;
+    uint item_base; // first work item of this dispatch
+    uint stats_base; // first stats word of this tick's region
+    uint mode;
+    uint mark_tiles;
+    uint stamp; // (tick & BODY_STAMP_MASK) << BODY_ID_BITS
+} pc;
+
+shared bool s_changed;
+shared uint s_counts[4]; // written, overlap static, overlap body, displaced/cleared/extracted
+
+#define CLAIM g_uimages[pc.claim_slot]
+
+void main() {
+    if (gl_LocalInvocationIndex < 4u) s_counts[gl_LocalInvocationIndex] = 0u;
+    if (gl_LocalInvocationIndex == 0u) s_changed = false;
+    barrier();
+
+    uvec2 item = g_body_items[pc.upload_slot].items[pc.item_base + gl_WorkGroupID.x];
+    BodyInstance b = g_body_instances[pc.upload_slot].instances[item.x];
+    uvec2 block = uvec2(item.y & 0xffffu, item.y >> 16);
+    uvec2 local = block * 16u + gl_LocalInvocationID.xy;
+    uvec2 asize = uvec2(b.aabb_size & 0xffffu, b.aabb_size >> 16);
+    ivec2 wp = wrap_coord(b.aabb_origin + ivec2(local));
+    uint claim_value = pc.stamp | b.id;
+
+    if (all(lessThan(local, asize))) {
+        uint m = 0u;
+        if (pc.mode != BODY_MODE_CLEAR) {
+            ivec2 l = ivec2(local);
+            int fx = b.l0.x + l.x * b.rot.x + l.y * b.rot.y;
+            int fy = b.l0.y - l.x * b.rot.y + l.y * b.rot.x;
+            ivec2 bp = ivec2(fx >> 16, fy >> 16);
+            ivec2 bsize = ivec2(int(b.bitmap_size & 0xffffu), int(b.bitmap_size >> 16));
+            if (all(greaterThanEqual(bp, ivec2(0))) && all(lessThan(bp, bsize))) {
+                m = uint(g_body_atlas[pc.atlas_slot].px[b.atlas_offset + uint(bp.y * bsize.x + bp.x)]);
+            }
+            if (m != 0u && pc.mode == BODY_MODE_WRITE) {
+                // Stable shade per bitmap pixel.
+                m |= (hash_u32(hash_salt(uint(bp.x), uint(bp.y), b.atlas_offset, SALT_BODY_VARIANT)) >> 28) << 8;
+            }
+        }
+
+        if (pc.mode == BODY_MODE_EXTRACT) {
+            uint c = imageLoad(CELLS, wp).x;
+            if (m != 0u && (c & (CELL_FLAG_BODY | CELL_FLAG_PARTICLE)) == 0u && cell_material(c) == m) {
+                imageStore(CELLS, wp, uvec4(spawn_cell(MATERIAL_AIR, cell_variant(c)), 0u, 0u, 0u));
+                s_changed = true;
+                atomicAdd(s_counts[3], 1u);
+            }
+        } else if (pc.mode == BODY_MODE_RESET) {
+            if (m != 0u) imageStore(CLAIM, wp, uvec4(0xffffffffu, 0u, 0u, 0u));
+        } else if (pc.mode == BODY_MODE_CLAIM) {
+            if (m != 0u) {
+                uint c = imageLoad(CELLS, wp).x;
+                bool mine = cell_has(c, CELL_FLAG_BODY) && imageLoad(OWNER, wp).x == b.id;
+                if (mine || body_claimable(c)) imageAtomicMin(CLAIM, wp, claim_value);
+            }
+        } else if (pc.mode == BODY_MODE_WRITE) {
+            if (m != 0u) {
+                uint c = imageLoad(CELLS, wp).x;
+                bool mine = cell_has(c, CELL_FLAG_BODY) && imageLoad(OWNER, wp).x == b.id;
+                if (mine || body_claimable(c)) {
+                    if (imageLoad(CLAIM, wp).x == claim_value) {
+                        uint mat = m & 0xffu;
+                        // Own cell of the same material: keep its temperature and
+                        // state (heat, damage) but take the shade of the bitmap
+                        // pixel now on it, so the texture moves with the body.
+                        uint nc = mine && cell_material(c) == mat ? cell_with_variant(c, m >> 8) : (spawn_cell(mat, m >> 8) | CELL_FLAG_BODY);
+                        if (nc != c) {
+                            if (!mine && cell_material(c) != MATERIAL_AIR) {
+                                vec2 r = vec2(ivec2(local) - ivec2(asize / 2u));
+                                vec2 v = b.velocity + b.angular_velocity * vec2(-r.y, r.x);
+                                bodies_eject_cell(wp, c, v);
+                                atomicAdd(s_counts[3], 1u);
+                            }
+                            imageStore(CELLS, wp, uvec4(nc, 0u, 0u, 0u));
+                            imageStore(OWNER, wp, uvec4(b.id, 0u, 0u, 0u));
+                            s_changed = true;
+                            atomicAdd(s_counts[0], 1u);
+                        }
+                    } else {
+                        atomicAdd(s_counts[2], 1u); // a lower id took it
+                    }
+                } else {
+                    atomicAdd(s_counts[cell_has(c, CELL_FLAG_BODY) ? 2u : 1u], 1u);
+                }
+            }
+        } else if (pc.mode == BODY_MODE_CLEAR) {
+            uint c = imageLoad(CELLS, wp).x;
+            if (cell_has(c, CELL_FLAG_BODY) && imageLoad(OWNER, wp).x == b.id && imageLoad(CLAIM, wp).x != claim_value) {
+                imageStore(CELLS, wp, uvec4(spawn_cell(MATERIAL_AIR, cell_variant(c)), 0u, 0u, 0u));
+                imageStore(OWNER, wp, uvec4(0u));
+                s_changed = true;
+                atomicAdd(s_counts[3], 1u);
+            }
+        }
+    }
+
+    barrier();
+    if (gl_LocalInvocationIndex == 0u) {
+        uint base = pc.stats_base;
+        if (pc.mode == BODY_MODE_WRITE) {
+            if (s_counts[0] != 0u) atomicAdd(g_body_stats[pc.stats_slot].words[base + BODY_STAT_WRITTEN], s_counts[0]);
+            if (s_counts[1] != 0u) atomicAdd(g_body_stats[pc.stats_slot].words[base + BODY_STAT_OVERLAP_STATIC], s_counts[1]);
+            if (s_counts[2] != 0u) atomicAdd(g_body_stats[pc.stats_slot].words[base + BODY_STAT_OVERLAP_BODY], s_counts[2]);
+            if (s_counts[3] != 0u) atomicAdd(g_body_stats[pc.stats_slot].words[base + BODY_STAT_DISPLACED], s_counts[3]);
+            uint overlaps = s_counts[1] + s_counts[2];
+            if (overlaps != 0u) atomicAdd(g_body_stats[pc.stats_slot].words[base + BODY_STAT_INSTANCE_BASE + b.index], overlaps);
+        } else if (pc.mode == BODY_MODE_CLEAR && s_counts[3] != 0u) {
+            atomicAdd(g_body_stats[pc.stats_slot].words[base + BODY_STAT_CLEARED], s_counts[3]);
+        } else if (pc.mode == BODY_MODE_EXTRACT && s_counts[3] != 0u) {
+            atomicAdd(g_body_stats[pc.stats_slot].words[base + BODY_STAT_EXTRACTED], s_counts[3]);
+        }
+        if (s_changed && pc.mark_tiles != 0u) {
+            ivec2 corner = wrap_coord(b.aabb_origin + ivec2(block * 16u));
+            mark_tile_and_neighbors(uvec2(corner) >> TILE_SHIFT);
+        }
+    }
+}

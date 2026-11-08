@@ -20,6 +20,8 @@ const bench = @import("bench.zig");
 const verify = @import("verify.zig");
 const world_mode = @import("world_mode.zig");
 const air_test = @import("air_test.zig");
+const bodies_scenes = @import("sim/bodies_scenes.zig");
+const bodies_materials = @import("sim/bodies_materials.zig");
 
 pub const std_options: std.Options = .{
     .log_level = if (builtin.mode == .debug) .info else .info,
@@ -69,6 +71,9 @@ pub const Cli = struct {
     air_test: bool = false,
     /// Headless: also write a screenshot every N ticks (`<path>-<tick>.png`).
     screenshot_every: u32 = 0,
+    /// Rigid bodies (M7): null = on in the windowed app and the bodies_*
+    /// scenes, off otherwise (determinism, bench).
+    bodies: ?bool = null,
 };
 
 fn usage() void {
@@ -102,6 +107,7 @@ fn usage() void {
         \\  --overlay air           air field debug overlay (F3 in the window)
         \\  --screenshot-every N    headless: also write PATH-<tick>.png every N ticks
         \\  --air-test              air field scenarios (sealed room, corridor blast)
+        \\  --bodies / --no-bodies  rigid bodies (default: on in the window and bodies_* scenes)
         \\
     , .{});
 }
@@ -159,6 +165,10 @@ fn parseCli(args: []const [:0]const u8) !Cli {
             cli.height = try std.fmt.parseInt(u32, s[x + 1 ..], 10);
         } else if (std.mem.eql(u8, a, "--bench")) {
             cli.bench = true;
+        } else if (std.mem.eql(u8, a, "--bodies")) {
+            cli.bodies = true;
+        } else if (std.mem.eql(u8, a, "--no-bodies")) {
+            cli.bodies = false;
         } else if (std.mem.eql(u8, a, "--verify-determinism")) {
             cli.verify = true;
         } else if (std.mem.eql(u8, a, "--world")) {
@@ -219,13 +229,17 @@ pub fn main(init: std.process.Init) !u8 {
 }
 
 fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
-    const table = materials_builtin.table();
+    var table = materials_builtin.table();
+    // ---- bodies (M7) ----
+    const bodies_on = cli.bodies orelse bodies_scenes.isBodiesScene(cli.scene);
+    if (bodies_on) bodies_materials.ensureMaterials(&table);
+    // ---- end bodies ----
     const engine = try gpa.create(Engine);
     defer gpa.destroy(engine);
     try engine.init(gpa, .{
         .table = &table,
         .validation = cli.validation orelse (builtin.mode == .debug),
-        .pipeline = .{ .sleep = cli.sleep, .noise = cli.scene == .noise, .air = cli.air and cli.scene != .determinism, .air_sleep = cli.air_sleep },
+        .pipeline = .{ .sleep = cli.sleep, .noise = cli.scene == .noise, .air = cli.air and cli.scene != .determinism, .air_sleep = cli.air_sleep, .bodies = bodies_on },
     });
     defer engine.deinit();
     engine.pipeline.air.overlay = cli.overlay;
@@ -267,6 +281,7 @@ fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         std.debug.print("  {s:<10} {d:8.4} ms/tick (min {d:.4}, max {d:.4})\n", .{ engine.names.get(i), profile.mean(i), profile.min[i], profile.max[i] });
     }
     std.debug.print("  {s:<10} {d:8.4} ms/tick, active tiles at end: {d}\n", .{ "grid", profile.gridMean(), engine.last.active_tiles });
+    if (bodies_on) try bodies_scenes.report(engine, gpa);
     if (cli.screenshot) |path| try engine.screenshot(io, path, cli.crop);
     if (cli.view_screenshot) |path| {
         const center = cli.center orelse .{ cell.world_size / 2, cell.world_size / 2 };
@@ -301,4 +316,8 @@ test {
     _ = @import("render/font.zig");
     _ = @import("util/png.zig");
     _ = @import("world_mode.zig");
+    _ = @import("sim/bodies_gpu.zig");
+    _ = @import("sim/bodies_sim.zig");
+    _ = @import("sim/bodies_materials.zig");
+    _ = @import("sim/terrain_source.zig");
 }

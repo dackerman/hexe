@@ -5,6 +5,7 @@ const std = @import("std");
 const cell = @import("cell.zig");
 const commands = @import("commands.zig");
 const m = @import("materials_builtin.zig");
+const bodies_scenes = @import("bodies_scenes.zig");
 
 pub const Scene = enum {
     /// Nothing; paint with the mouse.
@@ -29,6 +30,13 @@ pub const Scene = enum {
     /// every 20 ticks at rotating spots, heat sources; the air field stays
     /// fully active.
     bench_air,
+    // ---- bodies (M7), src/sim/bodies_scenes.zig; these turn bodies on ----
+    bodies_crate,
+    bodies_slab,
+    bodies_beam,
+    bodies_water,
+    bodies_bench,
+    // ---- end bodies ----
 };
 
 pub fn emit(scene: Scene, tick: u32, seed: u32, list: *commands.CommandList) void {
@@ -40,6 +48,7 @@ pub fn emit(scene: Scene, tick: u32, seed: u32, list: *commands.CommandList) voi
         .bench_active => if (tick == 0) list.fillRect(0, 0, cell.world_size, cell.world_size, m.sand, .{ .coverage = 128 }),
         .air_demo => airDemo(tick, list),
         .bench_air => benchAir(tick, list),
+        .bodies_crate, .bodies_slab, .bodies_beam, .bodies_water, .bodies_bench => bodies_scenes.terrain(scene, tick, list),
         .bench_mixed => if (tick == 0) {
             list.fillRect(0, 0, W, W, m.water, .{ .coverage = 80 });
             list.fillRect(0, 0, W, W, m.sand, .{ .coverage = 80, .only_air = true });

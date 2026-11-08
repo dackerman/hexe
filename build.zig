@@ -31,6 +31,10 @@ const shader_sources = [_][]const u8{
     "sim/air/sample.comp",
     "sim/air/downsample.comp",
     // ---- end air field ----
+    // ---- bodies (M7) ----
+    "sim/bodies/raster.comp",
+    "sim/bodies/points.comp",
+    "sim/bodies/eject_fallback.comp",
     // ---- render ----
     "render/fullscreen.vert",
     "render/world.frag",
@@ -119,6 +123,11 @@ pub fn build(b: *std.Build) void {
         .{ .name = "box2d", .module = box2d_mod },
         .{ .name = "bodies", .module = bodies_mod },
     };
+    // The fixed-mode executables (verify: ReleaseSafe, bench: ReleaseFast)
+    // link Box2D since M7; a Debug libbox2d carries UBSan calls they do not
+    // bundle the runtime for, so they get Box2D built in their own mode.
+    const verify_imports = sharedImportsFor(b, target, .ReleaseSafe, data_mod, world_mod);
+    const bench_imports = sharedImportsFor(b, target, .ReleaseFast, data_mod, world_mod);
 
     const exe = addHexe(b, .{
         .name = "hexe",
@@ -202,7 +211,7 @@ pub fn build(b: *std.Build) void {
         .vk_xml = vk_xml,
         .sdl_c = sdl_c,
         .shaders_zig = shaders_zig,
-        .shared = &shared_imports,
+        .shared = &verify_imports,
     });
     const verify_run = b.addRunArtifact(verify_exe.compile);
     verify_run.addArgs(&.{ "--headless", "--verify-determinism" });
@@ -225,7 +234,7 @@ pub fn build(b: *std.Build) void {
         .vk_xml = vk_xml,
         .sdl_c = sdl_c,
         .shaders_zig = shaders_zig,
-        .shared = &shared_imports,
+        .shared = &bench_imports,
     });
     const bench_run = b.addRunArtifact(bench_exe.compile);
     bench_run.addArgs(&.{ "--headless", "--bench" });
@@ -239,6 +248,23 @@ pub fn build(b: *std.Build) void {
     air_test_run.addPassthruArgs();
     air_test_run.has_side_effects = true;
     b.step("air-test", "Air field scenarios 3 and 4 (docs/04-fluids.md) headless on the GPU").dependOn(&air_test_run.step);
+}
+
+/// Shared imports with Box2D and the bodies layer built in `optimize`.
+fn sharedImportsFor(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, data_mod: *std.Build.Module, world_mod: *std.Build.Module) [4]std.Build.Module.Import {
+    const box2d_mod = b.dependency("box2d", .{ .target = target, .optimize = optimize }).module("box2d");
+    const bodies_mod = b.createModule(.{
+        .root_source_file = b.path("src/sim/bodies.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "box2d", .module = box2d_mod }},
+    });
+    return .{
+        .{ .name = "data", .module = data_mod },
+        .{ .name = "world", .module = world_mod },
+        .{ .name = "box2d", .module = box2d_mod },
+        .{ .name = "bodies", .module = bodies_mod },
+    };
 }
 
 const HexeOptions = struct {
@@ -279,6 +305,7 @@ fn addHexe(b: *std.Build, o: HexeOptions) Hexe {
     });
     // Raw GLSL sources the CPU mirrors are checked against (see src/sim/cell.zig tests).
     module.addAnonymousImport("common_glsl", .{ .root_source_file = b.path("shaders/common.glsl") });
+    module.addAnonymousImport("bodies_glsl", .{ .root_source_file = b.path("shaders/sim/bodies/bodies.glsl") });
     for (o.shared) |imp| module.addImport(imp.name, imp.module);
     const compile = b.addExecutable(.{ .name = o.name, .root_module = module });
     return .{ .compile = compile, .module = module };
