@@ -1,9 +1,26 @@
 #version 460
-// Skyline: for each column of the light region, the first row from the top
-// of the world (y = 0) whose cell blocks light. Rays of the radiance
-// cascades that leave the scene upward above the skyline see the sky, and
-// ambient fades with depth below it. One 64-thread workgroup per column;
-// each thread scans a stripe, then a shared-memory min.
+// Skyline and terrain surface, two dispatches of this shader (pass 0, 1).
+//
+// Pass 0, skyline: for each column of the light region, the first row from
+// the top of the world (y = 0) whose cell blocks light, at
+// g_ints[skyline].v[col]. Rays of the radiance cascades that leave the
+// scene upward above the skyline of their exit column see the sky. One
+// 64-thread workgroup per column; each thread scans a stripe, then a
+// shared-memory min.
+//
+// Pass 1, surface: the large-scale terrain surface that decides sky versus
+// back wall behind air and the ambient depth, at
+// g_ints[skyline].v[region_size.x + col]. It is the skyline with features
+// narrower than 2 * SURFACE_R + 1 columns removed by 1D morphology: an
+// opening (max then min filter in y-down terms) drops narrow things
+// standing up from the surface (a corpse, a post, a crate, the witch, a
+// thin spire), then a closing (min then max) fills narrow dips (a shaft,
+// a gap between walls). Wide features keep their exact edges, so small
+// objects cast no fake back wall beside them and caves under a shaft keep
+// theirs (docs/decisions/106-render-skyline-fix.md). One 64-thread
+// workgroup per 64 columns: the four filters need +-4R columns of skyline,
+// loaded once into shared memory (edge columns repeat, which equals a
+// window clamped to the region), then filtered there.
 #include "common.glsl"
 #include "render/render.glsl"
 
@@ -11,18 +28,25 @@ layout(local_size_x = 64) in;
 
 layout(push_constant) uniform PC {
     uint frame_slot;
+    uint pass_index;
 } pc;
 
 #define FR g_render_frames[pc.frame_slot].f
 
+#define SURFACE_R 24
+
+#define SURFACE_HALO (4 * SURFACE_R)
+#define SURFACE_SPAN (64 + 2 * SURFACE_HALO)
+
 shared int s_min[64];
+shared int s_row[2][SURFACE_SPAN];
 
 bool opaque(uint c) {
     RenderMaterial m = g_render_materials[FR.materials_slot].m[cell_material(c)];
     return rm_absorb(m) >= 0.5 || cell_has(c, CELL_FLAG_BODY);
 }
 
-void main() {
+void skyline() {
     uint col = gl_WorkGroupID.x;
     uint lid = gl_LocalInvocationID.x;
     int x = FR.region_origin.x + int(col);
@@ -45,4 +69,38 @@ void main() {
         barrier();
     }
     if (lid == 0u) g_ints[FR.skyline_slot].v[col] = (FR.flags & RFRAME_SKY) != 0u ? s_min[0] : -(1 << 20);
+}
+
+// One 1D filter over the shared span, s_row[src] -> s_row[1 - src]: the
+// max (take_max) or min over [i - R, i + R] within the span. Each filter
+// leaves R fewer exact columns at each end; the 64 in the middle stay exact
+// through all four.
+void filter_span(int src, bool take_max) {
+    for (int i = int(gl_LocalInvocationID.x); i < SURFACE_SPAN; i += 64) {
+        int lo = max(i - SURFACE_R, 0);
+        int hi = min(i + SURFACE_R, SURFACE_SPAN - 1);
+        int v = s_row[src][lo];
+        for (int j = lo + 1; j <= hi; j++) v = take_max ? max(v, s_row[src][j]) : min(v, s_row[src][j]);
+        s_row[1 - src][i] = v;
+    }
+    barrier();
+}
+
+void surface() {
+    int n = int(FR.region_size.x);
+    int x0 = int(gl_WorkGroupID.x) * 64 - SURFACE_HALO;
+    for (int i = int(gl_LocalInvocationID.x); i < SURFACE_SPAN; i += 64)
+        s_row[0][i] = g_ints[FR.skyline_slot].v[clamp(x0 + i, 0, n - 1)];
+    barrier();
+    filter_span(0, true); // opening: erode the height ...
+    filter_span(1, false); // ... and dilate back
+    filter_span(0, false); // closing: dilate the height ...
+    filter_span(1, true); // ... and erode back
+    int i = SURFACE_HALO + int(gl_LocalInvocationID.x);
+    if (x0 + i < n) g_ints[FR.skyline_slot].v[n + x0 + i] = s_row[0][i];
+}
+
+void main() {
+    if (pc.pass_index == 0u) skyline();
+    else surface();
 }

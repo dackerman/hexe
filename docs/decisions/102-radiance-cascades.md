@@ -33,8 +33,9 @@ fallback, and at most 1.5 ms at a 1080p view.
   row from y = 0. A ray that leaves the region, or ends in the top cascade,
   pointing up and above the skyline receives the sky radiance; the sky
   therefore pours into shafts and cave mouths with soft shadows. The sky
-  background is drawn only above the terrain surface (skyline here and
-  24 px to each side), so narrow shafts show the back wall.
+  background is drawn only above the terrain surface (the skyline without
+  features narrower than 49 px, decision 106), so narrow shafts show the
+  back wall.
 - **Ambient**: surface ambient fading to cave ambient over 260 px below
   that surface (tunable; scenes without lights get brighter defaults in
   demo.zig).
