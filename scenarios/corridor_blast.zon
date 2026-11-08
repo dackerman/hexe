@@ -1,0 +1,40 @@
+// docs/04-fluids.md scenario 4: an explosion in a 3-wide corridor destroys
+// sand plugs at twice the distance it does in the open.
+//
+// Top half: bedrock with a 3-tall corridor at y 58..60. Bottom half: open
+// air over a bedrock floor. Both have 2x3 sand plugs at 40, 80, 120 and
+// 160 cells from an identical explosion. A thick bedrock band separates
+// the halves so their pressure fields do not interact.
+.{
+    .name = "corridor_blast",
+    .description = "Same explosion in a 3-wide corridor and in the open: the corridor destroys plugs at 40 and 80 cells, the open only at 40.",
+    .size = .{ .w = 512, .h = 256 },
+    .ticks = 120,
+    .fills = .{
+        .{ .rect = .{ .x = 0, .y = 0, .w = 512, .h = 136 }, .material = "bedrock" },
+        .{ .rect = .{ .x = 16, .y = 58, .w = 480, .h = 3 }, .material = "air" },
+        .{ .rect = .{ .x = 0, .y = 248, .w = 512, .h = 8 }, .material = "bedrock" },
+        // corridor plugs
+        .{ .rect = .{ .x = 64, .y = 58, .w = 2, .h = 3 }, .material = "sand" },
+        .{ .rect = .{ .x = 104, .y = 58, .w = 2, .h = 3 }, .material = "sand" },
+        .{ .rect = .{ .x = 144, .y = 58, .w = 2, .h = 3 }, .material = "sand" },
+        .{ .rect = .{ .x = 184, .y = 58, .w = 2, .h = 3 }, .material = "sand" },
+        // open plugs on the floor
+        .{ .rect = .{ .x = 64, .y = 245, .w = 2, .h = 3 }, .material = "sand" },
+        .{ .rect = .{ .x = 104, .y = 245, .w = 2, .h = 3 }, .material = "sand" },
+        .{ .rect = .{ .x = 144, .y = 245, .w = 2, .h = 3 }, .material = "sand" },
+        .{ .rect = .{ .x = 184, .y = 245, .w = 2, .h = 3 }, .material = "sand" },
+    },
+    .commands = .{
+        .{ .tick = 10, .explode = .{ .x = 24, .y = 59, .radius = 6 } },
+        .{ .tick = 10, .explode = .{ .x = 24, .y = 246, .radius = 6 } },
+    },
+    .assertions = .{
+        .{ .none = .{ .material = "sand", .rect = .{ .x = 64, .y = 58, .w = 2, .h = 3 } }, .label = "corridor plug at 40 destroyed" },
+        .{ .none = .{ .material = "sand", .rect = .{ .x = 104, .y = 58, .w = 2, .h = 3 } }, .label = "corridor plug at 80 destroyed" },
+        .{ .count = .{ .material = "sand", .rect = .{ .x = 184, .y = 58, .w = 2, .h = 3 }, .min = 6 }, .label = "corridor plug at 160 intact" },
+        .{ .none = .{ .material = "sand", .rect = .{ .x = 64, .y = 245, .w = 2, .h = 3 } }, .label = "open plug at 40 destroyed" },
+        .{ .count = .{ .material = "sand", .rect = .{ .x = 104, .y = 245, .w = 2, .h = 3 }, .min = 6 }, .label = "open plug at 80 intact" },
+        .{ .count = .{ .material = "sand", .rect = .{ .x = 144, .y = 245, .w = 2, .h = 3 }, .min = 6 }, .label = "open plug at 120 intact" },
+    },
+}

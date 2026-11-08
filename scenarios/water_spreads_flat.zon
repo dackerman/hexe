@@ -1,0 +1,19 @@
+// A block of water in one corner of a basin spreads into a flat layer.
+.{
+    .name = "water_spreads_flat",
+    .description = "4000 water cells released at the left of a 208-wide bedrock basin settle into a level layer about 19 cells deep.",
+    .ticks = 900,
+    .fills = .{
+        .{ .rect = .{ .x = 16, .y = 240, .w = 224, .h = 8 }, .material = "bedrock" },
+        .{ .rect = .{ .x = 16, .y = 120, .w = 8, .h = 120 }, .material = "bedrock" },
+        .{ .rect = .{ .x = 232, .y = 120, .w = 8, .h = 120 }, .material = "bedrock" },
+        .{ .rect = .{ .x = 24, .y = 120, .w = 40, .h = 100 }, .material = "water" },
+    },
+    .assertions = .{
+        .{ .count = .{ .material = "water", .min = 3990, .max = 4000 }, .label = "water is conserved" },
+        .{ .none = .{ .material = "water", .rect = .{ .x = 24, .y = 0, .w = 208, .h = 216 } }, .label = "no column left standing" },
+        .{ .count = .{ .material = "water", .rect = .{ .x = 24, .y = 222, .w = 208, .h = 18 }, .min = 3600 }, .label = "level layer" },
+        .{ .at = .{ .x = 228, .y = 238, .material = "water" }, .label = "reached the far wall" },
+        .{ .tick = 900, .particles = .{ .rect = .{ .x = 24, .y = 200, .w = 208, .h = 40 }, .max = 0 }, .label = "settled water sleeps" },
+    },
+}

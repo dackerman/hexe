@@ -1,0 +1,20 @@
+// A wood block is ignited and burns through charcoal to ash.
+.{
+    .name = "wood_burns",
+    .description = "A 40x40 wood block on bedrock is set alight. Wood burns 600 ticks to charcoal, charcoal 900 ticks to ash; nothing of either is left at the end.",
+    .ticks = 4000,
+    .fills = .{
+        .{ .rect = .{ .x = 0, .y = 240, .w = 256, .h = 16 }, .material = "bedrock" },
+        .{ .rect = .{ .x = 108, .y = 200, .w = 40, .h = 40 }, .material = "wood" },
+    },
+    .commands = .{
+        .{ .tick = 1, .ignite = .{ .rect = .{ .x = 108, .y = 200, .w = 40, .h = 40 } } },
+    },
+    .assertions = .{
+        .{ .tick = 60, .count = .{ .material = "smoke", .min = 1 }, .label = "burning wood smokes" },
+        .{ .tick = 900, .count = .{ .material = "charcoal", .min = 1 }, .label = "wood turned to charcoal" },
+        .{ .none = .{ .material = "wood" }, .label = "no wood left" },
+        .{ .none = .{ .material = "charcoal" }, .label = "no charcoal left" },
+        .{ .count = .{ .material = "ash", .min = 100 }, .label = "ash remains" },
+    },
+}

@@ -1,0 +1,17 @@
+// Sand poured onto lava turns to molten glass, which cools to glass.
+.{
+    .name = "sand_lava_glass",
+    .description = "Sand falls onto a lava pool; on contact it becomes molten glass, which cools below 800 C into glass once the pool loses its heat.",
+    .ticks = 3000,
+    .fills = .{
+        .{ .rect = .{ .x = 64, .y = 232, .w = 128, .h = 8 }, .material = "bedrock" },
+        .{ .rect = .{ .x = 64, .y = 192, .w = 8, .h = 40 }, .material = "bedrock" },
+        .{ .rect = .{ .x = 184, .y = 192, .w = 8, .h = 40 }, .material = "bedrock" },
+        .{ .rect = .{ .x = 72, .y = 216, .w = 112, .h = 16 }, .material = "lava" },
+        .{ .rect = .{ .x = 108, .y = 120, .w = 40, .h = 20 }, .material = "sand" },
+    },
+    .assertions = .{
+        .{ .tick = 240, .count = .{ .material = "molten_glass", .min = 1 }, .label = "sand melted on contact" },
+        .{ .count = .{ .material = "glass", .min = 1 }, .label = "molten glass cooled to glass" },
+    },
+}
