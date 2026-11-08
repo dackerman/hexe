@@ -340,13 +340,15 @@ fn runSandbox(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *materials.Libr
 
 // ---------------------------------------------------------------- play mode
 
-/// The playable mode's scene until the demo level lands: one line to switch
-/// (docs/07-tech-demo.md; the level's `proving_grounds` replaces it).
-pub const default_scene: scenes.Scene = .lighting;
+/// The playable mode's scene: the Proving Grounds tech-demo level
+/// (docs/07-tech-demo.md, src/game/level.zig).
+pub const default_scene: scenes.Scene = .proving_grounds;
+const level = @import("game/level.zig");
 
 /// Where the witch starts in a scene (feet position).
 pub fn defaultSpawn(scene: scenes.Scene) [2]f32 {
     return switch (scene) {
+        .proving_grounds, .proving_grounds_auto, .proving_grounds_burst => .{ @floatFromInt(level.spawn_point[0]), @floatFromInt(level.spawn_point[1]) },
         // On the cave floor between the pillars and the glass tank.
         .lighting => .{ 1060, 1180 },
         // On the stone ground between the lava basin and the hut.
@@ -360,6 +362,15 @@ pub fn defaultSpawn(scene: scenes.Scene) [2]f32 {
 /// The scene's enemies (the level module takes this over).
 pub fn populate(g: *game_mod.Game, scene: scenes.Scene) void {
     switch (scene) {
+        .proving_grounds, .proving_grounds_auto, .proving_grounds_burst => {
+            for (level.enemy_spawns) |e| {
+                const kind: game_mod.enemies_mod.Kind = switch (e.kind) {
+                    .walker => .walker,
+                    .flyer => .flyer,
+                };
+                _ = g.enemies.spawn(kind, @floatFromInt(e.x), @floatFromInt(e.y));
+            }
+        },
         .lighting => {
             _ = g.enemies.spawn(.walker, 1245, 1180);
             _ = g.enemies.spawn(.flyer, 860, 1010);

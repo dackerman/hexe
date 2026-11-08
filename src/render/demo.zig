@@ -11,6 +11,9 @@ const Hud = @import("hud.zig").Hud;
 pub fn configure(scene: scenes.Scene, settings: *Settings) void {
     switch (scene) {
         .lighting => {},
+        // Tech demo: lit by sky, lava and torches, with enough cave ambient
+        // that unlit rooms still read.
+        .proving_grounds, .proving_grounds_auto, .proving_grounds_burst => settings.ambient_cave = .{ 0.16, 0.16, 0.19 },
         // Closed boxes without light sources: keep them readable.
         else => {
             settings.ambient_cave = .{ 0.30, 0.30, 0.32 };
@@ -23,6 +26,8 @@ pub fn configure(scene: scenes.Scene, settings: *Settings) void {
 pub fn decorate(scene: scenes.Scene, tick: u32, r: *Renderer, hud: *Hud) void {
     switch (scene) {
         .lighting => lighting(tick, r, hud),
+        // Tech demo: torches and every sign (the app passes its camera to level.drawSigns instead).
+        .proving_grounds, .proving_grounds_auto, .proving_grounds_burst => @import("../game/level.zig").decorate(r, hud),
         else => {},
     }
 }
