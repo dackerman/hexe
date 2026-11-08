@@ -19,7 +19,8 @@
 //! The particle arrays and the obstacle coarsening are this subsystem's own,
 //! pending the shared particle buffer and solid mask from the particles and
 //! air subsystems: see `particleArrays` / `obstacleSource` and
-//! docs/decisions/80-liquid-solver.md for the integration steps.
+//! docs/decisions/80-liquid-integration.md for the integration steps (80-87
+//! hold the rest of the design decisions).
 const std = @import("std");
 const gpu = @import("../gpu/gpu.zig");
 const vk = gpu.vk;
@@ -102,8 +103,28 @@ pub const wake_hops_particle = 2;
 pub const wake_hops_flow = 1;
 pub const pc_mark_tiles = 1;
 pub const pc_overlay = 2;
+pub const pc_no_spawn = 4;
 
-/// Tunables (docs/decisions/80-liquid-solver.md has the reasoning).
+/// Ticks between a tick and the CPU's use of its counters to choose the
+/// recording mode. The engine has waited for every tick this old (2 frames
+/// in flight x 4 ticks per frame), so the choice never stalls and depends
+/// on ticks only, not on frame pacing: the simulation stays deterministic.
+pub const mode_lag = 12;
+const ring_len = 16;
+
+/// How much of the solver a tick records (docs/decisions/86-liquid-idle.md).
+pub const Mode = enum {
+    /// Everything.
+    full,
+    /// Everything, but wakes are deferred (requests kept): the particles
+    /// left run out (sleep) so the solver can stop.
+    drain,
+    /// Wake detection only (deferred); no particles exist and nothing is
+    /// out of balance. A still lake costs a handful of tiny dispatches.
+    idle,
+};
+
+/// Tunables (reasoning in docs/decisions/82-86).
 pub const Params = struct {
     /// Hard ceiling on awake liquid; wakes beyond it are refused and the
     /// water stays cellular.
@@ -112,7 +133,7 @@ pub const Params = struct {
     /// while the budget is exhausted).
     wake_budget: u32 = 65536,
     /// Ticks below `sleep_speed` before a supported particle sleeps.
-    sleep_ticks: u32 = 20,
+    sleep_ticks: u32 = 16,
     /// px/s.
     sleep_speed: f32 = 8.0,
     /// px/s: liquid particles faster than this wake sleeping liquid they touch.
@@ -123,14 +144,16 @@ pub const Params = struct {
     gravity: f32 = 196.0,
     /// px/s; 480 = 8 px per tick, the grid's own speed limit.
     max_speed: f32 = 480.0,
-    vcycles: u32 = 5,
+    vcycles: u32 = 4,
     pre_smooth: u32 = 2,
     post_smooth: u32 = 2,
     coarsest_iterations: u32 = 40,
     /// Scale of the coarse-grid correction (piecewise-constant prolongation
-    /// under-corrects; > 1 compensates).
-    correction: f32 = 1.0,
-    /// 1/s: linear drag on liquid-mode particles, so sloshing settles.
+    /// under-corrects; > 1 compensates). 1.5 halves the residual after 4
+    /// V-cycles compared to 1.0 (decision 82).
+    correction: f32 = 1.5,
+    /// 1/s: linear drag on liquid-mode particles (0 = off; settling is the
+    /// speed-banded `settle_*` drag, decision 83).
     damping: f32 = 0.0,
     /// Divergence target per excess particle in an over-full cell (pushes
     /// particles apart; 0 = off).
@@ -298,6 +321,8 @@ pub const Stats = struct {
     /// Wake decisions this tick by trigger: request (commands, wake_at,
     /// spread), powder, landing, pushed by awake water, out of balance.
     triggers: [5]u32 = @splat(0),
+    grace: u32 = 0,
+    moved: u32 = 0,
 };
 
 pub const Liquid = struct {
@@ -307,14 +332,19 @@ pub const Liquid = struct {
     base_slot: u32,
     wake: gpu.Image,
     overlay: gpu.Image,
-    /// Host-visible copies of STATE, one region per frame-in-flight slot.
+    /// Host-visible copies of STATE, one per tick, ring of `ring_len`.
     readback: gpu.Buffer,
     pipelines: [kernel_count]vk.Pipeline,
     /// Particle set holding the current particles (0 or 1).
     set: u32 = 0,
     /// Particles may exist (the solver ran since the last flush).
     live: bool = false,
-    last_slot: u32 = 0,
+    /// Tick of the most recent stats copy.
+    last_tick: u32 = 0,
+    mode: Mode = .full,
+    /// First tick of the current mode / of this enabled stretch.
+    mode_since: u32 = 0,
+    enabled_since: ?u32 = null,
     /// Debug: write awake particles into the overlay image (world.frag
     /// blends it when the view asks). Set by the pipeline from its config.
     show_overlay: bool = false,
@@ -375,7 +405,8 @@ pub const Liquid = struct {
         try self.overlay.initLayout(ctx, .general, true);
         self.overlay.register(ctx, gpu.constants.slot_img_liquid_overlay);
 
-        self.readback = try gpu.Buffer.init(ctx, pipeline_mod.frames_in_flight * St.words * 4, .{ .transfer_dst = true }, .gpu_to_cpu);
+        comptime std.debug.assert(mode_lag > pipeline_mod.frames_in_flight * pipeline_mod.max_ticks_per_frame and mode_lag < ring_len);
+        self.readback = try gpu.Buffer.init(ctx, ring_len * St.words * 4, .{ .transfer_dst = true }, .gpu_to_cpu);
         @memset(self.readback.bytes(), 0);
 
         try ctx.runOnce(.compute, zeroAll, .{ ctx, &self });
@@ -403,7 +434,20 @@ pub const Liquid = struct {
     /// Counters of the most recently recorded tick. Valid once the engine
     /// has waited for that frame (e.g. after `Engine.finish`).
     pub fn stats(self: *const Liquid) Stats {
-        const w = self.readback.typed(u32)[self.last_slot * St.words ..][0..St.words];
+        return statsOf(self.ringWords(self.last_tick));
+    }
+
+    /// Counters of a tick the GPU has certainly finished (mode_lag ticks
+    /// back): safe to read any time, e.g. for the HUD.
+    pub fn statsSettled(self: *const Liquid) Stats {
+        return statsOf(self.ringWords(self.last_tick -% mode_lag));
+    }
+
+    fn ringWords(self: *const Liquid, tick: u32) *const [St.words]u32 {
+        return self.readback.typed(u32)[(tick % ring_len) * St.words ..][0..St.words];
+    }
+
+    fn statsOf(w: *const [St.words]u32) Stats {
         return .{
             .alive = w[St.alive],
             .spawned = w[St.spawned],
@@ -417,7 +461,35 @@ pub const Liquid = struct {
             .total_killed = w[St.total_killed],
             .total_slept = w[St.total_slept],
             .triggers = w[St.triggers..][0..5].*,
+            .grace = w[St.grace],
+            .moved = w[St.moved],
         };
+    }
+
+    /// Choose this tick's mode from the counters of tick - mode_lag.
+    fn decide(self: *Liquid, tick: u32) Mode {
+        const since = self.enabled_since orelse blk: {
+            self.enabled_since = tick;
+            self.mode = .full;
+            self.mode_since = tick;
+            break :blk tick;
+        };
+        if (tick -% since < mode_lag) return self.mode;
+        const seen = tick - mode_lag;
+        const s = statsOf(self.ringWords(seen));
+        const quiet = s.alive == 0 and s.grace == 0 and s.candidates == 0 and s.moved == 0;
+        const next: Mode = switch (self.mode) {
+            .full => if (quiet) .drain else .full,
+            // Wakes waiting: run them. Quiet during the drain (no spawns
+            // since): nothing can be awake any more.
+            .drain => if (s.candidates > 0) .full else if (seen >= self.mode_since and quiet) .idle else .drain,
+            .idle => if (s.candidates > 0 or s.moved > 0) .full else .idle,
+        };
+        if (next != self.mode) {
+            self.mode = next;
+            self.mode_since = tick;
+        }
+        return self.mode;
     }
 
     /// Debug/tests: copy `out.len` words of private buffer `b` from word
@@ -452,7 +524,7 @@ pub const Liquid = struct {
             .src = self.set,
             .dst = self.set ^ 1,
             .cap = self.params.capacity,
-            .flags = (if (f.sleep) @as(u32, pc_mark_tiles) else 0) | (if (self.show_overlay) @as(u32, pc_overlay) else 0),
+            .flags = self.flags(f),
             .dt = 1.0 / 60.0,
             .gravity = self.params.gravity,
             .flip = self.params.flip,
@@ -471,6 +543,10 @@ pub const Liquid = struct {
         };
         inline for (@typeInfo(@TypeOf(overrides)).@"struct".field_names) |name| @field(pc, name) = @field(overrides, name);
         f.push(pc);
+    }
+
+    fn flags(self: *const Liquid, f: *const Frame) u32 {
+        return (if (f.sleep) @as(u32, pc_mark_tiles) else 0) | (if (self.show_overlay) @as(u32, pc_overlay) else 0);
     }
 
     fn bind(self: *const Liquid, f: *Frame, k: Kernel) void {
@@ -533,6 +609,7 @@ pub const Liquid = struct {
     /// One solver tick (pipeline step 6).
     pub fn record(self: *Liquid, f: *Frame) void {
         self.live = true;
+        const mode = self.decide(f.tick);
         const ctx = f.ctx;
         // Reset this tick's counters (words spawned..candidates, moved).
         ctx.vkd.cmdFillBuffer(f.cmd, self.buffers[0].handle, St.spawned * 4, (St.grid_valid - St.spawned) * 4, 0);
@@ -542,19 +619,22 @@ pub const Liquid = struct {
             ctx.vkd.cmdClearColorImage(f.cmd, self.overlay.handle, .general, &zero, &.{gpu.memory.color_range});
         }
         bar(f);
-        f.timed("lq_wake", recordWake, .{ self, f });
-        f.timed("lq_sort", recordSort, .{ self, f });
-        f.timed("lq_p2g", recordP2g, .{ self, f });
-        f.timed("lq_project", recordProject, .{ self, f });
-        f.timed("lq_g2p", recordG2p, .{ self, f });
-        f.timed("lq_raster", recordRaster, .{ self, f });
-        self.set ^= 1;
+        f.timed("lq_wake", recordWake, .{ self, f, mode });
+        if (mode != .idle) {
+            f.timed("lq_sort", recordSort, .{ self, f });
+            f.timed("lq_p2g", recordP2g, .{ self, f });
+            f.timed("lq_project", recordProject, .{ self, f });
+            f.timed("lq_g2p", recordG2p, .{ self, f });
+            f.timed("lq_raster", recordRaster, .{ self, f });
+            self.set ^= 1;
+        }
         self.copyStats(f);
     }
 
     /// The solver is off this tick: if particles may exist, turn them all
     /// into plain cells (the cellular rules take over) and empty the buffer.
     pub fn recordOff(self: *Liquid, f: *Frame) void {
+        self.enabled_since = null;
         if (!self.live) return;
         self.live = false;
         bar(f);
@@ -566,12 +646,13 @@ pub const Liquid = struct {
     }
 
     fn copyStats(self: *Liquid, f: *Frame) void {
-        self.last_slot = f.slot;
-        f.ctx.vkd.cmdCopyBuffer(f.cmd, self.buffers[0].handle, self.readback.handle, &.{.{ .src_offset = 0, .dst_offset = f.slot * St.words * 4, .size = St.words * 4 }});
+        self.last_tick = f.tick;
+        f.ctx.vkd.cmdCopyBuffer(f.cmd, self.buffers[0].handle, self.readback.handle, &.{.{ .src_offset = 0, .dst_offset = (f.tick % ring_len) * St.words * 4, .size = St.words * 4 }});
         gpu.memory.memoryBarrier(f.ctx, f.cmd, .{ .all_transfer = true }, .{ .transfer_write = true }, .{ .host = true, .compute_shader = true }, .{ .host_read = true, .shader_storage_read = true });
     }
 
-    fn recordWake(self: *Liquid, f: *Frame) void {
+    fn recordWake(self: *Liquid, f: *Frame, mode: Mode) void {
+        const no_spawn: u32 = if (mode == .full) 0 else pc_no_spawn;
         // Trigger: cells near anything a command touched.
         self.bind(f, .wake_commands);
         for (f.commands, 0..) |c, i| {
@@ -589,11 +670,12 @@ pub const Liquid = struct {
         bar(f);
         self.scan(f, .tile_count, .tile_scan, .tile_sums, cell.tile_count, false);
         self.bind(f, .wake);
-        self.push(f, .{ .mode = 1, .n = self.params.wake_budget });
+        self.push(f, .{ .mode = 1, .n = self.params.wake_budget, .flags = self.flags(f) | no_spawn });
         f.dispatchActiveTiles();
         bar(f);
-        self.runDirect(f, .finalize, .{ .mode = 0, .n = self.params.wake_budget, .level = self.params.grace_ticks }, 1, 1);
+        self.runDirect(f, .finalize, .{ .mode = if (mode == .idle) @as(u32, 3) else 0, .n = self.params.wake_budget, .level = self.params.grace_ticks, .flags = self.flags(f) | no_spawn }, 1, 1);
         bar(f);
+        if (mode == .idle) return;
         // Lift after the wake (which needs awake water visible); spawned
         // particles have no binding and are skipped.
         self.run(f, .lift, .{}, St.args_particles);
@@ -722,7 +804,7 @@ test "liquid.glsl mirror" {
         .{ "LQ_ST_MOVED", St.moved },                     .{ "LQ_ST_GRACE", St.grace },
         .{ "LQ_ST_TRIGGERS", St.triggers },               .{ "LQ_ST_TOTAL_KILLED", St.total_killed },
         .{ "LQ_ST_TOTAL_SLEPT", St.total_slept },         .{ "LQ_PC_MARK_TILES", pc_mark_tiles },
-        .{ "LQ_PC_OVERLAY", pc_overlay },
+        .{ "LQ_PC_OVERLAY", pc_overlay },                 .{ "LQ_PC_NO_SPAWN", pc_no_spawn },
     };
     for (defines[0..n]) |d| {
         var found = false;

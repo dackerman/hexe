@@ -73,7 +73,7 @@ fn usage() void {
         \\  --verify-determinism    CPU reference vs GPU, bit for bit
         \\  --liquid                FLIP liquid solver on (headless; windowed: L toggles)
         \\  --liquid-overlay        tint awake liquid particles (windowed: F3)
-        \\  --liquid-test [NAME]    liquid scenarios: utube|dam|pool|determinism|all
+        \\  --liquid-test [NAME]    liquid scenarios: utube|dam|pool|reaction|determinism|all|residual
         \\  --liquid-param K=V      set a liquid solver tunable (src/sim/liquid.zig Params)
         \\
     , .{});

@@ -4,7 +4,7 @@
 //              particle (FLIP/PIC blend), affine C = grad u_new (APIC);
 //              advected with RK2 through the grid velocity (midpoint sampled
 //              from faces that have liquid weight, else the particle's own);
-//              drag: linear pc.damping plus speed-banded settling (decision 80).
+//              drag: linear pc.damping plus speed-banded settling (docs/decisions/83).
 //   ballistic: gravity only, C = 0.
 // Motion is marched pixel by pixel through the full-resolution cell image,
 // x then y each step, so particles stop at (and slide along) any obstacle

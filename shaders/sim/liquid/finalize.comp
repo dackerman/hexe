@@ -6,6 +6,9 @@
 //           solver liquid is moving
 //   mode 1  after the sort: count = live particles (bin scan total)
 //   mode 2  flush: count = 0
+//   mode 3  idle tick (src/sim/liquid.zig Mode.idle): as mode 0, but no
+//           grid this tick, so next tick's wake must not read it
+// LQ_PC_NO_SPAWN: the wake pass deferred its candidates; nothing spawned.
 // Every grid pass is dispatched indirectly through gated arguments that are
 // zero when there are no particles and the grace countdown has run out, so
 // a world with no awake or moving solver liquid runs no solver work beyond
@@ -24,15 +27,16 @@ void set_args(uint at, uint x, uint y) {
 
 void main() {
     uint n = LQ_STATE[LQ_ST_COUNT];
-    if (pc.mode == 0u) {
+    if (pc.mode == 0u || pc.mode == 3u) {
         uint total = LQ_U32(LQ_BUF_TILE_SUMS)[TILE_COUNT / 1024u];
         uint room = pc.cap > n ? pc.cap - n : 0u;
-        uint spawned = min(total, min(pc.n, room));
+        uint spawned = (pc.flags & LQ_PC_NO_SPAWN) != 0u ? 0u : min(total, min(pc.n, room));
         LQ_STATE[LQ_ST_SPAWNED] = spawned;
         LQ_STATE[LQ_ST_CANDIDATES] = total;
         n += spawned;
         uint grace = LQ_STATE[LQ_ST_GRACE];
         LQ_STATE[LQ_ST_GRACE] = (n > 0u || LQ_STATE[LQ_ST_MOVED] > 0u) ? pc.level : (grace > 0u ? grace - 1u : 0u);
+        if (pc.mode == 3u) LQ_STATE[LQ_ST_GRID_VALID] = 0u;
     } else if (pc.mode == 1u) {
         n = LQ_U32(LQ_BUF_BIN_SUMS)[LQ_GRID * LQ_GRID / 1024u];
         LQ_STATE[LQ_ST_ALIVE] = n;

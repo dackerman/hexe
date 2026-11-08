@@ -107,8 +107,12 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, name: []const u8) !u8 {
         try pool(&c);
         ran = true;
     }
-    if (std.mem.eql(u8, name, "debug")) {
+    if (std.mem.eql(u8, name, "residual")) {
         try debug(&c);
+        ran = true;
+    }
+    if (all or std.mem.eql(u8, name, "reaction")) {
+        try reaction(&c);
         ran = true;
     }
     if (all or std.mem.eql(u8, name, "determinism")) {
@@ -116,7 +120,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, name: []const u8) !u8 {
         ran = true;
     }
     if (!ran) {
-        std.debug.print("unknown liquid test '{s}' (utube|dam|pool|determinism|all)\n", .{name});
+        std.debug.print("unknown liquid test '{s}' (utube|dam|pool|reaction|determinism|all|residual)\n", .{name});
         return 2;
     }
     std.debug.print("liquid-test: {s} ({d} failures)\n", .{ if (c.failures == 0) "PASS" else "FAIL", c.failures });
@@ -234,6 +238,40 @@ fn pool(c: *Ctx) !void {
     c.check(far_max == 0, "far edge stayed asleep (ticks 402-440; at most {d} awake near the drop)", .{woke_max});
 }
 
+/// Reactions coupling: another pass turns awake water into something else
+/// (here a command paints smoke over it, as boiling would turn it into
+/// steam); the particles there die in the next lift and no particle-backed
+/// cell is left in the changed region.
+fn reaction(c: *Ctx) !void {
+    std.debug.print("reaction: smoke painted over awake water during the dam break kills its particles\n", .{});
+    const e = try c.engine();
+    defer c.destroy(e);
+    try advance(e, .liquid_dam, c.cli.seed, 80);
+    try e.finish();
+    const killed0 = e.pipeline.liquid.stats().total_killed;
+    // A smoke disc over the moving front: the cells change under the particles.
+    var cmd: @import("sim/commands.zig").CommandList = .{};
+    cmd.begin(e.tick);
+    cmd.fillCircle(liquid_scenes.origin[0] + 128, liquid_scenes.origin[1] + 215, 10, m.smoke, .{});
+    try e.frame(1, .{ .scene = .liquid_dam, .seed = c.cli.seed, .extra = cmd.slice() }, null);
+    try advance(e, .liquid_dam, c.cli.seed, e.tick + 2);
+    try snapshot(c, e);
+    const killed = e.pipeline.liquid.stats().total_killed - killed0;
+    // Particles may flow back in afterwards; right after, the disc holds no
+    // particle that was there (they died), only smoke or newcomers.
+    c.check(killed > 0, "{d} particles died when their cells were changed under them", .{killed});
+
+    // Switching the solver off mid-flow turns every particle into a plain
+    // cell in place: no water lost, none left particle-backed.
+    const before = count(c, m.water, whole);
+    e.pipeline.config.liquid = false;
+    try advance(e, .liquid_dam, c.cli.seed, e.tick + 1);
+    try snapshot(c, e);
+    const after = count(c, m.water, whole);
+    const left = particleCells(c, whole);
+    c.check(left == 0 and after + 8 >= before, "solver off: {d} -> {d} water cells, {d} particle-backed left", .{ before, after, left });
+}
+
 /// Scenario 6: the same seed gives identical cell and owner images after
 /// 600 ticks of a dam break (sort-based transfer, no float atomics).
 fn determinism(c: *Ctx) !void {
@@ -264,45 +302,50 @@ fn determinism(c: *Ctx) !void {
     }
 }
 
+/// Projection convergence on the 500K bench scene: rms of the pressure
+/// equation residual |b - Ap| against |b| over pressurized cells (tuning).
 fn debug(c: *Ctx) !void {
     const e = try c.engine();
     defer c.destroy(e);
     const lq = &e.pipeline.liquid;
-    try advance(e, .liquid_pool, c.cli.seed, 360);
-    try e.finish();
-    try snapshot(c, e);
-    const st = lq.stats();
-    const n = st.alive + 64;
-    const pos = try c.gpa.alloc(u32, n * 2);
-    defer c.gpa.free(pos);
-    const vel = try c.gpa.alloc(u32, n * 2);
-    defer c.gpa.free(vel);
-    const info = try c.gpa.alloc(u32, n);
-    defer c.gpa.free(info);
-    const bind = try c.gpa.alloc(u32, n);
-    defer c.gpa.free(bind);
-    try lq.debugRead(.pos, lq.currentSet(), 0, pos);
-    try lq.debugRead(.vel, lq.currentSet(), 0, vel);
-    try lq.debugRead(.info, lq.currentSet(), 0, info);
-    try lq.debugRead(.bind, lq.currentSet(), 0, bind);
-    var shown: u32 = 0;
-    for (0..n) |i| {
-        const mode = (info[i] >> 8) & 3;
-        if (mode == 0) continue;
-        shown += 1;
-        if (shown > 40) continue;
-        const px: f32 = @bitCast(pos[i * 2]);
-        const py: f32 = @bitCast(pos[i * 2 + 1]);
-        const vx: f32 = @bitCast(vel[i * 2]);
-        const vy: f32 = @bitCast(vel[i * 2 + 1]);
-        const x: i32 = @as(i32, @intFromFloat(@floor(px))) - liquid_scenes.origin[0];
-        const y: i32 = @as(i32, @intFromFloat(@floor(py))) - liquid_scenes.origin[1];
-        var nb: [9]u8 = undefined;
-        for (0..9) |k| {
-            const cc = at(c, x + @as(i32, @intCast(k % 3)) - 1, y + @as(i32, @intCast(k / 3)) - 1);
-            nb[k] = if (cell.has(cc, cell.flag_particle)) 'P' else if (cell.material(cc) == m.water) 'w' else if (cell.material(cc) == 0) '.' else '#';
-        }
-        std.debug.print("   p{d} at {d:.2},{d:.2} v {d:.2},{d:.2} mode {d} rest {d} ovl {d} bound {} nb {s}|{s}|{s}\n", .{ i, px - 896, py - 896, vx, vy, mode, (info[i] >> 14) & 63, (info[i] >> 10) & 15, bind[i] != 0xffffffff, nb[0..3], nb[3..6], nb[6..9] });
+    const g = 1024 * 1024;
+    const bufs = try c.gpa.alloc(u32, g * 5);
+    defer c.gpa.free(bufs);
+    const ty = bufs[2 * g .. 3 * g];
+    const b = bufs[3 * g .. 4 * g];
+    const p = bufs[4 * g .. 5 * g];
+    for ([_]u32{ 60, 120, 200 }) |t| {
+        try advance(e, .liquid_slosh, c.cli.seed, t);
+        try e.finish();
+        try lq.debugRead(.mg_type, 0, 0, ty);
+        try lq.debugRead(.mg_b, 0, 0, b);
+        try lq.debugRead(.mg_p, 0, 0, p);
+        var sb: f64 = 0;
+        var sd: f64 = 0;
+        var nf: f64 = 0;
+        for (0..1024) |y| for (0..1024) |x| {
+            const i = y * 1024 + x;
+            if (ty[i] & 3 != 1 or @as(f32, @bitCast(p[i])) <= 0.01) continue;
+            const r = y * 1024 + (x + 1) % 1024;
+            const d = ((y + 1) % 1024) * 1024 + x;
+            const wl: f32 = @floatFromInt((ty[i] >> 8) & 0xff);
+            const wt: f32 = @floatFromInt((ty[i] >> 16) & 0xff);
+            const wr: f32 = @floatFromInt((ty[r] >> 8) & 0xff);
+            const wb: f32 = @floatFromInt((ty[d] >> 16) & 0xff);
+            const l = y * 1024 + (x + 1023) % 1024;
+            const up = ((y + 1023) % 1024) * 1024 + x;
+            const pf = struct {
+                fn f(tys: []const u32, ps: []const u32, k: usize) f32 {
+                    return if (tys[k] & 3 == 1) @as(f32, @bitCast(ps[k])) else 0;
+                }
+            }.f;
+            const ap = (wl + wr + wt + wb) * pf(ty, p, i) - wl * pf(ty, p, l) - wr * pf(ty, p, r) - wt * pf(ty, p, up) - wb * pf(ty, p, d);
+            const bb: f32 = @bitCast(b[i]);
+            const res = bb - ap;
+            sb += bb * bb;
+            sd += res * res;
+            nf += 1;
+        };
+        std.debug.print("tick {d}: {d} pressurized cells, rms rhs {d:.3}, rms residual {d:.4} (ratio {d:.4})\n", .{ t, nf, @sqrt(sb / @max(nf, 1)), @sqrt(sd / @max(nf, 1)), @sqrt(sd / @max(sb, 1e-9)) });
     }
-    std.debug.print("{d} awake\n", .{shown});
 }

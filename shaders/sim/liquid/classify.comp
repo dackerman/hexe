@@ -17,7 +17,7 @@
 // velocity. Particles still cannot enter a sleeping pixel (g2p march).
 // Velocity on closed faces is zero (static boundary; body velocity later).
 // This pass is the liquid solver's obstacle coarsening; see
-// docs/decisions/80-liquid-solver.md for how it relates to the shared mask.
+// docs/decisions/80-liquid-integration.md for how it relates to the shared mask.
 #include "sim/liquid/liquid.glsl"
 
 layout(local_size_x = 16, local_size_y = 16) in;

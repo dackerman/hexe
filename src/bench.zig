@@ -9,13 +9,29 @@ const materials_builtin = @import("sim/materials_builtin.zig");
 const Profile = @import("profile.zig").Profile;
 const cell = @import("sim/cell.zig");
 
-const Case = struct { name: []const u8, scene: scenes.Scene, sleep: bool, budget_ms: f64 };
+const Case = struct {
+    name: []const u8,
+    scene: scenes.Scene,
+    sleep: bool,
+    budget_ms: f64,
+    /// Liquid solver (M6) on; its own budget applies to the sum of the lq_ passes.
+    liquid: bool = false,
+    liquid_budget_ms: f64 = 0,
+    warmup: u32 = 10,
+};
 
 const cases = [_]Case{
     .{ .name = "static world (sleep)", .scene = .bench_static, .sleep = true, .budget_ms = 0.2 },
     .{ .name = "falling sand, fully active (sleep)", .scene = .bench_active, .sleep = true, .budget_ms = 2.5 },
     .{ .name = "falling sand, sleep disabled", .scene = .bench_active, .sleep = false, .budget_ms = 2.5 },
     .{ .name = "sand + water + smoke mixing, fully active", .scene = .bench_mixed, .sleep = true, .budget_ms = 2.5 },
+    // ---- liquid solver (M6) ----
+    // The setup commands wake the pool; it is asleep and the solver idle
+    // from about tick 140 (src/sim/liquid.zig Mode).
+    .{ .name = "liquid: still lake (solver on, all asleep)", .scene = .bench_static, .sleep = true, .budget_ms = 0.2, .liquid = true, .liquid_budget_ms = 0.2, .warmup = 200 },
+    .{ .name = "liquid: 1024x512 water body awake, sloshing", .scene = .liquid_slosh, .sleep = true, .budget_ms = 2.5, .liquid = true, .liquid_budget_ms = 4.0, .warmup = 30 },
+    .{ .name = "liquid: 1M particles awake (capacity), sloshing", .scene = .liquid_slosh_1m, .sleep = true, .budget_ms = 2.5, .liquid = true, .liquid_budget_ms = 4.0, .warmup = 30 },
+    // ---- end liquid solver ----
 };
 
 pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
@@ -43,10 +59,10 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         try engine.init(gpa, .{
             .table = &table,
             .validation = cli.validation orelse false,
-            .pipeline = .{ .sleep = case.sleep },
+            .pipeline = .{ .sleep = case.sleep, .liquid = case.liquid, .liquid_params = cli.liquid_params },
         });
         defer engine.deinit();
-        var profile: Profile = .{ .skip_frames = 10 };
+        var profile: Profile = .{ .skip_frames = case.warmup };
         if (file != null) {
             file_writer.interface.print("# {s}\n", .{case.name}) catch {};
             profile.out = &file_writer.interface;
@@ -66,6 +82,17 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         for (0..engine.names.count) |i| {
             if (profile.sum[i] == 0 and profile.max[i] == 0) continue;
             std.debug.print("  {s:<10} {d:9.4} {d:9.4} {d:9.4}\n", .{ engine.names.get(i), profile.mean(i), profile.min[i], profile.max[i] });
+        }
+        if (case.liquid) {
+            var lq: f64 = 0;
+            for (0..engine.names.count) |i| {
+                if (std.mem.startsWith(u8, engine.names.get(i), "lq_")) lq += profile.mean(i);
+            }
+            const lok = lq < case.liquid_budget_ms;
+            if (!lok) failed = true;
+            const ls = engine.pipeline.liquid.stats();
+            const p = engine.pipeline.liquid.params;
+            std.debug.print("  {s:<10} {d:9.4}   budget {d:.1} ms: {s}  ({d} particles awake at the end, {d} V-cycles x {d}+{d} smoothing)\n", .{ "liquid", lq, case.liquid_budget_ms, if (lok) "PASS" else "FAIL", ls.alive, p.vcycles, p.pre_smooth, p.post_smooth });
         }
         const mean_tiles = @as(f64, @floatFromInt(profile.active_tiles_sum)) / @as(f64, @floatFromInt(@max(profile.frames, 1)));
         std.debug.print("  {s:<10} {d:9.4} {d:9.4} {d:9.4}   budget {d:.1} ms: {s}\n", .{ "grid", grid, profile.grid_min, profile.grid_max, case.budget_ms, if (ok) "PASS" else "FAIL" });

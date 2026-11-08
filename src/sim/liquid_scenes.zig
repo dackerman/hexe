@@ -13,7 +13,7 @@ const m = @import("materials_builtin.zig");
 pub const origin = [2]i32{ 896, 896 };
 pub const box = 256;
 
-pub const Kind = enum { utube, dam, pool, slosh, basin };
+pub const Kind = enum { utube, dam, pool, slosh, slosh_1m, basin };
 
 const List = commands.CommandList;
 
@@ -40,6 +40,7 @@ pub fn emit(kind: Kind, tick: u32, seed: u32, list: *List) void {
         .dam => dam(tick, list),
         .pool => pool(tick, list),
         .slosh => slosh(tick, list),
+        .slosh_1m => slosh1m(tick, list),
         .basin => basin(tick, list),
     }
 }
@@ -93,6 +94,22 @@ fn slosh(tick: u32, list: *List) void {
     list.fillRect(x0 - 16, y0 - 200, x0, y0 + 600, m.stone, .{});
     list.fillRect(x0 + 1600, y0 - 200, x0 + 1616, y0 + 600, m.stone, .{});
     list.fillRect(x0, y0 + 88, x0 + 1024, y0 + 600, m.water, .{});
+    // Filled water starts asleep; wake all of it (the budget spreads the
+    // wake over the first ticks).
+    list.wakeLiquid(x0 + 512, y0 + 344, 600, 1);
+}
+
+/// Bench at the budget's particle count: 1400 x 740 water (1.04M cells,
+/// capacity 1M: the last few hundred stay cellular) in a 1900-wide tank.
+fn slosh1m(tick: u32, list: *List) void {
+    if (tick != 0) return;
+    const x0: i32 = 64;
+    const y0: i32 = 1000;
+    list.fillRect(x0 - 16, y0 + 800, x0 + 1916, y0 + 832, m.stone, .{});
+    list.fillRect(x0 - 16, y0 - 100, x0, y0 + 800, m.stone, .{});
+    list.fillRect(x0 + 1900, y0 - 100, x0 + 1916, y0 + 800, m.stone, .{});
+    list.fillRect(x0, y0 + 60, x0 + 1400, y0 + 800, m.water, .{});
+    list.wakeLiquid(x0 + 700, y0 + 430, 800, 1);
 }
 
 /// Showcase: a stone basin with a raised water block that falls and sloshes,

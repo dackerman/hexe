@@ -28,6 +28,7 @@ pub const Scene = enum {
     liquid_dam,
     liquid_pool,
     liquid_slosh,
+    liquid_slosh_1m,
     liquid_basin,
     // ---- end liquid solver ----
 };
@@ -43,6 +44,7 @@ pub fn emit(scene: Scene, tick: u32, seed: u32, list: *commands.CommandList) voi
         .liquid_dam => liquid_scenes.emit(.dam, tick, seed, list),
         .liquid_pool => liquid_scenes.emit(.pool, tick, seed, list),
         .liquid_slosh => liquid_scenes.emit(.slosh, tick, seed, list),
+        .liquid_slosh_1m => liquid_scenes.emit(.slosh_1m, tick, seed, list),
         .liquid_basin => liquid_scenes.emit(.basin, tick, seed, list),
         .bench_mixed => if (tick == 0) {
             list.fillRect(0, 0, W, W, m.water, .{ .coverage = 80 });

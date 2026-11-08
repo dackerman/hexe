@@ -10,7 +10,7 @@
 //          flag, the particle dies. Air above and beside is allowed, so
 //          surfaces and the edges of a pool sleep too; the cellular rules
 //          then level any step that is left
-//          (docs/decisions/80-liquid-solver.md).
+//          (docs/decisions/85-liquid-sleep-wake.md).
 //   marks  the activity tile of the pixel (the grid passes then see it)
 //   overlay (debug) liquid particles cyan, ballistic yellow.
 // Two dispatches: mode 0 decides (marks LQ_BIND_PENDING) against the cells

@@ -143,6 +143,9 @@ layout(push_constant) uniform PC {
 
 #define LQ_PC_MARK_TILES 1u
 #define LQ_PC_OVERLAY 2u
+// Wake decides but does not spawn: requests are kept for a later tick
+// (drain and idle modes, src/sim/liquid.zig Mode).
+#define LQ_PC_NO_SPAWN 4u
 
 HEXE_BUFFER(LqU32Block, , uint d[];, lq_u32);
 HEXE_BUFFER(LqF32Block, , float d[];, lq_f32);

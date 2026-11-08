@@ -195,7 +195,15 @@ void main() {
     for (uint k = 0u; k < 4u; k++) {
         ivec2 p = base + ivec2(int(k & 1u), int(k >> 1));
         uint m = masks[k];
-        if (hops[k] > 0u) {
+        // Consume this tick's requests and the decision (the next tick's
+        // byte is left alone).
+        uint consumed = 0xff0000ffu | (0xffu << cur_shift);
+        if ((m & consumed) != 0u) imageAtomicAnd(LIQUID_WAKE, p, ~consumed);
+        if (hops[k] > 0u && (pc.flags & LQ_PC_NO_SPAWN) != 0u) {
+            // Deferred: keep the request (byte 0) for the next full tick.
+            imageAtomicOr(LIQUID_WAKE, p, liquid_wake_code(hops[k]));
+            mark = true;
+        } else if (hops[k] > 0u) {
             uint c = cells[k];
             if (rank < limit) {
                 uint idx = n_old + rank;
@@ -226,10 +234,6 @@ void main() {
             }
             rank++;
         }
-        // Consume this tick's requests and the decision (the next tick's
-        // byte is left alone).
-        uint consumed = 0xff0000ffu | (0xffu << cur_shift);
-        if ((m & consumed) != 0u) imageAtomicAnd(LIQUID_WAKE, p, ~consumed);
     }
     if (mark) s_mark = true;
     barrier();

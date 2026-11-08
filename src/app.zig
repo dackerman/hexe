@@ -36,7 +36,8 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         .vsync = cli.vsync,
         .table = &table,
         .validation = cli.validation orelse (builtin.mode == .debug),
-        .pipeline = .{ .sleep = cli.sleep, .noise = cli.scene == .noise },
+        // The sandbox starts with the liquid solver on (L toggles it).
+        .pipeline = .{ .sleep = cli.sleep, .noise = cli.scene == .noise, .liquid = true, .liquid_overlay = cli.liquid_overlay, .liquid_params = cli.liquid_params },
     });
     defer engine.deinit();
     var profile: Profile = .{};
@@ -46,6 +47,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
     var view: View = .{ .scale = 2 };
     view.camera_x = @as(i32, cell.world_size / 2) - @as(i32, @intCast(win_w / 2 / view.scale));
     view.camera_y = @as(i32, cell.world_size / 2) - @as(i32, @intCast(win_h / 2 / view.scale));
+    view.show_liquid = cli.liquid_overlay;
 
     var material: u8 = materials_builtin.sand;
     var radius: i32 = 8;
@@ -77,6 +79,13 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         if (paused and input.wasPressed(c.SDL_SCANCODE_PERIOD)) ticks = 1;
         if (input.wasPressed(c.SDL_SCANCODE_F1)) show_hud = !show_hud;
         if (input.wasPressed(c.SDL_SCANCODE_F2)) view.show_tiles = !view.show_tiles;
+        // ---- liquid solver (M6) ----
+        if (input.wasPressed(c.SDL_SCANCODE_L)) engine.pipeline.config.liquid = !engine.pipeline.config.liquid;
+        if (input.wasPressed(c.SDL_SCANCODE_F3)) {
+            engine.pipeline.config.liquid_overlay = !engine.pipeline.config.liquid_overlay;
+            view.show_liquid = engine.pipeline.config.liquid_overlay;
+        }
+        // ---- end liquid solver ----
 
         // Material selection: number keys pick ids 1-9.
         for (0..9) |k| {
@@ -131,6 +140,13 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
             strokeLine(&pending, from, .{ mwx, mwy }, radius, paint);
             last_paint = .{ mwx, mwy };
         } else last_paint = null;
+        // Pour: water at the cursor every frame the key is held, woken at
+        // once so it falls as particles (not as cellular water).
+        if (input.isDown(c.SDL_SCANCODE_P)) {
+            const r = @max(@divTrunc(radius, 2), 2);
+            pending.fillCircle(mwx, mwy, r, materials_builtin.water, .{ .only_air = true });
+            pending.wakeLiquid(mwx, mwy, r + 1, 1);
+        }
 
         if (input.wasPressed(c.SDL_SCANCODE_F12)) {
             var name_buf: [64]u8 = undefined;
@@ -190,6 +206,15 @@ pub fn fillHud(engine: *Engine, profile: *const Profile, info: HudInfo) void {
     hud.print("{s}", .{w.buffered()});
     hud.print("brush {s} r{d}  zoom {d}x  cam {d},{d}  cursor {d},{d}", .{ info.material, info.radius, info.view.scale, info.view.camera_x, info.view.camera_y, info.cursor[0], info.cursor[1] });
     hud.print("1-{d} material  LMB paint  RMB erase  wheel size  WASD pan  =/- zoom  space pause  F2 tiles", .{info.material_count -| 1});
+    // ---- liquid solver (M6) ----
+    const lq = &engine.pipeline.liquid;
+    if (engine.pipeline.config.liquid) {
+        const ls = lq.statsSettled();
+        hud.print("liquid on ({s})  {d} awake, {d} ballistic  woke {d} slept {d}  P pour  L off  F3 overlay", .{ @tagName(lq.mode), ls.alive, ls.ballistic, ls.spawned, ls.slept });
+    } else {
+        hud.print("liquid off (cellular water)  L on", .{});
+    }
+    // ---- end liquid solver ----
 }
 
 /// Circles every radius/2 pixels from `a` to `b` (at least one).
