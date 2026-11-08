@@ -9,6 +9,7 @@
 //!   hexe --headless --gpu-tests            (zig build gpu-test)
 //!   hexe --headless --scenarios DIR | --scenario FILE   (zig build scenarios)
 //!   every mode: [--materials DIR] (default ./materials)
+//!   hexe --headless --bench-render         per-pass render GPU ms at 1920x1080
 const std = @import("std");
 const builtin = @import("builtin");
 const Engine = @import("engine.zig").Engine;
@@ -16,6 +17,10 @@ const Crop = @import("engine.zig").Crop;
 const scenes = @import("sim/scenes.zig");
 const materials = @import("sim/materials.zig");
 const scenario_runner = @import("scenario_runner.zig");
+const renderer_mod = @import("render/renderer.zig");
+const overlay = @import("render/overlay.zig");
+const demo = @import("render/demo.zig");
+const bench_render = @import("bench_render.zig");
 const Profile = @import("profile.zig").Profile;
 const app = @import("app.zig");
 const cell = @import("sim/cell.zig");
@@ -69,9 +74,6 @@ pub const Cli = struct {
     /// Air field (M5) on; always off for the determinism scene.
     air: bool = true,
     air_sleep: bool = true,
-    /// `--overlay air`: show the air field debug overlay (window and
-    /// headless screenshots).
-    overlay: bool = false,
     /// `--air-test`: the air field scenario harness (src/air_test.zig).
     air_test: bool = false,
     /// Headless: also write a screenshot every N ticks (`<path>-<tick>.png`).
@@ -86,6 +88,22 @@ pub const Cli = struct {
     scenarios: ?[]const u8 = null,
     /// Scenario runner: with --screenshot PREFIX, also write a PNG every N ticks.
     shot_every: u32 = 0,
+    // ---- render (M8) ----
+    bench_render: bool = false,
+    light_mode: ?renderer_mod.LightMode = null,
+    /// Cascade-0 probe spacing (quality knob).
+    spacing: ?u32 = null,
+    /// March steps per cascade interval (quality knob).
+    samples: ?u32 = null,
+    overlay: overlay.Mode = .none,
+    overlap: bool = true,
+    bloom: bool = true,
+    vignette: bool = true,
+    /// Windowed: quit after this many frames (0 = never).
+    frames: u32 = 0,
+    /// Headless view screenshot without the HUD text block (signs stay).
+    hud: bool = true,
+    scene_set: bool = false,
 };
 
 fn usage() void {
@@ -98,7 +116,7 @@ fn usage() void {
         \\  --view-screenshot PATH  headless: write the window view with HUD (--size, --zoom, --center)
         \\  --zoom N                integer zoom (default 2)
         \\  --center X,Y            world pixel at the view center
-        \\  --scene NAME            empty|sandbox|determinism|fire_demo|bench_static|bench_active|bench_mixed|bench_fire|noise
+        \\  --scene NAME            empty|sandbox|determinism|fire_demo|bench_static|bench_active|bench_mixed|bench_fire|noise|lighting
         \\                          particles_demo|bench_particles|bench_particles_rain|determinism_commands
         \\                          air_demo|bench_air|bodies_crate|bodies_slab|bodies_beam|bodies_water|bodies_bench
         \\  --seed N                scene seed (default 1)
@@ -118,7 +136,6 @@ fn usage() void {
         \\  --world-selftest        GPU dirty-bit / upload / download / save round trip
         \\  --no-air                disable the air field
         \\  --air-all-active        air field without active-tile masking
-        \\  --overlay air           air field debug overlay (F3 in the window)
         \\  --screenshot-every N    headless: also write PATH-<tick>.png every N ticks
         \\  --air-test              air field scenarios (sealed room, corridor blast)
         \\  --bodies / --no-bodies  rigid bodies (default: on in the window and bodies_* scenes)
@@ -128,6 +145,15 @@ fn usage() void {
         \\  --scenarios DIR         run every scenario in DIR (zig build scenarios)
         \\                          with --screenshot PREFIX: PNGs at assertion ticks
         \\  --shot-every N          scenario runner: also a PNG every N ticks
+        \\  --bench-render          per-pass render GPU ms at 1920x1080 (with --headless)
+        \\  --light MODE            cascades|simple|off
+        \\  --spacing N             cascade-0 probe spacing in world px: 1, 2 (default), 4
+        \\  --samples N             march steps per cascade interval: 8, 16 (default), 32
+        \\  --overlay NAME          none|tiles|air_pressure (air)|air_velocity|liquid_particles|bodies|temperature|particle_cells|light
+        \\  --no-overlap            render waits for the next tick (serial sim/render)
+        \\  --no-bloom, --no-vignette
+        \\  --no-hud                view screenshot without the HUD block (world signs stay)
+        \\  --frames N              windowed: quit after N frames and print frame timing
         \\
     , .{});
 }
@@ -168,6 +194,29 @@ fn parseCli(args: []const [:0]const u8) !Cli {
             cli.profile = try next(args, &i);
         } else if (std.mem.eql(u8, a, "--scene")) {
             cli.scene = std.meta.stringToEnum(scenes.Scene, try next(args, &i)) orelse return error.UnknownScene;
+            cli.scene_set = true;
+        } else if (std.mem.eql(u8, a, "--bench-render")) {
+            cli.bench_render = true;
+        } else if (std.mem.eql(u8, a, "--light")) {
+            cli.light_mode = std.meta.stringToEnum(renderer_mod.LightMode, try next(args, &i)) orelse return error.UnknownLightMode;
+        } else if (std.mem.eql(u8, a, "--spacing")) {
+            cli.spacing = try std.fmt.parseInt(u32, try next(args, &i), 10);
+        } else if (std.mem.eql(u8, a, "--samples")) {
+            cli.samples = try std.fmt.parseInt(u32, try next(args, &i), 10);
+        } else if (std.mem.eql(u8, a, "--overlay")) {
+            const name = try next(args, &i);
+            // "air" is the M5 spelling (air pressure, since the integration).
+            cli.overlay = if (std.mem.eql(u8, name, "air")) .air_pressure else std.meta.stringToEnum(overlay.Mode, name) orelse return error.UnknownOverlay;
+        } else if (std.mem.eql(u8, a, "--no-overlap")) {
+            cli.overlap = false;
+        } else if (std.mem.eql(u8, a, "--no-hud")) {
+            cli.hud = false;
+        } else if (std.mem.eql(u8, a, "--no-bloom")) {
+            cli.bloom = false;
+        } else if (std.mem.eql(u8, a, "--no-vignette")) {
+            cli.vignette = false;
+        } else if (std.mem.eql(u8, a, "--frames")) {
+            cli.frames = try std.fmt.parseInt(u32, try next(args, &i), 10);
         } else if (std.mem.eql(u8, a, "--seed")) {
             cli.seed = try std.fmt.parseInt(u32, try next(args, &i), 10);
         } else if (std.mem.eql(u8, a, "--no-sleep")) {
@@ -214,10 +263,6 @@ fn parseCli(args: []const [:0]const u8) !Cli {
             cli.air = false;
         } else if (std.mem.eql(u8, a, "--air-all-active")) {
             cli.air_sleep = false;
-        } else if (std.mem.eql(u8, a, "--overlay")) {
-            const what = try next(args, &i);
-            if (!std.mem.eql(u8, what, "air")) return error.UnknownOverlay;
-            cli.overlay = true;
         } else if (std.mem.eql(u8, a, "--screenshot-every")) {
             cli.screenshot_every = try std.fmt.parseInt(u32, try next(args, &i), 10);
         } else if (std.mem.eql(u8, a, "--air-test")) {
@@ -256,6 +301,7 @@ pub fn main(init: std.process.Init) !u8 {
     if (cli.verify) return verify.run(gpa, io, cli, &lib);
     if (cli.air_test) return air_test.run(gpa, io, cli, &lib);
     if (cli.gpu_tests) return gpu_tests.run(gpa, io, cli, &lib);
+    if (cli.bench_render) return bench_render.run(gpa, io, cli, &lib);
     if (cli.bench) return bench.run(gpa, io, cli, &lib);
     if (cli.scenario != null or cli.scenarios != null) return scenario_runner.run(gpa, io, cli, &lib);
     if (cli.world and cli.headless) return world_mode.runHeadless(gpa, io, cli, &lib);
@@ -273,6 +319,17 @@ pub fn loadLibrary(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !materia
     };
 }
 
+/// Apply the render options of the command line (after `demo.configure`).
+pub fn applyRenderCli(settings: *renderer_mod.Settings, cli: Cli) void {
+    demo.configure(cli.scene, settings);
+    if (cli.light_mode) |m| settings.light_mode = m;
+    if (cli.spacing) |s| settings.probe_spacing = s;
+    if (cli.samples) |s| settings.march_samples = s;
+    settings.overlay = cli.overlay;
+    settings.bloom = cli.bloom;
+    settings.vignette = cli.vignette;
+}
+
 fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *const materials.Library) !u8 {
     // ---- bodies (M7) ----
     const bodies_on = cli.bodies orelse bodies_scenes.isBodiesScene(cli.scene);
@@ -283,10 +340,10 @@ fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *const materia
         .library = lib,
         .validation = cli.validation orelse (builtin.mode == .debug),
         .pipeline = .{ .sleep = cli.sleep, .noise = cli.scene == .noise, .air = cli.air and cli.scene != .determinism, .air_sleep = cli.air_sleep, .bodies = bodies_on },
+        .overlap = cli.overlap,
     });
     defer engine.deinit();
-    engine.pipeline.air.overlay = cli.overlay;
-    engine.capture_overlay = cli.overlay;
+    applyRenderCli(&engine.renderer.settings, cli);
 
     var profile: Profile = .{};
     var file_buf: [64 * 1024]u8 = undefined;
@@ -331,22 +388,26 @@ fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *const materia
     std.debug.print("  particles: {d} live at end (tick {d}), peak {d}; last tick spawned {d} landed {d} refused {d} lost {d} impacts {d}\n", .{ ps.live, engine.mirror().tick, peak_particles, ps.spawned, ps.landed, ps.refused, ps.lost, ps.impacts });
     if (cli.screenshot) |path| try engine.screenshot(io, path, cli.crop);
     if (cli.view_screenshot) |path| {
-        const center = cli.center orelse .{ cell.world_size / 2, cell.world_size / 2 };
+        const default_center: [2]i32 = if (cli.scene == .lighting) scenes.lighting_center else .{ cell.world_size / 2, cell.world_size / 2 };
+        const center = cli.center orelse default_center;
         const view: View = .{
             .scale = cli.zoom,
             .camera_x = center[0] - @as(i32, @intCast(cli.width / 2 / cli.zoom)),
             .camera_y = center[1] - @as(i32, @intCast(cli.height / 2 / cli.zoom)),
         };
         engine.hud.clear();
-        app.fillHud(engine, &profile, .{
+        demo.decorate(cli.scene, engine.tick, &engine.renderer, &engine.hud);
+        if (cli.hud) app.fillHud(engine, &profile, .{
             .frame_ms = elapsed_ms / @as(f64, @floatFromInt(@max(cli.ticks, 1))),
             .material = "sand",
             .radius = 8,
             .view = view,
             .cursor = center,
             .material_count = app.palette.len,
+            .extent = .{ cli.width, cli.height },
         });
         try engine.screenshotView(io, path, view, cli.width, cli.height);
+        engine.renderer.clearDraws();
     }
     return 0;
 }
@@ -364,6 +425,10 @@ test {
     _ = @import("sim/particles.zig");
     _ = @import("sim/readback.zig");
     _ = @import("render/font.zig");
+    _ = @import("render/overlay.zig");
+    _ = @import("render/materials.zig");
+    _ = @import("render/lighting.zig");
+    _ = @import("render/sprites.zig");
     _ = @import("util/png.zig");
     _ = @import("world_mode.zig");
     _ = @import("sim/bodies_gpu.zig");

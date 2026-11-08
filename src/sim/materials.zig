@@ -116,6 +116,11 @@ pub const Ids = struct {
     ice: u8 = air,
     gunpowder: u8 = air,
     dirt: u8 = air,
+    glass: u8 = air,
+    molten_glass: u8 = air,
+    steam: u8 = air,
+    concrete: u8 = air,
+    gravel: u8 = air,
 
     pub fn resolve(set: *const MaterialSet) Ids {
         var r: Ids = .{};

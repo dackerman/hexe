@@ -1,0 +1,46 @@
+#version 460
+// Wall lighting: a probe inside a solid gets no light of its own (its rays
+// start blocked), so it takes the weighted mean of the open probes within
+// `wall depth` world pixels, faded as fewer of them are near. Solid
+// surfaces are lit a few pixels deep and fade into the rock.
+#include "common.glsl"
+#include "render/render.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PC {
+    uint frame_slot;
+    uint src; // raw irradiance (a = solid)
+    uint dst; // final irradiance
+} pc;
+
+#define FR g_render_frames[pc.frame_slot].f
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 pmax = ivec2(FR.probes) - 1;
+    if (any(greaterThan(p, pmax))) return;
+    vec4 self = imageLoad(g_img_rgba16f[pc.src], p);
+    if (self.a < 0.5) {
+        imageStore(g_img_rgba16f[pc.dst], p, vec4(self.rgb, 1.0));
+        return;
+    }
+    int R = clamp(int(ceil(FR.tuning2.y / float(FR.probe_spacing))), 1, 8);
+    vec3 sum = vec3(0.0);
+    float wf = 0.0;
+    float wall = 0.0;
+    for (int dy = -R; dy <= R; dy++) {
+        for (int dx = -R; dx <= R; dx++) {
+            float d = length(vec2(dx, dy));
+            float w = max(1.0 - d / float(R + 1), 0.0);
+            wall += w;
+            vec4 s = imageLoad(g_img_rgba16f[pc.src], clamp(p + ivec2(dx, dy), ivec2(0), pmax));
+            if (s.a < 0.5) {
+                sum += w * s.rgb;
+                wf += w;
+            }
+        }
+    }
+    vec3 irr = wf > 0.0 ? sum / wf * min(1.0, wf / (0.35 * wall)) : vec3(0.0);
+    imageStore(g_img_rgba16f[pc.dst], p, vec4(irr, 1.0));
+}

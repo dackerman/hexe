@@ -132,7 +132,6 @@ uint hash_pass(uint x, uint y, uint tick, uint substep, uint salt) {
 #define SLOT_IMG_LIQUID_COARSE 9u
 #define SLOT_IMG_AIR 10u
 #define SLOT_IMG_AIR_SOURCE 11u
-#define SLOT_IMG_DEBUG_OVERLAY 12u
 // Particles (M4): ballistic particle overlay for rendering, r32ui, cleared
 // each tick (shaders/sim/particles/particles.glsl). 8 keeps clear of 2-7.
 #define SLOT_IMG_PARTICLE_OVERLAY 13u
@@ -185,6 +184,40 @@ layout(set = 0, binding = BINDING_SAMPLERS) uniform sampler g_samplers[];
 
 #define CELLS g_uimages[SLOT_IMG_CELLS]
 #define OWNER g_uimages[SLOT_IMG_OWNER]
+
+// ---------------------------------------------------------------------------
+// Debug overlay image (render milestone, docs/decisions/103-render-overlays.md).
+// RGBA8, DEBUG_OVERLAY_SIZE^2 texels at SLOT_IMG_DEBUG_OVERLAY, GENERAL
+// layout, owned by the renderer. Texel (x, y) covers world pixels
+// (x << DEBUG_OVERLAY_SHIFT, y << DEBUG_OVERLAY_SHIFT) .. +1, i.e. the fluid
+// solvers' half-resolution grid. A sim pass that visualizes something writes
+// the image only while `Frame.overlay` (pipeline.zig) equals its OVERLAY_*
+// id, overwrites every texel it does not want to keep (clear it first when
+// scattering), and the renderer composites it: alpha-blended using the
+// texel's alpha, or added when the mode is additive (see
+// src/render/overlay.zig). Declare the view in a shader with
+//   #define HEXE_WANT_DEBUG_OVERLAY
+// before including common.glsl, then imageStore(DEBUG_OVERLAY, texel, rgba).
+// ---------------------------------------------------------------------------
+#define SLOT_IMG_DEBUG_OVERLAY 2u
+#define DEBUG_OVERLAY_SIZE 1024u
+#define DEBUG_OVERLAY_SHIFT 1u
+
+#define OVERLAY_NONE 0u
+#define OVERLAY_TILES 1u
+#define OVERLAY_AIR_PRESSURE 2u
+#define OVERLAY_AIR_VELOCITY 3u
+#define OVERLAY_LIQUID_PARTICLES 4u
+#define OVERLAY_BODIES 5u
+#define OVERLAY_TEMPERATURE 6u
+#define OVERLAY_PARTICLE_CELLS 7u
+#define OVERLAY_LIGHT 8u
+#define OVERLAY_COUNT 9u
+
+#ifdef HEXE_WANT_DEBUG_OVERLAY
+layout(set = 0, binding = BINDING_STORAGE_IMAGES, rgba8) uniform image2D g_debug_overlay_images[];
+#define DEBUG_OVERLAY g_debug_overlay_images[SLOT_IMG_DEBUG_OVERLAY]
+#endif
 
 ivec2 wrap_coord(ivec2 p) { return ivec2(uvec2(p) & uvec2(WORLD_MASK)); }
 uint load_cell(ivec2 p) { return imageLoad(CELLS, wrap_coord(p)).x; }
@@ -441,7 +474,9 @@ HEXE_BUFFER(CommandBlock, readonly, Command commands[];, g_command_buffers);
 //                                   pixels per tick, w 1.0 on wall cells
 //   SLOT_IMG_AIR_SOURCE    r32ui:  per lattice cell mass to add next step,
 //                                   int32 fixed point (AIR_MASS_ONE = 1.0)
-//   SLOT_IMG_DEBUG_OVERLAY rgba8:  debug view (air density and velocity)
+//   the debug overlay image (SLOT_IMG_DEBUG_OVERLAY, owned by the
+//   renderer) gets air pressure / velocity while Frame.overlay is
+//   OVERLAY_AIR_PRESSURE / OVERLAY_AIR_VELOCITY (shaders/sim/air/overlay.comp)
 // ---------------------------------------------------------------------------
 #define AIR_SIZE 1024u
 #define AIR_MASK 1023u

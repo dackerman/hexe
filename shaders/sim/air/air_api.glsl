@@ -19,13 +19,11 @@
 
 layout(set = 0, binding = BINDING_STORAGE_IMAGES, r8ui) uniform uimage2D g_u8_images[];
 layout(set = 0, binding = BINDING_STORAGE_IMAGES, rgba32f) uniform image2D g_f4_images[];
-layout(set = 0, binding = BINDING_STORAGE_IMAGES, rgba8) uniform image2D g_rgba8_images[];
 
 #define SOLID_COARSE g_u8_images[SLOT_IMG_SOLID_COARSE]
 #define LIQUID_COARSE g_u8_images[SLOT_IMG_LIQUID_COARSE]
 #define AIR_FIELD g_f4_images[SLOT_IMG_AIR]
 #define AIR_SOURCE g_uimages[SLOT_IMG_AIR_SOURCE]
-#define DEBUG_OVERLAY g_rgba8_images[SLOT_IMG_DEBUG_OVERLAY]
 
 HEXE_BUFFER(AirTileMarkBlock, , uint8_t marks[];, g_air_tile_marks);
 HEXE_BUFFER(AirTileListBlock, , uint dispatch_x; uint dispatch_y; uint dispatch_z; uint count_copy; uint tiles[];, g_air_tile_lists);

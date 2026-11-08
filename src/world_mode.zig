@@ -145,7 +145,7 @@ pub const Session = struct {
         errdefer self.prefetch.destroy();
 
         const stream = &engine.pipeline.stream;
-        try stream.enable(io, engine.timeline, &engine.timeline_value);
+        try stream.enable(io, engine.sim_timeline, &engine.sim_value);
         const c = cam orelse self.spawn();
         self.st = try Streaming.init(gpa, &self.store, stream.sink(), .{
             .ops_per_tick = opts.ops_per_tick,

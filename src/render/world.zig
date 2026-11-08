@@ -1,54 +1,21 @@
-//! World pass: shaders/render/world.frag over a fullscreen triangle. Maps
-//! cells to material ramp colors with integer upscale; records inside an
-//! active dynamic-rendering scope set up by the caller.
-const std = @import("std");
+//! The camera (`View`) and viewport helper shared by the render passes. The
+//! world pass itself is shaders/render/world.frag, recorded by
+//! src/render/renderer.zig into the world-resolution scene image, which
+//! composite.frag integer-upscales to the window.
 const gpu = @import("../gpu/gpu.zig");
 const vk = gpu.vk;
-const shaders = @import("shaders");
 
 pub const View = struct {
     /// World pixel at the viewport's top-left corner (wraps on the torus).
     camera_x: i32 = 0,
     camera_y: i32 = 0,
-    /// Integer zoom, >= 1.
+    /// Integer zoom, >= 1: one world pixel covers scale x scale window pixels.
     scale: u32 = 1,
-    /// Tint tiles on this tick's active list.
-    show_tiles: bool = false,
-    /// Add the debug overlay image (air field, M5) to the world colors.
-    show_overlay: bool = false,
-};
 
-pub const WorldPass = struct {
-    pipeline: vk.Pipeline,
-    format: vk.Format,
-
-    pub fn init(ctx: *gpu.Context, format: vk.Format) !WorldPass {
-        return .{
-            .pipeline = try gpu.pipelines.createGraphics(ctx, .{
-                .vert = &shaders.render_fullscreen_vert,
-                .frag = &shaders.render_world_frag,
-                .color_format = format,
-            }),
-            .format = format,
-        };
-    }
-
-    pub fn deinit(self: *WorldPass, ctx: *gpu.Context) void {
-        gpu.pipelines.destroy(ctx, self.pipeline);
-    }
-
-    pub fn record(self: *const WorldPass, ctx: *const gpu.Context, cmd: vk.CommandBuffer, extent: vk.Extent2D, view: View) void {
-        setViewport(ctx, cmd, extent);
-        ctx.vkd.cmdBindPipeline(cmd, .graphics, self.pipeline);
-        gpu.pipelines.push(ctx, cmd, extern struct { cx: i32, cy: i32, ox: i32, oy: i32, scale: u32, flags: u32 }{
-            .cx = view.camera_x,
-            .cy = view.camera_y,
-            .ox = 0,
-            .oy = 0,
-            .scale = @max(view.scale, 1),
-            .flags = @as(u32, @intFromBool(view.show_tiles)) | (@as(u32, @intFromBool(view.show_overlay)) << 1),
-        });
-        ctx.vkd.cmdDraw(cmd, 3, 1, 0, 0);
+    /// World pixel under window pixel (x, y), unwrapped.
+    pub fn toWorld(self: View, x: f32, y: f32) [2]i32 {
+        const s: i32 = @intCast(@max(self.scale, 1));
+        return .{ self.camera_x + @divFloor(@as(i32, @intFromFloat(x)), s), self.camera_y + @divFloor(@as(i32, @intFromFloat(y)), s) };
     }
 };
 

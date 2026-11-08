@@ -8,15 +8,18 @@
 //!   = / -          zoom in / out (integer)         space         pause
 //!   .              single tick while paused        F1            toggle HUD
 //!   F2             activity tile overlay           F12           screenshot
-//!   F5             save (--world --save DIR)    Esc           quit
-//!   F3             air field overlay (M5)          E             explosion at the cursor
-//!   Q (hold)       spray sand particles at cursor  E (hold)      spray water particles
-//!   X              eject (interim explosion) at the cursor, brush radius
-//!   Esc            quit
+//!   F5             save (--world --save DIR)       Esc           quit
+//!   E              explosion at the cursor (air, bodies, connectivity: game/explode.zig)
+//!   Q (hold)       spray sand particles at cursor  R (hold)      spray water particles
+//!   X              eject (cells fly as particles) at the cursor, brush radius
+//!   Tab / shift    cycle debug overlays            T             cursor torch
+//!   F3             air pressure overlay on/off     F4            lighting mode (cascades, simple, off)
+//!   F6             probe spacing 1/2/4 (quality)   F7 bloom      F8 vignette
 //! Bodies (M7, docs/decisions/99-bodies-gpu-sandbox-keys.md):
-//!   C  concrete crate at the cursor     X  wood crate at the cursor
+//!   C  concrete crate at the cursor     Z  wood crate at the cursor
 //!   V  stone slab at the cursor         B  steel beam: then click both ends
 //!   (right mouse, the eject tool, cuts bodies and makes loose terrain fall)
+//! Key reconciliation of the merged branches: docs/decisions/114-integrate-keys.md.
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("sdl");
@@ -29,6 +32,9 @@ const cell = @import("sim/cell.zig");
 const commands = @import("sim/commands.zig");
 const materials = @import("sim/materials.zig");
 const data = @import("data");
+const overlay = @import("render/overlay.zig");
+const demo = @import("render/demo.zig");
+const renderer_mod = @import("render/renderer.zig");
 const max_ticks_per_frame = @import("sim/pipeline.zig").max_ticks_per_frame;
 const Profile = @import("profile.zig").Profile;
 const world_mode = @import("world_mode.zig");
@@ -54,12 +60,17 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *materials.Library
         .library = lib,
         .validation = cli.validation orelse (builtin.mode == .debug),
         .pipeline = .{ .sleep = cli.sleep, .noise = cli.scene == .noise, .air = cli.air, .air_sleep = cli.air_sleep, .bodies = bodies_on },
+        .overlap = cli.overlap,
     });
     defer engine.deinit();
-    engine.pipeline.air.overlay = cli.overlay;
     var profile: Profile = .{};
     engine.profile = &profile;
     var tools: BodyTools = .{};
+    @import("main.zig").applyRenderCli(&engine.renderer.settings, cli);
+    const rs = &engine.renderer.settings;
+    var torch = true;
+    var frame_ms_sum: f64 = 0;
+    var frame_ms_count: u64 = 0;
 
     // World mode (--world): streamed endless world, camera in world cells.
     var session: ?*world_mode.Session = null;
@@ -77,8 +88,9 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *materials.Library
     const scene = if (cli.world) .empty else cli.scene;
 
     const win_w, const win_h = window.pixelSize();
-    var view: View = .{ .scale = 2, .show_overlay = cli.overlay };
-    const start = if (session) |s| (cli.center orelse s.spawn()) else [2]i32{ cell.world_size / 2, cell.world_size / 2 };
+    var view: View = .{ .scale = cli.zoom };
+    const scene_center: [2]i32 = if (cli.scene == .lighting) @import("sim/scenes.zig").lighting_center else .{ cell.world_size / 2, cell.world_size / 2 };
+    const start = if (session) |s| (cli.center orelse s.spawn()) else (cli.center orelse scene_center);
     view.camera_x = start[0] - @as(i32, @intCast(win_w / 2 / view.scale));
     view.camera_y = start[1] - @as(i32, @intCast(win_h / 2 / view.scale));
 
@@ -120,11 +132,17 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *materials.Library
         if (input.wasPressed(c.SDL_SCANCODE_SPACE)) paused = !paused;
         if (paused and input.wasPressed(c.SDL_SCANCODE_PERIOD)) ticks = 1;
         if (input.wasPressed(c.SDL_SCANCODE_F1)) show_hud = !show_hud;
-        if (input.wasPressed(c.SDL_SCANCODE_F2)) view.show_tiles = !view.show_tiles;
-        if (input.wasPressed(c.SDL_SCANCODE_F3)) {
-            view.show_overlay = !view.show_overlay;
-            engine.pipeline.air.overlay = view.show_overlay;
+        if (input.wasPressed(c.SDL_SCANCODE_F2)) rs.overlay = if (rs.overlay == .tiles) .none else .tiles;
+        if (input.wasPressed(c.SDL_SCANCODE_F3)) rs.overlay = if (rs.overlay == .air_pressure) .none else .air_pressure;
+        if (input.wasPressed(c.SDL_SCANCODE_TAB)) {
+            const back = input.isDown(c.SDL_SCANCODE_LSHIFT) or input.isDown(c.SDL_SCANCODE_RSHIFT);
+            rs.overlay = if (back) overlay.prev(rs.overlay) else overlay.next(rs.overlay);
         }
+        if (input.wasPressed(c.SDL_SCANCODE_F4)) rs.light_mode = @fromBackingInt(@intCast((@backingInt(rs.light_mode) + 1) % 3));
+        if (input.wasPressed(c.SDL_SCANCODE_F6)) rs.probe_spacing = if (rs.probe_spacing >= 4) 1 else rs.probe_spacing * 2;
+        if (input.wasPressed(c.SDL_SCANCODE_F7)) rs.bloom = !rs.bloom;
+        if (input.wasPressed(c.SDL_SCANCODE_F8)) rs.vignette = !rs.vignette;
+        if (input.wasPressed(c.SDL_SCANCODE_T)) torch = !torch;
 
         // Material selection: number keys pick from the palette, 0 ignites.
         for (palette, 0..) |name, k| {
@@ -223,7 +241,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *materials.Library
         if (input.wasPressed(c.SDL_SCANCODE_E)) pending.explosion(mwx, mwy, @max(radius, 4), 1.0);
 
         // Particle tools (M4): sprays and the interim explosion.
-        if (input.isDown(c.SDL_SCANCODE_Q) or input.isDown(c.SDL_SCANCODE_E)) {
+        if (input.isDown(c.SDL_SCANCODE_Q) or input.isDown(c.SDL_SCANCODE_R)) {
             const mat = if (input.isDown(c.SDL_SCANCODE_Q)) engine.ids.sand else engine.ids.water;
             pending.spray(.{ .x = mwx, .y = mwy, .material = mat, .count = 48, .speed = 260, .spread = 90, .direction = 0.75, .cone = 0.08 });
         }
@@ -238,8 +256,11 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *materials.Library
             _ = s.save() catch |err| std.log.err("save: {s}", .{@errorName(err)});
         };
 
-        // HUD.
+        // Render decorations: scene lights/sprites/signs and the cursor torch.
         engine.hud.clear();
+        demo.decorate(cli.scene, engine.tick, &engine.renderer, &engine.hud);
+        if (torch) engine.renderer.addLight(@as(f32, @floatFromInt(mwx)) + 0.5, @as(f32, @floatFromInt(mwy)) + 0.5, 70, .{ 1.0, 0.8, 0.55 });
+
         if (show_hud) fillHud(engine, &profile, .{
             .frame_ms = frame_ms,
             .paused = paused,
@@ -250,6 +271,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *materials.Library
             .material_count = palette.len,
             .world = session,
             .message = if (reload_msg.len > 0 and engine.tick -% reload_msg_tick < reload_message_ticks) reload_msg else "",
+            .extent = .{ win_w, win_h },
         });
         if (show_hud and bodies_on) tools.hud(engine, &profile);
 
@@ -271,12 +293,18 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *materials.Library
         try engine.frame(ticks, src, view);
         if (ticks > 0) pending.begin(engine.tick);
         frames += 1;
+        if (frames > 60) {
+            frame_ms_sum += @as(f64, @floatFromInt(dt)) / 1e6;
+            frame_ms_count += 1;
+        }
+        if (cli.frames > 0 and frames >= cli.frames) break;
     }
     try engine.finish();
     if (session) |s| s.report();
     const secs = @as(f64, @floatFromInt(run_start.untilNow(io, .awake).nanoseconds)) / 1e9;
-    std.log.info("{d} frames in {d:.2} s ({d:.1} fps), {d} ticks ({d:.1}/s), grid {d:.3} ms", .{
-        frames, secs, @as(f64, @floatFromInt(frames)) / secs, engine.tick, @as(f64, @floatFromInt(engine.tick)) / secs, profile.gridSmooth(&engine.names),
+    std.log.info("{d} frames in {d:.2} s ({d:.1} fps), {d} ticks ({d:.1}/s), grid {d:.3} ms, mean frame {d:.3} ms after warm-up, overlap {s}", .{
+        frames,                                                          secs,                             @as(f64, @floatFromInt(frames)) / secs, engine.tick, @as(f64, @floatFromInt(engine.tick)) / secs, profile.gridSmooth(&engine.names),
+        frame_ms_sum / @as(f64, @floatFromInt(@max(frame_ms_count, 1))), if (cli.overlap) "on" else "off",
     });
     return 0;
 }
@@ -293,6 +321,8 @@ pub const HudInfo = struct {
     world: ?*const world_mode.Session = null,
     /// Extra status line (hot reload result).
     message: []const u8 = "",
+    /// Window size in pixels (for the light plan shown in the HUD).
+    extent: [2]u32 = .{ 1920, 1080 },
 };
 
 /// The HUD text: frame time, grid time, per-pass GPU ms, tool state.
@@ -306,12 +336,32 @@ pub fn fillHud(engine: *Engine, profile: *const Profile, info: HudInfo) void {
     w.writeAll("gpu ms") catch {};
     for (0..names.count) |i| w.print("  {s} {d:.3}", .{ names.get(i), profile.smooth[i] }) catch {};
     hud.print("{s}", .{w.buffered()});
+    // Render timings (also in the line above) and lighting state.
+    const r = &engine.renderer;
+    const plan = r.plan(info.view, .{ .width = info.extent[0], .height = info.extent[1] });
+    var rl: [160]u8 = undefined;
+    var rw: std.Io.Writer = .fixed(&rl);
+    var total: f64 = 0;
+    for (render_passes) |rp| {
+        for (0..names.count) |i| {
+            if (std.mem.eql(u8, names.get(i), rp)) {
+                rw.print(" {s} {d:.3}", .{ rp, profile.smooth[i] }) catch {};
+                total += profile.smooth[i];
+            }
+        }
+    }
+    if (total > 0) hud.print("render {d:.3} ms:{s}", .{ total, rw.buffered() }) else hud.print("render ms: not timed (capture)", .{});
+    hud.print("light {s}  spacing {d}px  cascades {d}  region {d}x{d}  lights {d}  bloom {s}  vignette {s}", .{
+        @tagName(r.settings.light_mode), plan.spacing, plan.count, plan.size[0], plan.size[1], r.light_count, if (r.settings.bloom) "on" else "off", if (r.settings.vignette) "on" else "off",
+    });
+    const ov = overlay.info(r.settings.overlay);
+    hud.print("overlay [Tab] {s}{s}{s}", .{ ov.name, if (ov.legend.len > 0) ": " else "", ov.legend });
     const ps = engine.mirror().particles;
     hud.print("particles {d} live (cap {d})  spawned {d} landed {d} refused {d} lost {d} impacts {d}", .{ ps.live, ps.capacity, ps.spawned, ps.landed, ps.refused, ps.lost, ps.impacts });
     hud.print("brush {s} r{d}  zoom {d}x  cam {d},{d}  cursor {d},{d}", .{ info.material, info.radius, info.view.scale, info.view.camera_x, info.view.camera_y, info.cursor[0], info.cursor[1] });
     if (info.world) |s| s.hudLines(hud);
-    hud.print("1-{d} material  0 ignite  LMB paint  RMB erase  wheel size  WASD pan  =/- zoom  space pause  F2 tiles  F3 air  E boom", .{info.material_count});
-    hud.print("Q spray sand  E spray water  X eject (explosion) at cursor", .{});
+    hud.print("1-{d} material  0 ignite  LMB paint  RMB erase  wheel size  WASD pan  =/- zoom  space pause  Tab overlay  F2 tiles  F3 air", .{info.material_count});
+    hud.print("E explosion  X eject  Q/R spray sand/water  T torch  F4 light  F6 quality  F7 bloom  F8 vignette", .{});
     if (info.message.len > 0) hud.print("{s}", .{info.message});
 }
 
@@ -330,7 +380,7 @@ const BodyTools = struct {
         // Keep bodies in the unwrapped frame around the camera (torus).
         sim.setCenter(center[0], center[1]);
         if (input.wasPressed(c.SDL_SCANCODE_C)) _ = sim.spawnCrate(cursor[0], cursor[1], 40, roles.concrete) catch {};
-        if (input.wasPressed(c.SDL_SCANCODE_X)) _ = sim.spawnCrate(cursor[0], cursor[1], 40, roles.wood) catch {};
+        if (input.wasPressed(c.SDL_SCANCODE_Z)) _ = sim.spawnCrate(cursor[0], cursor[1], 40, roles.wood) catch {};
         if (input.wasPressed(c.SDL_SCANCODE_V)) _ = sim.dropSlab(cursor[0], cursor[1], 160, 16, roles.stone) catch {};
         if (input.wasPressed(c.SDL_SCANCODE_B)) {
             self.placing_beam = !self.placing_beam;
@@ -355,7 +405,7 @@ const BodyTools = struct {
         for (0..engine.names.count) |i| {
             if (std.mem.eql(u8, engine.names.get(i), "bodies")) gpu_ms = profile.smooth[i];
         }
-        engine.hud.print("bodies {d}  cpu {d:.2} ms  readback {d:.2} ms  gpu {d:.3} ms  C crate  X wood  V slab  B beam{s}", .{
+        engine.hud.print("bodies {d}  cpu {d:.2} ms  readback {d:.2} ms  gpu {d:.3} ms  C crate  Z wood  V slab  B beam{s}", .{
             sim.bodyCount(),
             sim.stats.cpu_ms,
             sim.stats.readback_ms,
@@ -364,6 +414,9 @@ const BodyTools = struct {
         });
     }
 };
+
+/// Passes summed into the HUD's render line.
+const render_passes = [_][]const u8{ "light_build", "cascades", "merge", "world", "sprites", "post", "hud" };
 
 /// Circles every radius/2 pixels from `a` to `b` (at least one).
 fn strokeLine(list: *commands.CommandList, a: [2]i32, b: [2]i32, radius: i32, material: u8, ignite: bool) void {

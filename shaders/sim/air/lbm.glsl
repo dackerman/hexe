@@ -20,9 +20,12 @@ const int LBM_OPP[9] = int[9](0, 3, 4, 1, 2, 7, 8, 5, 6);
 //   bit 10     pixels of this wall cell were removed by the blast this tick:
 //              if it becomes fluid, it does not draw its air from its
 //              neighbors (no vacuum where debris was thrown out)
+//   bit 11     the wall is made of liquid (prep.comp: no air transfer)
 //   bits 16-31 vertical body force (f16, lattice units, +y down)
 #define NODE_WALL 0x200u
 #define NODE_BLASTED 0x400u
+// The wall is there because of liquid pixels (fewer than 2 solid ones).
+#define NODE_LIQUID_WALL 0x800u
 
 HEXE_BUFFER(AirDistBlock, , float f[];, g_air_dist);
 

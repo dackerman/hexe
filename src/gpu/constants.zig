@@ -10,6 +10,7 @@ const commands = @import("../sim/commands.zig");
 const air = @import("../sim/air_abi.zig");
 const reactions = @import("../sim/reactions.zig");
 const Flag = materials.Flag;
+const overlay = @import("../render/overlay.zig");
 
 // ---- descriptor set 0 (src/gpu/descriptors.zig) ----
 pub const binding_storage_images = 0;
@@ -24,8 +25,15 @@ pub const slot_img_solid_coarse = 8;
 pub const slot_img_liquid_coarse = 9;
 pub const slot_img_air = 10;
 pub const slot_img_air_source = 11;
-pub const slot_img_debug_overlay = 12;
 pub const slot_img_particle_overlay = 13;
+/// RGBA8 debug overlay written by sim passes, composited by the renderer.
+pub const slot_img_debug_overlay = 2;
+pub const debug_overlay_size = 1024;
+pub const debug_overlay_shift = 1;
+/// Overlay modes sim passes write the image for (render/overlay.zig Mode).
+pub const overlay_air_pressure: u32 = @backingInt(overlay.Mode.air_pressure);
+pub const overlay_air_velocity: u32 = @backingInt(overlay.Mode.air_velocity);
+pub const overlay_liquid_particles: u32 = @backingInt(overlay.Mode.liquid_particles);
 /// First storage image slot handed out by `Descriptors.allocImageSlot`.
 pub const slot_img_dynamic_base = 16;
 
@@ -104,11 +112,23 @@ pub const mirrors = .{
     .{ "SLOT_IMG_LIQUID_COARSE", slot_img_liquid_coarse },
     .{ "SLOT_IMG_AIR", slot_img_air },
     .{ "SLOT_IMG_AIR_SOURCE", slot_img_air_source },
-    .{ "SLOT_IMG_DEBUG_OVERLAY", slot_img_debug_overlay },
     .{ "SLOT_BUF_BLAST_EJECTS", slot_buf_blast_ejects },
     .{ "SLOT_BUF_AIR_EVENTS", slot_buf_air_events },
     .{ "SLOT_BUF_AIR_TILE_MARKS", slot_buf_air_tile_marks },
     .{ "SLOT_BUF_AIR_TILE_LIST", slot_buf_air_tile_list },
+    .{ "SLOT_IMG_DEBUG_OVERLAY", slot_img_debug_overlay },
+    .{ "DEBUG_OVERLAY_SIZE", debug_overlay_size },
+    .{ "DEBUG_OVERLAY_SHIFT", debug_overlay_shift },
+    .{ "OVERLAY_NONE", @backingInt(overlay.Mode.none) },
+    .{ "OVERLAY_TILES", @backingInt(overlay.Mode.tiles) },
+    .{ "OVERLAY_AIR_PRESSURE", @backingInt(overlay.Mode.air_pressure) },
+    .{ "OVERLAY_AIR_VELOCITY", @backingInt(overlay.Mode.air_velocity) },
+    .{ "OVERLAY_LIQUID_PARTICLES", @backingInt(overlay.Mode.liquid_particles) },
+    .{ "OVERLAY_BODIES", @backingInt(overlay.Mode.bodies) },
+    .{ "OVERLAY_TEMPERATURE", @backingInt(overlay.Mode.temperature) },
+    .{ "OVERLAY_PARTICLE_CELLS", @backingInt(overlay.Mode.particle_cells) },
+    .{ "OVERLAY_LIGHT", @backingInt(overlay.Mode.light) },
+    .{ "OVERLAY_COUNT", overlay.count },
     .{ "SLOT_BUF_MATERIALS", slot_buf_materials },
     .{ "SLOT_BUF_TILE_MARKS", slot_buf_tile_marks },
     .{ "SLOT_BUF_TILE_LIST", slot_buf_tile_list },

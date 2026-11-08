@@ -1,0 +1,41 @@
+#version 460
+// Light scene mip k from mip k-1. A texel with any solid child is solid (a
+// one-pixel wall still blocks rays that step over it at a coarse mip:
+// shadows err dark, never leak), otherwise its opacity is the mean over the
+// doubled path length, 1-(1-a)^2. Emission is the coverage-weighted mean
+// radiance times that mean coverage.
+#include "common.glsl"
+#include "render/render.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PC {
+    uint frame_slot;
+    uint level; // destination mip, 1..SCENE_MIPS-1
+} pc;
+
+#define FR g_render_frames[pc.frame_slot].f
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    uvec2 size = (FR.region_size >> pc.level);
+    if (any(greaterThanEqual(p, size))) return;
+    uint src = FR.scene_img[pc.level - 1u];
+    ivec2 q = ivec2(p) * 2;
+    vec4 s0 = imageLoad(g_img_rgba16f[src], q);
+    vec4 s1 = imageLoad(g_img_rgba16f[src], q + ivec2(1, 0));
+    vec4 s2 = imageLoad(g_img_rgba16f[src], q + ivec2(0, 1));
+    vec4 s3 = imageLoad(g_img_rgba16f[src], q + ivec2(1, 1));
+    // Occlusion: solid children block the whole parent (a one-pixel wall
+    // still casts a shadow at coarse mips); translucent media average over
+    // the doubled path length.
+    float amax = max(max(s0.a, s1.a), max(s2.a, s3.a));
+    float asum = s0.a + s1.a + s2.a + s3.a;
+    float a_em = 1.0 - (1.0 - asum * 0.25) * (1.0 - asum * 0.25);
+    float a = amax >= 0.9 ? 1.0 : a_em;
+    // Emission: the coverage-weighted mean radiance of the children, seen
+    // with the parent's mean coverage, so a light keeps its brightness
+    // across mips (stored premultiplied).
+    vec3 e = (s0.rgb + s1.rgb + s2.rgb + s3.rgb) / max(asum, 1e-4) * a_em;
+    imageStore(g_img_rgba16f[FR.scene_img[pc.level]], ivec2(p), vec4(e, a));
+}

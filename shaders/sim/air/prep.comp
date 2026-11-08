@@ -2,10 +2,13 @@
 // Air field, once per tick after coarsening, over the whole lattice:
 // - node word per cell: wall flag, which pull sources are walls, buoyancy;
 // - mass conservation when the obstacles change: a cell that became a wall
-//   (stone painted, water flowing in, a body moving) hands its air to its
-//   fluid neighbors through AIR_SOURCE, so flooding a sealed room compresses
-//   the air; a cell that became fluid starts at its neighbors' mean density
-//   and takes that mass from them;
+//   (stone painted, a body moving) hands its air to its fluid neighbors
+//   through AIR_SOURCE; a cell that became fluid starts at its neighbors'
+//   mean density and takes that mass from them. Walls made of liquid are
+//   exempt (NODE_LIQUID_WALL): flowing liquid toggles cells every tick, and
+//   each toggle moved a quarter cell of air at once, a gradient the blast
+//   effects read as an explosion. Liquid now appears and disappears
+//   without moving air (docs/decisions/117-integrate-air-liquid-walls.md);
 // - wakes the air tiles where walls changed or heat drives convection.
 // A lattice cell is a wall when solid + liquid pixels >= 2 of its 4.
 #include "common.glsl"
@@ -42,6 +45,7 @@ void main() {
     ivec2 local = air_local(c, pc.seam);
     bool wall = wall_at(c);
     uint node = wall ? NODE_WALL : 0u;
+    if (wall && imageLoad(SOLID_COARSE, air_wrap(c)).x < 2u) node |= NODE_LIQUID_WALL;
     for (int i = 1; i < 9; i++) {
         ivec2 n = local - LBM_E[i];
         if (air_inside(n) && wall_at(c - LBM_E[i])) node |= 1u << uint(i);
@@ -64,6 +68,7 @@ void main() {
     if (was_wall == wall) return;
 
     if (wall) {
+        if ((node & NODE_LIQUID_WALL) != 0u) return; // liquid: no transfer
         // Became a wall: push this cell's air into its fluid neighbors.
         float rho = imageLoad(AIR_FIELD, c).x;
         int k = 0;
@@ -89,7 +94,7 @@ void main() {
         // Debris thrown out by the blast: the air that fills in is not taken
         // from the neighbors (that vacuum would throw the next layer, and so
         // on). Mass is created; the particles stand in for the volume.
-        if (k > 0 && (old & NODE_BLASTED) == 0u) {
+        if (k > 0 && (old & (NODE_BLASTED | NODE_LIQUID_WALL)) == 0u) {
             int share = int(rho * float(AIR_MASS_ONE) / float(k));
             for (int j = 0; j < 4; j++) {
                 ivec2 n = c + N4[j];

@@ -1,0 +1,49 @@
+#version 460
+// Bloom on emissive light, at half the scene resolution.
+//   mode 0 (down): 2x2 average of the scene with a soft threshold on
+//                  luminance, so only light brighter than lit surfaces glows
+//   mode 1 (blur): 13-tap Gaussian along `dir` from src to dst
+// composite.frag adds the result, bilinear upsampled.
+#include "common.glsl"
+#include "render/render.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PC {
+    uint frame_slot;
+    uint mode;
+    uint src;
+    uint dst;
+    ivec2 dir;
+    uvec2 size; // destination size
+} pc;
+
+#define FR g_render_frames[pc.frame_slot].f
+
+const float weights[7] = float[](0.1736, 0.1610, 0.1284, 0.0880, 0.0518, 0.0262, 0.0114);
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(uvec2(p), pc.size))) return;
+    vec3 c;
+    if (pc.mode == 0u) {
+        ivec2 q = p * 2;
+        c = (imageLoad(g_img_rgba16f[pc.src], q).rgb + imageLoad(g_img_rgba16f[pc.src], q + ivec2(1, 0)).rgb +
+             imageLoad(g_img_rgba16f[pc.src], q + ivec2(0, 1)).rgb + imageLoad(g_img_rgba16f[pc.src], q + ivec2(1, 1)).rgb) * 0.25;
+        float l = luminance(c);
+        float thr = FR.tuning2.w;
+        float knee = thr * 0.5;
+        float soft = clamp(l - thr + knee, 0.0, 2.0 * knee);
+        soft = soft * soft / (4.0 * knee + 1e-4);
+        float contrib = max(soft, l - thr) / max(l, 1e-4);
+        c *= contrib;
+    } else {
+        ivec2 maxp = ivec2(pc.size) - 1;
+        c = imageLoad(g_img_rgba16f[pc.src], p).rgb * weights[0];
+        for (int i = 1; i < 7; i++) {
+            c += imageLoad(g_img_rgba16f[pc.src], clamp(p + pc.dir * i, ivec2(0), maxp)).rgb * weights[i];
+            c += imageLoad(g_img_rgba16f[pc.src], clamp(p - pc.dir * i, ivec2(0), maxp)).rgb * weights[i];
+        }
+    }
+    imageStore(g_img_rgba16f[pc.dst], p, vec4(c, 1.0));
+}

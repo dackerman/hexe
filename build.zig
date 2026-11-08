@@ -52,6 +52,19 @@ const shader_sources = [_][]const u8{
     "render/fullscreen.vert",
     "render/world.frag",
     "render/hud.frag",
+    // ---- render (M8): lighting, sprites, post ----
+    "render/skyline.comp",
+    "render/light_scene.comp",
+    "render/light_mip.comp",
+    "render/rc_cascade.comp",
+    "render/light_resolve.comp",
+    "render/light_dilate.comp",
+    "render/quads.vert",
+    "render/quads.frag",
+    "render/bloom.comp",
+    "render/composite.frag",
+    "render/hud_text.vert",
+    "render/hud_text.frag",
 };
 
 pub fn build(b: *std.Build) void {
@@ -283,6 +296,14 @@ pub fn build(b: *std.Build) void {
     scenarios_run.addPassthruArgs();
     scenarios_run.has_side_effects = true;
     b.step("scenarios", "Run every scenarios/*.zon headless on the GPU and check its assertions").dependOn(&scenarios_run.step);
+
+    // ---- render bench (M8): per-pass render GPU ms at 1920x1080, overlap ----
+    const bench_render_run = b.addRunArtifact(bench_exe.compile);
+    bench_render_run.addArgs(&.{ "--headless", "--bench-render" });
+    bench_render_run.setCwd(b.path(".")); // materials/
+    bench_render_run.addPassthruArgs();
+    bench_render_run.has_side_effects = true;
+    b.step("bench-render", "Render passes at a 1920x1080 view and sim/render overlap (ReleaseFast)").dependOn(&bench_render_run.step);
 }
 
 /// Shared imports with Box2D and the bodies layer built in `optimize`.
@@ -343,6 +364,7 @@ fn addHexe(b: *std.Build, o: HexeOptions) Hexe {
     module.addAnonymousImport("bodies_glsl", .{ .root_source_file = b.path("shaders/sim/bodies/bodies.glsl") });
     module.addAnonymousImport("particles_glsl", .{ .root_source_file = b.path("shaders/sim/particles/particles.glsl") });
     module.addAnonymousImport("events_glsl", .{ .root_source_file = b.path("shaders/sim/events.glsl") });
+    module.addAnonymousImport("render_glsl", .{ .root_source_file = b.path("shaders/render/render.glsl") });
     for (o.shared) |imp| module.addImport(imp.name, imp.module);
     const compile = b.addExecutable(.{ .name = o.name, .root_module = module });
     return .{ .compile = compile, .module = module };

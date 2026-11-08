@@ -150,8 +150,6 @@ pub const Air = struct {
     /// (docs/decisions/71-air-boundaries.md). Streaming sets it to the
     /// window origin / 2 and must `resetRegion` loaded chunks.
     seam: [2]i32 = .{ 0, 0 },
-    /// Write the debug overlay image each tick.
-    overlay: bool = false,
     /// Write the 256 x 256 field to the CPU each tick.
     field_readback: bool = false,
     /// Slot of the coarsened temperature image (set by the pipeline).
@@ -163,7 +161,6 @@ pub const Air = struct {
     node: gpu.Image,
     field_image: gpu.Image,
     source: gpu.Image,
-    overlay_image: gpu.Image,
     tile_marks: gpu.Buffer,
     tile_list: gpu.Buffer,
     ejects: gpu.Buffer,
@@ -205,7 +202,6 @@ pub const Air = struct {
         self.all_active = !cfg.air_sleep;
         self.params = .{};
         self.seam = .{ 0, 0 };
-        self.overlay = false;
         self.field_readback = false;
         self.temp_slot = 0;
         self.parity = 0;
@@ -237,8 +233,6 @@ pub const Air = struct {
         errdefer self.field_image.deinit(ctx);
         self.source = try makeImage(ctx, .r32_uint, gpu.constants.slot_img_air_source);
         errdefer self.source.deinit(ctx);
-        self.overlay_image = try makeImage(ctx, .r8g8b8a8_unorm, gpu.constants.slot_img_debug_overlay);
-        errdefer self.overlay_image.deinit(ctx);
 
         self.tile_marks = try gpu.Buffer.init(ctx, abi.tile_mark_bytes, .{ .storage_buffer = true, .transfer_dst = true }, .gpu_only);
         errdefer self.tile_marks.deinit(ctx);
@@ -331,7 +325,6 @@ pub const Air = struct {
         self.ejects.deinit(ctx);
         self.tile_list.deinit(ctx);
         self.tile_marks.deinit(ctx);
-        self.overlay_image.deinit(ctx);
         self.source.deinit(ctx);
         self.field_image.deinit(ctx);
         self.node.deinit(ctx);
@@ -721,9 +714,14 @@ pub const Air = struct {
     fn recordIo(self: *Air, frame: *Frame, r: *Readback, k: u32) void {
         const ctx = self.ctx;
         const cmd = frame.cmd;
-        if (self.overlay) {
+        // The renderer's debug overlay modes air_pressure (2) / air_velocity (3).
+        if (frame.overlay == gpu.constants.overlay_air_pressure or frame.overlay == gpu.constants.overlay_air_velocity) {
             frame.bindCompute(self.pipes[@backingInt(P.overlay)]);
-            frame.push(extern struct { pg: f32, sg: f32 }{ .pg = self.params.overlay_pressure_gain, .sg = self.params.overlay_speed_gain });
+            frame.push(extern struct { pg: f32, sg: f32, mode: u32 }{
+                .pg = self.params.overlay_pressure_gain,
+                .sg = self.params.overlay_speed_gain,
+                .mode = @intFromBool(frame.overlay == gpu.constants.overlay_air_velocity),
+            });
             frame.dispatch(size / 16, size / 16, 1);
         }
         if (r.samples > 0) {

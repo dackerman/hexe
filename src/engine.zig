@@ -1,13 +1,17 @@
 //! Frame orchestration: frames in flight, queues, timeline semaphore, tick
 //! recording, presentation, capture and readback.
 //!
-//! Synchronization (docs/decisions/04-frame-sync.md): one timeline
-//! semaphore orders all GPU work. Each frame's simulation submission (compute
-//! queue) waits for the previous value and signals the next; the render
-//! submission (graphics queue) waits for the simulation's value and signals
-//! the next. The CPU waits for a frame slot's last value before reusing its
-//! command buffers, upload regions and timestamp queries, so up to
-//! `frames_in_flight` frames are recorded ahead of the GPU.
+//! Synchronization (docs/decisions/23-frame-sync.md, revised by
+//! docs/decisions/104-render-snapshot-overlap.md): two timeline semaphores,
+//! one per queue. The simulation (compute queue) ends each frame's ticks
+//! with a copy of what rendering reads into one of two snapshots and signals
+//! the sim timeline; the render (graphics queue) waits for the sim value that
+//! wrote its snapshot and signals the render timeline. The next frame's
+//! simulation waits only for the render that last read the snapshot it is
+//! about to overwrite, so render N overlaps sim N+1. The CPU waits for a
+//! frame slot's last values before reusing its command buffers, upload
+//! regions and timestamp queries, so up to `frames_in_flight` frames are
+//! recorded ahead of the GPU.
 const std = @import("std");
 const gpu = @import("gpu/gpu.zig");
 const vk = gpu.vk;
@@ -22,9 +26,10 @@ const materials = @import("sim/materials.zig");
 const scenes = @import("sim/scenes.zig");
 const bodies_scenes = @import("sim/bodies_scenes.zig");
 const readback = @import("sim/readback.zig");
-const WorldPass = @import("render/world.zig").WorldPass;
 const View = @import("render/world.zig").View;
 const Hud = @import("render/hud.zig").Hud;
+const Renderer = @import("render/renderer.zig").Renderer;
+const snapshot_count = @import("render/renderer.zig").snapshot_count;
 const png = @import("util/png.zig");
 const Window = @import("platform/window.zig").Window;
 const Profile = @import("profile.zig").Profile;
@@ -38,8 +43,12 @@ pub const Options = struct {
     validation: bool = @import("builtin").mode == .debug,
     pipeline: sim_pipeline.Config = .{},
     /// The loaded materials: tables to upload (the data layer's packing),
-    /// names for the ids scenes paint with and the bodies layer's roles.
+    /// names for the ids scenes paint with, the bodies layer's roles and the
+    /// renderer's art overrides.
     library: *const materials.Library,
+    /// Let the render of frame N overlap the simulation of frame N+1
+    /// (render snapshots). False reproduces the strictly serial chain.
+    overlap: bool = true,
 };
 
 /// What drives the ticks of one frame.
@@ -70,7 +79,9 @@ const Slot = struct {
     acquire: vk.Semaphore,
     /// Host-visible: active tile count per tick of the frame.
     stats: gpu.Buffer,
-    done_value: u64 = 0,
+    /// Sim and render timeline values of this slot's last submissions.
+    done_sim: u64 = 0,
+    done_render: u64 = 0,
     pending: bool = false,
     ticks: u32 = 0,
     first_tick: u32 = 0,
@@ -84,24 +95,35 @@ pub const Engine = struct {
     pipeline: Pipeline,
     names: gpu.timestamps.Names = .{},
     slots: [frames_in_flight]Slot,
-    timeline: vk.Semaphore,
-    timeline_value: u64 = 0,
+    sim_timeline: vk.Semaphore,
+    sim_value: u64 = 0,
+    render_timeline: vk.Semaphore,
+    render_value: u64 = 0,
+    overlap: bool = true,
+    /// Snapshot ring: the sim value that wrote each snapshot, the render
+    /// value that last read it, and the newest one.
+    snap_written: [snapshot_count]u64 = @splat(0),
+    snap_read: [snapshot_count]u64 = @splat(0),
+    snap_latest: ?u32 = null,
+    /// A render that read the live cell image (no snapshot yet); the next
+    /// sim must wait for it.
+    live_read: u64 = 0,
     frame_index: u64 = 0,
     tick: u32 = 0,
     list: commands.CommandList = .{},
     window: ?*Window,
     swapchain: ?gpu.Swapchain = null,
-    world_pass: ?WorldPass = null,
+    /// World, lighting, sprites, post; `renderer.settings` holds the modes.
+    renderer: Renderer,
     /// Text state and pipelines for the swapchain and the capture image.
     hud: Hud,
     capture_image: gpu.Image,
-    capture_pass: WorldPass,
     staging: gpu.Buffer,
+    /// Headless `frame` renders into the capture image at this size.
+    headless_extent: vk.Extent2D = .{ .width = 1920, .height = 1080 },
     last: FrameStats = .{},
     /// Receives every completed frame's stats (HUD smoothing, --profile, bench).
     profile: ?*Profile = null,
-    /// Headless captures (`captureWorld`) add the debug overlay (air field).
-    capture_overlay: bool = false,
     /// Material ids for scenes (`TickSource.scene`).
     ids: materials.Ids = .{},
     /// The uploaded tables (owned by the caller's `materials.Library`).
@@ -116,12 +138,14 @@ pub const Engine = struct {
             .ctx = undefined,
             .pipeline = undefined,
             .slots = undefined,
-            .timeline = .null,
+            .sim_timeline = .null,
+            .render_timeline = .null,
+            .overlap = opts.overlap,
             .window = opts.window,
             .capture_image = .{},
-            .capture_pass = undefined,
             .staging = .{},
             .hud = undefined,
+            .renderer = undefined,
             .ids = opts.library.ids(),
             .tables = opts.library.tables,
         };
@@ -137,8 +161,10 @@ pub const Engine = struct {
         errdefer self.pipeline.deinit();
 
         const timeline_info = vk.SemaphoreTypeCreateInfo{ .semaphore_type = .timeline, .initial_value = 0 };
-        self.timeline = try ctx.vkd.createSemaphore(ctx.device, &.{ .p_next = &timeline_info }, null);
-        errdefer ctx.vkd.destroySemaphore(ctx.device, self.timeline, null);
+        self.sim_timeline = try ctx.vkd.createSemaphore(ctx.device, &.{ .p_next = &timeline_info }, null);
+        errdefer ctx.vkd.destroySemaphore(ctx.device, self.sim_timeline, null);
+        self.render_timeline = try ctx.vkd.createSemaphore(ctx.device, &.{ .p_next = &timeline_info }, null);
+        errdefer ctx.vkd.destroySemaphore(ctx.device, self.render_timeline, null);
 
         var made: usize = 0;
         errdefer for (self.slots[0..made]) |*s| destroySlot(ctx, s);
@@ -154,8 +180,6 @@ pub const Engine = struct {
             .usage = .{ .color_attachment = true, .transfer_src = true },
         });
         errdefer self.capture_image.deinit(ctx);
-        self.capture_pass = try WorldPass.init(ctx, capture_format);
-        errdefer self.capture_pass.deinit(ctx);
         self.staging = try gpu.Buffer.init(ctx, cell.world_size * cell.world_size * 4, .{ .transfer_dst = true, .transfer_src = true }, .gpu_to_cpu);
         errdefer self.staging.deinit(ctx);
 
@@ -163,9 +187,11 @@ pub const Engine = struct {
         if (opts.window) |w| {
             const width, const height = w.pixelSize();
             self.swapchain = try gpu.Swapchain.init(ctx, width, height, opts.vsync);
-            self.world_pass = try WorldPass.init(ctx, self.swapchain.?.format);
             present_format = self.swapchain.?.format;
         }
+        errdefer if (self.swapchain) |*sc| sc.deinit(ctx);
+        try self.renderer.init(ctx, opts.library, present_format, capture_format);
+        errdefer self.renderer.deinit();
         self.hud = try Hud.init(ctx, present_format, capture_format);
     }
 
@@ -173,13 +199,13 @@ pub const Engine = struct {
         const ctx = &self.ctx;
         ctx.waitIdle();
         self.hud.deinit(ctx);
-        if (self.world_pass) |*p| p.deinit(ctx);
+        self.renderer.deinit();
         if (self.swapchain) |*s| s.deinit(ctx);
         self.staging.deinit(ctx);
-        self.capture_pass.deinit(ctx);
         self.capture_image.deinit(ctx);
         for (&self.slots) |*s| destroySlot(ctx, s);
-        ctx.vkd.destroySemaphore(ctx.device, self.timeline, null);
+        ctx.vkd.destroySemaphore(ctx.device, self.render_timeline, null);
+        ctx.vkd.destroySemaphore(ctx.device, self.sim_timeline, null);
         self.pipeline.deinit();
         ctx.deinit();
     }
@@ -197,7 +223,8 @@ pub const Engine = struct {
         s.acquire = try ctx.vkd.createSemaphore(ctx.device, &.{}, null);
         errdefer ctx.vkd.destroySemaphore(ctx.device, s.acquire, null);
         s.stats = try gpu.Buffer.init(ctx, max_ticks_per_frame * 4, .{ .transfer_dst = true }, .gpu_to_cpu);
-        s.done_value = 0;
+        s.done_sim = 0;
+        s.done_render = 0;
         s.pending = false;
         s.ticks = 0;
         s.first_tick = 0;
@@ -214,60 +241,70 @@ pub const Engine = struct {
         ctx.vkd.destroyCommandPool(ctx.device, s.sim_pool, null);
     }
 
-    fn waitValue(self: *Engine, value: u64) !void {
+    fn waitValue(self: *Engine, sem: vk.Semaphore, value: u64) !void {
         if (value == 0) return;
         _ = try self.ctx.vkd.waitSemaphores(self.ctx.device, &.{
             .semaphore_count = 1,
-            .p_semaphores = @ptrCast(&self.timeline),
+            .p_semaphores = @ptrCast(&sem),
             .p_values = @ptrCast(&value),
         }, std.math.maxInt(u64));
+    }
+
+    fn waitSlot(self: *Engine, slot: *const Slot) !void {
+        try self.waitValue(self.sim_timeline, slot.done_sim);
+        try self.waitValue(self.render_timeline, slot.done_render);
     }
 
     /// Wait for every submitted frame and fold in its results.
     pub fn finish(self: *Engine) !void {
         for (0..frames_in_flight) |_| {
             const slot = &self.slots[self.frame_index % frames_in_flight];
-            try self.waitValue(slot.done_value);
+            try self.waitSlot(slot);
             try self.collect(slot);
             self.frame_index += 1;
         }
     }
 
+    fn slotIndex(self: *const Engine, slot: *const Slot) u32 {
+        return @intCast((@intFromPtr(slot) - @intFromPtr(&self.slots[0])) / @sizeOf(Slot));
+    }
+
     fn collect(self: *Engine, slot: *Slot) !void {
         if (!slot.pending) return;
         slot.pending = false;
-        const slot_index: u32 = @intCast((@intFromPtr(slot) - @intFromPtr(&self.slots[0])) / @sizeOf(Slot));
-        self.pipeline.readback.collect(slot_index, slot.first_tick, slot.ticks);
+        const index = self.slotIndex(slot);
+        self.pipeline.readback.collect(index, slot.first_tick, slot.ticks);
+        self.pipeline.air.collect(index);
         var stats: FrameStats = .{ .ticks = slot.ticks, .first_tick = slot.first_tick, .commands = slot.commands, .dropped_commands = slot.dropped };
         try slot.recorder.collect(&self.ctx, &stats.timings);
-        for (&self.slots, 0..) |*s, i| {
-            if (s == slot) self.pipeline.air.collect(@intCast(i));
-        }
         if (slot.ticks > 0) stats.active_tiles = slot.stats.typed(u32)[slot.ticks - 1];
         self.last = stats;
         if (self.profile) |p| p.record(&self.last, &self.names);
     }
 
-    /// Fold every submitted frame that has finished into `last` and the
-    /// readback mirror, oldest first, without waiting. Gameplay calls this
-    /// before building a tick's commands so it sees the newest state.
+    /// Fold every submitted frame that has finished (sim and render) into
+    /// `last` and the readback mirror, oldest first, without waiting.
+    /// Gameplay calls this before building a tick's commands so it sees the
+    /// newest state.
     pub fn poll(self: *Engine) !void {
-        const value = try self.ctx.vkd.getSemaphoreCounterValue(self.ctx.device, self.timeline);
+        const sim_done = try self.ctx.vkd.getSemaphoreCounterValue(self.ctx.device, self.sim_timeline);
+        const render_done = try self.ctx.vkd.getSemaphoreCounterValue(self.ctx.device, self.render_timeline);
         for (0..frames_in_flight) |k| {
             const slot = &self.slots[(self.frame_index + k) % frames_in_flight];
             if (!slot.pending) continue;
-            if (slot.done_value > value) break;
+            if (slot.done_sim > sim_done or slot.done_render > render_done) break;
             try self.collect(slot);
         }
     }
 
     /// The readback mirror: the world as of the end of `mirror.tick`.
-    pub fn mirror(self: *Engine) *@import("sim/readback.zig").Mirror {
+    pub fn mirror(self: *Engine) *readback.Mirror {
         return &self.pipeline.readback.mirror;
     }
 
     /// Record and submit `ticks` simulation ticks (0..max_ticks_per_frame)
-    /// and, with a window and a view, render and present. Returns after
+    /// and, with a view, render it: presented with a window, into the
+    /// capture image headless (bench, overlap measurements). Returns after
     /// submission; results of an earlier frame are in `last`.
     pub fn frame(self: *Engine, ticks: u32, src: TickSource, view: ?View) !void {
         std.debug.assert(ticks <= max_ticks_per_frame);
@@ -275,7 +312,7 @@ pub const Engine = struct {
         const slot_index: u32 = @intCast(self.frame_index % frames_in_flight);
         const slot = &self.slots[slot_index];
         try self.poll();
-        try self.waitValue(slot.done_value);
+        try self.waitSlot(slot);
         try self.collect(slot);
         try ctx.vkd.resetCommandPool(ctx.device, slot.sim_pool, .{});
         try ctx.vkd.resetCommandPool(ctx.device, slot.render_pool, .{});
@@ -316,6 +353,7 @@ pub const Engine = struct {
                     .commands = self.list.slice(),
                     .command_base = base,
                     .sleep = self.pipeline.config.sleep,
+                    .overlay = @backingInt(self.renderer.settings.overlay),
                 };
                 self.pipeline.recordTick(&f);
                 // Active tile count for the HUD and bench.
@@ -323,13 +361,42 @@ pub const Engine = struct {
                 ctx.vkd.cmdCopyBuffer(cmd, self.pipeline.shared.tile_list.handle, slot.stats.handle, &.{.{ .src_offset = 0, .dst_offset = k * 4, .size = 4 }});
                 self.tick +%= 1;
             }
+            // Snapshot for this frame's render (and the next ones while
+            // paused), into the ring entry the newest render is not using.
+            var snap: ?u32 = null;
+            if (view != null) {
+                const next: u32 = if (self.snap_latest) |l| (l + 1) % snapshot_count else 0;
+                const t_snap = slot.recorder.begin(ctx, cmd, "snapshot");
+                self.renderer.recordSnapshot(cmd, &self.pipeline.shared, self.pipeline.particles.overlay.handle, next);
+                slot.recorder.end(ctx, cmd, t_snap);
+                snap = next;
+            }
             try ctx.vkd.endCommandBuffer(cmd);
-            self.timeline_value += 1;
-            try self.submit(ctx.compute.handle, cmd, &.{.{ .sem = self.timeline, .value = self.timeline_value - 1, .stage = .{ .all_commands = true } }}, &.{.{ .sem = self.timeline, .value = self.timeline_value }});
+            var waits: [3]Wait = undefined;
+            var nw: usize = 0;
+            waits[nw] = .{ .sem = self.sim_timeline, .value = self.sim_value, .stage = .{ .all_commands = true } };
+            nw += 1;
+            // The render that last read the snapshot (or the live image) we
+            // overwrite; serial mode waits for every render.
+            var render_dep = self.live_read;
+            if (snap) |n| render_dep = @max(render_dep, self.snap_read[n]);
+            if (!self.overlap) render_dep = self.render_value;
+            if (render_dep > 0) {
+                waits[nw] = .{ .sem = self.render_timeline, .value = render_dep, .stage = .{ .all_commands = true } };
+                nw += 1;
+            }
+            self.sim_value += 1;
+            try self.submit(ctx.compute.handle, cmd, waits[0..nw], &.{.{ .sem = self.sim_timeline, .value = self.sim_value }});
+            if (snap) |n| {
+                self.snap_written[n] = self.sim_value;
+                self.snap_latest = n;
+            } else self.snap_latest = null; // snapshots are stale now
         }
 
-        if (view != null and self.swapchain != null) try self.render(slot, slot_index, view.?);
-        slot.done_value = self.timeline_value;
+        if (view) |v| try self.render(slot, slot_index, v);
+        self.renderer.clearDraws();
+        slot.done_sim = self.sim_value;
+        slot.done_render = self.render_value;
         slot.pending = true;
         self.frame_index += 1;
     }
@@ -341,7 +408,7 @@ pub const Engine = struct {
         var wait_infos: [4]vk.SemaphoreSubmitInfo = undefined;
         var nw: u32 = 0;
         for (waits) |w| {
-            if (w.sem == self.timeline and w.value == 0) continue;
+            if ((w.sem == self.sim_timeline or w.sem == self.render_timeline) and w.value == 0) continue;
             wait_infos[nw] = .{ .semaphore = w.sem, .value = w.value, .stage_mask = w.stage, .device_index = 0 };
             nw += 1;
         }
@@ -360,52 +427,62 @@ pub const Engine = struct {
 
     fn render(self: *Engine, slot: *Slot, slot_index: u32, view: View) !void {
         const ctx = &self.ctx;
-        const sc = &self.swapchain.?;
-        if (self.window.?.input.resized) try self.resize();
-        const image_index = (try sc.acquire(ctx, slot.acquire)) orelse {
-            try self.resize();
-            return;
-        };
+        var image_index: u32 = 0;
+        var target: @import("render/renderer.zig").Target = undefined;
+        var image: vk.Image = undefined;
+        if (self.swapchain) |*sc| {
+            if (self.window.?.input.resized) try self.resize();
+            image_index = (try sc.acquire(ctx, slot.acquire)) orelse {
+                try self.resize();
+                return;
+            };
+            image = sc.images[image_index];
+            target = .{ .view = sc.views[image_index], .extent = sc.extent, .kind = .present };
+        } else {
+            image = self.capture_image.handle;
+            target = .{ .view = self.capture_image.view, .extent = self.headless_extent, .kind = .capture };
+        }
         const cmd = slot.render_cmd;
         try ctx.vkd.beginCommandBuffer(cmd, &.{ .flags = .{ .one_time_submit = true } });
         ctx.descriptors.bind(ctx, cmd, .graphics);
-        const image = sc.images[image_index];
+        ctx.descriptors.bind(ctx, cmd, .compute);
+
+        // Read the newest snapshot; before the first one exists, the live
+        // images (and the next sim waits for this render).
+        var sources = self.renderer.liveSources(&self.pipeline.shared);
+        var sim_dep = self.sim_value;
+        if (self.snap_latest) |n| {
+            sources = self.renderer.snapshotSources(n);
+            sim_dep = self.snap_written[n];
+        }
+
         gpu.memory.imageBarrier(ctx, cmd, image, .undefined, .color_attachment_optimal, .{ .color_attachment_output = true }, .{}, .{ .color_attachment_output = true }, .{ .color_attachment_write = true });
-        const attachment = vk.RenderingAttachmentInfo{
-            .image_view = sc.views[image_index],
-            .image_layout = .color_attachment_optimal,
-            .resolve_mode = .{},
-            .resolve_image_layout = .undefined,
-            .load_op = .clear,
-            .store_op = .store,
-            .clear_value = .{ .color = .{ .float_32 = .{ 0, 0, 0, 1 } } },
-        };
-        ctx.vkd.cmdBeginRendering(cmd, &.{
-            .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = sc.extent },
-            .layer_count = 1,
-            .view_mask = 0,
-            .color_attachment_count = 1,
-            .p_color_attachments = @ptrCast(&attachment),
-        });
-        const t_world = slot.recorder.begin(ctx, cmd, "render");
-        self.world_pass.?.record(ctx, cmd, sc.extent, view);
-        slot.recorder.end(ctx, cmd, t_world);
-        const t_hud = slot.recorder.begin(ctx, cmd, "hud");
-        self.hud.record(ctx, cmd, slot_index, sc.extent, .present);
-        slot.recorder.end(ctx, cmd, t_hud);
-        ctx.vkd.cmdEndRendering(cmd);
-        gpu.memory.imageBarrier(ctx, cmd, image, .color_attachment_optimal, .present_src_khr, .{ .color_attachment_output = true }, .{ .color_attachment_write = true }, .{}, .{});
+        const t_render = slot.recorder.begin(ctx, cmd, "render");
+        self.renderer.record(cmd, slot_index, sources, view, target, &self.hud, &slot.recorder, self.tick);
+        slot.recorder.end(ctx, cmd, t_render);
+        const final: vk.ImageLayout = if (self.swapchain != null) .present_src_khr else .color_attachment_optimal;
+        gpu.memory.imageBarrier(ctx, cmd, image, .color_attachment_optimal, final, .{ .color_attachment_output = true }, .{ .color_attachment_write = true }, .{}, .{});
         try ctx.vkd.endCommandBuffer(cmd);
 
-        self.timeline_value += 1;
-        try self.submit(ctx.graphics.handle, cmd, &.{
-            .{ .sem = self.timeline, .value = self.timeline_value - 1, .stage = .{ .fragment_shader = true } },
-            .{ .sem = slot.acquire, .stage = .{ .color_attachment_output = true } },
-        }, &.{
-            .{ .sem = self.timeline, .value = self.timeline_value },
-            .{ .sem = sc.render_done[image_index] },
-        });
-        if (!try sc.present(ctx, ctx.graphics.handle, image_index)) try self.resize();
+        var waits: [2]Wait = undefined;
+        var nw: usize = 0;
+        waits[nw] = .{ .sem = self.sim_timeline, .value = sim_dep, .stage = .{ .all_commands = true } };
+        nw += 1;
+        if (self.swapchain != null) {
+            waits[nw] = .{ .sem = slot.acquire, .stage = .{ .color_attachment_output = true } };
+            nw += 1;
+        }
+        self.render_value += 1;
+        if (self.snap_latest) |n| self.snap_read[n] = self.render_value else self.live_read = self.render_value;
+        if (self.swapchain) |*sc| {
+            try self.submit(ctx.graphics.handle, cmd, waits[0..nw], &.{
+                .{ .sem = self.render_timeline, .value = self.render_value },
+                .{ .sem = sc.render_done[image_index] },
+            });
+            if (!try sc.present(ctx, ctx.graphics.handle, image_index)) try self.resize();
+        } else {
+            try self.submit(ctx.graphics.handle, cmd, waits[0..nw], &.{.{ .sem = self.render_timeline, .value = self.render_value }});
+        }
     }
 
     fn resize(self: *Engine) !void {
@@ -414,11 +491,13 @@ pub const Engine = struct {
     }
 
     /// Replace the material and reaction tables (hot reload), the ids
-    /// scenes use and the bodies layer's material roles. Waits for the GPU
-    /// to go idle. `lib` must outlive its use by the engine.
+    /// scenes use, the bodies layer's material roles and the renderer's
+    /// material table. Waits for the GPU to go idle. `lib` must outlive its
+    /// use by the engine.
     pub fn reloadTables(self: *Engine, lib: *const materials.Library) !void {
         try self.finish();
         try self.pipeline.uploadTables(lib);
+        self.renderer.uploadMaterials(lib);
         self.ids = lib.ids();
         self.tables = lib.tables;
     }
@@ -429,10 +508,10 @@ pub const Engine = struct {
         try readback.readbackCells(&self.ctx, &self.pipeline.shared, &self.staging, out);
     }
 
-    /// Render the whole world 1:1 through world.frag into the capture image
-    /// and return its RGBA8 pixels (valid until the next capture/readback).
+    /// Render the whole world 1:1 (lit, no HUD) into the capture image and
+    /// return its RGBA8 pixels (valid until the next capture/readback).
     pub fn captureWorld(self: *Engine) ![]const u8 {
-        return self.captureView(.{ .show_overlay = self.capture_overlay }, .{ .width = cell.world_size, .height = cell.world_size }, false);
+        return self.captureView(.{}, .{ .width = cell.world_size, .height = cell.world_size }, false);
     }
 
     /// Render `view` (and the HUD) as the window would show it, into the
@@ -449,25 +528,15 @@ pub const Engine = struct {
         const ctx = &self.ctx;
         gpu.memory.memoryBarrier(ctx, cmd, .{ .all_commands = true }, .{ .memory_write = true }, .{ .all_commands = true }, .{ .memory_read = true });
         gpu.memory.imageBarrier(ctx, cmd, self.capture_image.handle, .undefined, .color_attachment_optimal, .{}, .{}, .{ .color_attachment_output = true }, .{ .color_attachment_write = true });
-        const attachment = vk.RenderingAttachmentInfo{
-            .image_view = self.capture_image.view,
-            .image_layout = .color_attachment_optimal,
-            .resolve_mode = .{},
-            .resolve_image_layout = .undefined,
-            .load_op = .dont_care,
-            .store_op = .store,
-            .clear_value = .{ .color = .{ .float_32 = .{ 0, 0, 0, 1 } } },
-        };
-        ctx.vkd.cmdBeginRendering(cmd, &.{
-            .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = extent },
-            .layer_count = 1,
-            .view_mask = 0,
-            .color_attachment_count = 1,
-            .p_color_attachments = @ptrCast(&attachment),
-        });
-        self.capture_pass.record(ctx, cmd, extent, view);
-        if (hud) self.hud.record(ctx, cmd, 0, extent, .capture);
-        ctx.vkd.cmdEndRendering(cmd);
+        // The GPU is idle: render straight from the live images. Without
+        // `hud`, the HUD text (lines and signs) is hidden for this capture.
+        const saved = .{ self.hud.used, self.hud.world_used };
+        if (!hud) {
+            self.hud.used = 0;
+            self.hud.world_used = 0;
+        }
+        self.renderer.record(cmd, 0, self.renderer.liveSources(&self.pipeline.shared), view, .{ .view = self.capture_image.view, .extent = extent, .kind = .capture }, &self.hud, null, self.tick);
+        self.hud.used, self.hud.world_used = saved;
         gpu.memory.imageBarrier(ctx, cmd, self.capture_image.handle, .color_attachment_optimal, .transfer_src_optimal, .{ .color_attachment_output = true }, .{ .color_attachment_write = true }, .{ .all_transfer = true }, .{ .transfer_read = true });
         ctx.vkd.cmdCopyImageToBuffer(cmd, self.capture_image.handle, .transfer_src_optimal, self.staging.handle, &.{.{
             .buffer_offset = 0,

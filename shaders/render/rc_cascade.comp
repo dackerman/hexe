@@ -1,0 +1,139 @@
+#version 460
+// One cascade of 2D radiance cascades (A. Sannikov, "Radiance Cascades",
+// 2023), dispatched from the top cascade down; each cascade merges the one
+// above it as it is computed, so only two cascade images are needed.
+//
+// Cascade i: probes every (spacing << i) world pixels, 4 * 4^i directions
+// per probe, ray interval [t_start, t_end). Texture layout is
+// direction-blocked: probe p, direction k = dy * B + dx lives at texel
+// p * B + (dx, dy), B = 2^(i+1), so every cascade is 2 * probes0 texels wide.
+// Texels are RGB9E5 radiance in r32ui images.
+//
+// Marching goes through the light scene mip `mip` (one texel per step),
+// accumulating radiance L and transmittance T. A ray that leaves the light
+// region, or ends in the top cascade, sees the sky if it points up and
+// exits above the skyline. Otherwise it merges with cascade i+1 using the
+// "bilinear fix": for each of the 4 nearest cascade-(i+1) probes, march from
+// this interval's start to *that* probe's interval start, then continue
+// with its radiance averaged over the 4 child directions of k; the four
+// results are blended bilinearly. This removes the ringing the plain merge
+// shows around small lights.
+#include "common.glsl"
+#include "render/render.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PC {
+    uint frame_slot;
+    uint cascade;
+    uint src; // r32ui RGB9E5 image: merged cascade i+1 (unused for the top)
+    uint dst; // r32ui RGB9E5 image: cascade i
+    float t_start;
+    float t_end;
+    uint mip;
+    uint is_top;
+} pc;
+
+#define FR g_render_frames[pc.frame_slot].f
+
+vec3 escape(vec2 dir, vec2 pos) {
+    if ((FR.flags & RFRAME_SKY) == 0u || dir.y >= 0.0) return vec3(0.0);
+    int col = clamp(int(pos.x), 0, int(FR.region_size.x) - 1);
+    float wy = float(FR.region_origin.y) + pos.y;
+    if (wy >= float(g_ints[FR.skyline_slot].v[col])) return vec3(0.0);
+    return FR.sky.rgb * smoothstep(0.0, 0.6, -dir.y);
+}
+
+struct Hit {
+    vec3 L;
+    float T;
+    bool exited;
+    vec2 end;
+};
+
+// March the segment a -> b through scene mip `mip`.
+Hit march(vec2 a, vec2 b) {
+    Hit h;
+    h.L = vec3(0.0);
+    h.T = 1.0;
+    h.exited = false;
+    h.end = b;
+    vec2 d = b - a;
+    float len = length(d);
+    float step = float(1u << pc.mip);
+    uint steps = uint(ceil(len / step));
+    if (steps == 0u) return h;
+    vec2 inc = d / float(steps);
+    uint img = FR.scene_img[pc.mip];
+    vec2 region = vec2(FR.region_size);
+    for (uint s = 0u; s < steps; s++) {
+        vec2 pos = a + inc * (float(s) + 0.5);
+        if (any(lessThan(pos, vec2(0.0))) || any(greaterThanEqual(pos, region))) {
+            h.exited = true;
+            h.end = pos;
+            break;
+        }
+        vec4 sc = imageLoad(g_img_rgba16f[img], ivec2(pos) >> pc.mip);
+        h.L += h.T * sc.rgb;
+        h.T *= 1.0 - sc.a;
+        if (h.T < 0.004) {
+            h.T = 0.0;
+            break;
+        }
+    }
+    return h;
+}
+
+void main() {
+    uint i = pc.cascade;
+    uint B = 2u << i;
+    uvec2 probes = FR.probes >> i;
+    uvec2 q = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(q, probes * B))) return;
+    uvec2 probe = q / B;
+    uvec2 dq = q - probe * B;
+    uint k = dq.y * B + dq.x;
+    uint n = B * B;
+    float angle = 6.28318530718 * (float(k) + 0.5) / float(n);
+    vec2 dir = vec2(cos(angle), sin(angle));
+    float spacing = float(FR.probe_spacing << i);
+    vec2 origin = (vec2(probe) + 0.5) * spacing;
+    vec2 a = origin + dir * pc.t_start;
+
+    vec3 R;
+    if (pc.is_top != 0u) {
+        Hit h = march(a, origin + dir * pc.t_end);
+        R = h.L + h.T * escape(dir, h.end);
+    } else {
+        uint B1 = B * 2u;
+        ivec2 p1max = ivec2(FR.probes >> (i + 1u)) - 1;
+        vec2 g = (vec2(probe) + 0.5) * 0.5 - 0.5;
+        ivec2 g0 = ivec2(floor(g));
+        vec2 f = g - vec2(g0);
+        R = vec3(0.0);
+        for (int c = 0; c < 4; c++) {
+            ivec2 off = ivec2(c & 1, c >> 1);
+            ivec2 pp = clamp(g0 + off, ivec2(0), p1max);
+            float w = (off.x == 1 ? f.x : 1.0 - f.x) * (off.y == 1 ? f.y : 1.0 - f.y);
+            if (w <= 0.0) continue;
+            vec2 o1 = (vec2(pp) + 0.5) * (spacing * 2.0);
+            Hit h = march(a, o1 + dir * pc.t_end);
+            vec3 r = h.L;
+            if (h.T > 0.0) {
+                if (h.exited) {
+                    r += h.T * escape(dir, h.end);
+                } else {
+                    vec3 up = vec3(0.0);
+                    for (uint j = 0u; j < 4u; j++) {
+                        uint kk = k * 4u + j;
+                        ivec2 dd = ivec2(kk % B1, kk / B1);
+                        up += unpack_rgb9e5(imageLoad(g_uimages[pc.src], pp * int(B1) + dd).x);
+                    }
+                    r += h.T * up * 0.25;
+                }
+            }
+            R += w * r;
+        }
+    }
+    imageStore(g_uimages[pc.dst], ivec2(q), uvec4(pack_rgb9e5(R), 0u, 0u, 0u));
+}
