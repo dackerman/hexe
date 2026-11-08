@@ -1,0 +1,47 @@
+#version 460
+// Point writes from the bodies layer: rubble from shattered bodies and tiny
+// loose terrain components (POINT_MODE_INTO_AIR / POINT_MODE_REPLACE) and
+// debris requests such as beam sparks (POINT_MODE_EJECT, into the eject
+// queue). One thread per point. Two points on one pixel: either may win
+// (bodies are not part of the deterministic grid scenarios).
+#include "common.glsl"
+#include "sim/bodies/bodies.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PC {
+    uint upload_slot;
+    uint point_base;
+    uint count;
+    uint stats_slot;
+    uint stats_base;
+    uint mark_tiles;
+    uint seed;
+} pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) return;
+    BodyPoint pt = g_body_points[pc.upload_slot].points[pc.point_base + i];
+    uint mat = pt.packed & 0xffu;
+    uint expect = (pt.packed >> 8) & 0xffu;
+    uint mode = pt.packed >> 16;
+    ivec2 w = wrap_coord(pt.p);
+    uint variant = hash_salt(uint(w.x), uint(w.y), pc.seed, SALT_POINT_VARIANT) >> 28;
+    uint nc = spawn_cell(mat, variant);
+    if (mode == POINT_MODE_EJECT) {
+        bodies_eject_cell(w, nc, unpackHalf2x16(pt.vel));
+        return;
+    }
+    uint c = imageLoad(CELLS, w).x;
+    bool ok;
+    if (mode == POINT_MODE_INTO_AIR) {
+        ok = !cell_has(c, CELL_FLAG_BODY) && (cell_material(c) == MATERIAL_AIR || body_cell_phase(c) == PHASE_GAS);
+    } else {
+        ok = (c & (CELL_FLAG_BODY | CELL_FLAG_PARTICLE)) == 0u && cell_material(c) == expect;
+    }
+    if (!ok) return;
+    imageStore(CELLS, w, uvec4(nc, 0u, 0u, 0u));
+    atomicAdd(g_body_stats[pc.stats_slot].words[pc.stats_base + BODY_STAT_POINTS], 1u);
+    if (pc.mark_tiles != 0u) mark_tile_and_neighbors(uvec2(w) >> TILE_SHIFT);
+}

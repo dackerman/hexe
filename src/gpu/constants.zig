@@ -25,6 +25,9 @@ pub const slot_buf_materials = 0;
 pub const slot_buf_tile_marks = 1;
 pub const slot_buf_tile_list = 2;
 pub const slot_buf_commands = 3;
+/// Eject queue: cells displaced by bodies, debris (M7, src/sim/bodies_gpu.zig).
+pub const slot_buf_eject = 4;
+pub const eject_capacity = 16384;
 /// First storage buffer slot handed out by `Descriptors.allocBufferSlot`.
 pub const slot_buf_dynamic_base = 32;
 
@@ -74,6 +77,8 @@ pub const mirrors = .{
     .{ "SLOT_BUF_TILE_MARKS", slot_buf_tile_marks },
     .{ "SLOT_BUF_TILE_LIST", slot_buf_tile_list },
     .{ "SLOT_BUF_COMMANDS", slot_buf_commands },
+    .{ "SLOT_BUF_EJECT", slot_buf_eject },
+    .{ "EJECT_CAPACITY", eject_capacity },
     .{ "SLOT_BUF_DYNAMIC_BASE", slot_buf_dynamic_base },
     .{ "SAMPLER_NEAREST_CLAMP", sampler_nearest_clamp },
     .{ "SAMPLER_LINEAR_CLAMP", sampler_linear_clamp },

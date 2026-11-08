@@ -25,6 +25,7 @@ const commands = @import("commands.zig");
 const Grid = @import("grid.zig").Grid;
 const Noise = @import("noise.zig").Noise;
 const materials = @import("materials.zig");
+const Bodies = @import("bodies_sim.zig").Bodies;
 
 pub const frames_in_flight = 2;
 /// Most ticks recorded into one frame (catch-up after a slow frame).
@@ -36,6 +37,8 @@ pub const Config = struct {
     sleep: bool = true,
     /// Debug: replace the simulation with animated noise (M0 bring-up).
     noise: bool = false,
+    /// Rigid bodies in the world (M7). Off: no body pass touches cells.
+    bodies: bool = false,
 };
 
 /// World-wide GPU resources every pass may use. All live at fixed bindless
@@ -126,6 +129,8 @@ pub const Pipeline = struct {
     grid: Grid,
     applier: commands.Applier,
     noise: Noise,
+    /// Rigid bodies: Box2D on the CPU, rasterized into the grid (M7).
+    bodies: Bodies,
     // ---- end subsystems ----
 
     /// In place: `shared` points into `self`.
@@ -139,12 +144,16 @@ pub const Pipeline = struct {
         errdefer self.applier.deinit();
         self.noise = try Noise.init(ctx, config, alloc);
         errdefer self.noise.deinit();
+        self.bodies = try Bodies.init(ctx, config, alloc, &self.grid.cells);
+        errdefer self.bodies.deinit();
+        self.bodies.setMaterials(table);
         // ---- end subsystem init ----
         self.shared = self.grid.shared();
     }
 
     pub fn deinit(self: *Pipeline) void {
         // ---- subsystem deinit (reverse order) ----
+        self.bodies.deinit();
         self.noise.deinit();
         self.applier.deinit();
         self.grid.deinit();
@@ -161,6 +170,7 @@ pub const Pipeline = struct {
         // 2. apply edits
         self.applier.record(frame);
         //    rasterize bodies (M7)
+        if (self.config.bodies) self.bodies.record(frame);
         // 7'. activity compaction: tiles marked last tick and by this tick's
         //     edits form this tick's active list (docs/decisions/10-activity-tiles.md)
         self.grid.recordCompaction(frame);

@@ -125,6 +125,10 @@ uint hash_salt(uint x, uint y, uint tick, uint salt) {
 #define SLOT_BUF_TILE_MARKS 1u
 #define SLOT_BUF_TILE_LIST 2u
 #define SLOT_BUF_COMMANDS 3u
+// Eject queue (M7 bodies: cells displaced by bodies, debris), drained into
+// particles; layout in shaders/sim/bodies/bodies.glsl.
+#define SLOT_BUF_EJECT 4u
+#define EJECT_CAPACITY 16384u
 #define SLOT_BUF_DYNAMIC_BASE 32u
 
 #define SAMPLER_NEAREST_CLAMP 0u

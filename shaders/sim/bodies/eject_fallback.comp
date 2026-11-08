@@ -1,0 +1,45 @@
+#version 460
+// Stand-in consumer of the eject queue until the particles layer drains it
+// into ballistic particles: each non-static ejected cell (displaced water,
+// sand, smoke) is reinserted at the first air cell straight above it,
+// walking through liquids, powders, gases and body cells, stopping at static
+// terrain. Static ejections (sparks) are dropped and counted. Mass is
+// conserved for displaced fluids, which is what makes a sinking crate raise
+// the water level (docs/decisions/91-bodies-gpu-eject-queue.md).
+#include "common.glsl"
+#include "sim/bodies/bodies.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PC {
+    uint stats_slot;
+    uint stats_base;
+    uint mark_tiles;
+} pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= min(EJECT.count, EJECT_CAPACITY)) return;
+    EjectEntry e = EJECT.items[i];
+    uint phase = body_cell_phase(e.cell);
+    if (phase == PHASE_STATIC || cell_material(e.cell) == MATERIAL_AIR) {
+        atomicAdd(g_body_stats[pc.stats_slot].words[pc.stats_base + BODY_STAT_FALLBACK_DROPPED], 1u);
+        return;
+    }
+    // Gases and liquids rise to the surface above; walk up.
+    for (uint k = 0u; k < EJECT_FALLBACK_WALK; k++) {
+        ivec2 p = wrap_coord(e.p - ivec2(0, int(k)));
+        uint c = imageLoad(CELLS, p).x;
+        bool body = cell_has(c, CELL_FLAG_BODY);
+        if (!body && cell_material(c) == MATERIAL_AIR) {
+            if (imageAtomicCompSwap(CELLS, p, c, e.cell) == c) {
+                atomicAdd(g_body_stats[pc.stats_slot].words[pc.stats_base + BODY_STAT_FALLBACK_PLACED], 1u);
+                if (pc.mark_tiles != 0u) mark_tile_and_neighbors(uvec2(p) >> TILE_SHIFT);
+                return;
+            }
+            continue;
+        }
+        if (!body && body_cell_phase(c) == PHASE_STATIC) break;
+    }
+    atomicAdd(g_body_stats[pc.stats_slot].words[pc.stats_base + BODY_STAT_FALLBACK_DROPPED], 1u);
+}
