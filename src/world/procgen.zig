@@ -902,7 +902,7 @@ test "procgen is deterministic per (seed, cx, cy)" {
     }
 }
 
-test "procgen: sky, floor and seams" {
+test "procgen: sky, floor, temperatures, variants" {
     const a = testing.allocator;
     var g = try Generator.init(a, 99, .{ .ids = test_ids });
     defer g.deinit(a);
@@ -922,4 +922,41 @@ test "procgen: sky, floor and seams" {
         } else try testing.expectEqual(cell.ambient_temperature, cell.temperature(v));
     }
     for (variants) |b| try testing.expect(b);
+}
+
+test "procgen: pools are continuous across chunk seams" {
+    // Generate a 3 × 3 block independently per chunk and check that no
+    // liquid cell borders open air sideways or below across a seam, which
+    // is what a pool cut off by one chunk but not its neighbour looks like.
+    const a = testing.allocator;
+    var g = try Generator.init(a, 1, .{ .ids = test_ids });
+    defer g.deinit(a);
+    const n = 3;
+    const big = try a.alloc(u8, n * n * chunk.cell_count);
+    defer a.free(big);
+    const c1 = try a.create(chunk.Cells);
+    defer a.destroy(c1);
+    const bw = n * chunk.size;
+    var liquid_cells: usize = 0;
+    for (0..n) |ty| for (0..n) |tx| {
+        g.generate(.{ .x = @as(i32, @intCast(tx)) - 1, .y = @intCast(ty + 1) }, c1);
+        for (c1, 0..) |v, i| {
+            const m = cell.material(v);
+            if (m == test_ids.water or m == test_ids.lava) liquid_cells += 1;
+            big[(ty * chunk.size + i / chunk.size) * bw + tx * chunk.size + i % chunk.size] = m;
+        }
+    };
+    try testing.expect(liquid_cells > 0);
+    var bad: usize = 0;
+    for (0..bw) |y| for (0..bw) |x| {
+        const m = big[y * bw + x];
+        if (m != test_ids.water and m != test_ids.lava) continue;
+        const nbrs = [_][2]usize{ .{ x -% 1, y }, .{ x + 1, y }, .{ x, y + 1 } };
+        for (nbrs) |p| {
+            if (p[0] >= bw or p[1] >= bw) continue;
+            const seam = p[0] / chunk.size != x / chunk.size or p[1] / chunk.size != y / chunk.size;
+            if (seam and big[p[1] * bw + p[0]] == test_ids.air) bad += 1;
+        }
+    };
+    try testing.expectEqual(@as(usize, 0), bad);
 }

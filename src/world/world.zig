@@ -8,6 +8,7 @@ pub const window = @import("window.zig");
 pub const noise = @import("noise.zig");
 pub const procgen = @import("procgen.zig");
 pub const store = @import("store.zig");
+pub const streaming = @import("streaming.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());
