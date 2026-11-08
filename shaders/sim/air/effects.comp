@@ -30,6 +30,8 @@
 #include "common.glsl"
 #include "sim/air/air_api.glsl"
 #include "sim/air/lbm.glsl"
+#include "sim/events.glsl"
+#include "sim/particles/particles.glsl"
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -53,9 +55,9 @@ layout(push_constant) uniform PC {
 #define EFFECTS_EVENTS 8u
 
 HEXE_BUFFER(EjectBlock, , uint count; uint capacity; uint dropped; uint tick; uint words[];, g_ejects);
-HEXE_BUFFER(EventBlock, , uint count; uint capacity; uint dropped; uint tick; uint words[];, g_events);
+HEXE_BUFFER(AirEventBlock, , uint count; uint capacity; uint dropped; uint tick; uint words[];, g_air_events);
 #define EJECTS g_ejects[SLOT_BUF_BLAST_EJECTS]
-#define EVENTS g_events[SLOT_BUF_AIR_EVENTS]
+#define AIR_EVENTS g_air_events[SLOT_BUF_AIR_EVENTS]
 
 shared bool s_changed;
 shared bool s_damaged;
@@ -134,16 +136,16 @@ void append_eject(ivec2 p, vec2 v, uint cl, uint kind) {
 }
 
 void append_event(ivec2 p, uint kind, uint value) {
-    uint i = atomicAdd(EVENTS.count, 1u);
+    uint i = atomicAdd(AIR_EVENTS.count, 1u);
     if (i >= AIR_EVENT_CAPACITY) {
-        atomicAdd(EVENTS.dropped, 1u);
+        atomicAdd(AIR_EVENTS.dropped, 1u);
         return;
     }
     uint b = i * AIR_EVENT_WORDS;
-    EVENTS.words[b + 0u] = uint(p.x);
-    EVENTS.words[b + 1u] = uint(p.y);
-    EVENTS.words[b + 2u] = kind;
-    EVENTS.words[b + 3u] = value;
+    AIR_EVENTS.words[b + 0u] = uint(p.x);
+    AIR_EVENTS.words[b + 1u] = uint(p.y);
+    AIR_EVENTS.words[b + 2u] = kind;
+    AIR_EVENTS.words[b + 3u] = value;
 }
 
 void main() {
@@ -222,10 +224,14 @@ void main() {
             if (sp > pc.eject_max) v *= pc.eject_max / sp;
             uint rubble = mat_rubble(mt);
             if (rubble == MATERIAL_NONE) rubble = m;
+            // Ejected pixels become ballistic particles (M4 particle buffer);
+            // `v` is px/tick, particles take px/s. The BLAST_EJECTS record is
+            // kept for statistics only.
+            vec2 vps = v * 60.0;
             uint next;
             if (fly) {
-                next = spawn_cell(MATERIAL_AIR, cell_variant(cl));
-                append_eject(p, v, cl, BLAST_KIND_FLY);
+                if (eject_cell(p, vps)) append_eject(p, v, cl, BLAST_KIND_FLY);
+                continue;
             } else {
                 uint health = cell_state(cl);
                 uint dmg = max(1u, uint(excess * pc.damage_scale));
@@ -234,12 +240,15 @@ void main() {
                     if (rubble != m) {
                         next = spawn_cell(rubble, cell_variant(cl));
                     } else {
-                        next = spawn_cell(MATERIAL_AIR, cell_variant(cl));
-                        append_eject(p, v, cl, BLAST_KIND_BREAK);
+                        if (eject_cell(p, vps)) append_eject(p, v, cl, BLAST_KIND_BREAK);
+                        continue;
                     }
                 } else {
                     next = cell_with_state(cl, health - dmg);
-                    if (resp == BLAST_CHIP && (h >> 30) == 0u) append_eject(p, v, cell_with_material(cl, rubble), BLAST_KIND_CHIP);
+                    if (resp == BLAST_CHIP && (h >> 30) == 0u) {
+                        uint chip = cell_with_material(cl, rubble);
+                        if (spawn_particle(vec2(p) + 0.5, vps, pmeta_from_cell(chip, rubble, PARTICLE_MODE_BALLISTIC), PARTICLE_UNBOUND)) append_eject(p, v, chip, BLAST_KIND_CHIP);
+                    }
                 }
             }
             imageStore(CELLS, p, uvec4(next, 0u, 0u, 0u));

@@ -135,9 +135,13 @@ test "ensureMaterials appends missing materials and keeps ids" {
     const builtin = @import("materials_builtin.zig");
     var t = builtin.table();
     const before = t.len;
+    var missing: usize = 0;
+    for (extra) |d| {
+        if (t.byName(d.name) == null) missing += 1;
+    }
     ensureMaterials(&t);
     try std.testing.expectEqual(builtin.smoke, t.byName("smoke").?);
-    try std.testing.expect(t.len == before + extra.len);
+    try std.testing.expect(t.len == before + missing);
     const len = t.len;
     ensureMaterials(&t);
     try std.testing.expectEqual(len, t.len);

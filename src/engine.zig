@@ -228,6 +228,8 @@ pub const Engine = struct {
     fn collect(self: *Engine, slot: *Slot) !void {
         if (!slot.pending) return;
         slot.pending = false;
+        const slot_index: u32 = @intCast((@intFromPtr(slot) - @intFromPtr(&self.slots[0])) / @sizeOf(Slot));
+        self.pipeline.readback.collect(slot_index, slot.first_tick, slot.ticks);
         var stats: FrameStats = .{ .ticks = slot.ticks, .first_tick = slot.first_tick, .commands = slot.commands, .dropped_commands = slot.dropped };
         try slot.recorder.collect(&self.ctx, &stats.timings);
         for (&self.slots, 0..) |*s, i| {
@@ -238,6 +240,24 @@ pub const Engine = struct {
         if (self.profile) |p| p.record(&self.last, &self.names);
     }
 
+    /// Fold every submitted frame that has finished into `last` and the
+    /// readback mirror, oldest first, without waiting. Gameplay calls this
+    /// before building a tick's commands so it sees the newest state.
+    pub fn poll(self: *Engine) !void {
+        const value = try self.ctx.vkd.getSemaphoreCounterValue(self.ctx.device, self.timeline);
+        for (0..frames_in_flight) |k| {
+            const slot = &self.slots[(self.frame_index + k) % frames_in_flight];
+            if (!slot.pending) continue;
+            if (slot.done_value > value) break;
+            try self.collect(slot);
+        }
+    }
+
+    /// The readback mirror: the world as of the end of `mirror.tick`.
+    pub fn mirror(self: *Engine) *@import("sim/readback.zig").Mirror {
+        return &self.pipeline.readback.mirror;
+    }
+
     /// Record and submit `ticks` simulation ticks (0..max_ticks_per_frame)
     /// and, with a window and a view, render and present. Returns after
     /// submission; results of an earlier frame are in `last`.
@@ -246,6 +266,7 @@ pub const Engine = struct {
         const ctx = &self.ctx;
         const slot_index: u32 = @intCast(self.frame_index % frames_in_flight);
         const slot = &self.slots[slot_index];
+        try self.poll();
         try self.waitValue(slot.done_value);
         try self.collect(slot);
         try ctx.vkd.resetCommandPool(ctx.device, slot.sim_pool, .{});
@@ -281,6 +302,7 @@ pub const Engine = struct {
                     .cmd = cmd,
                     .tick = self.tick,
                     .slot = slot_index,
+                    .tick_in_frame = @intCast(k),
                     .shared = &self.pipeline.shared,
                     .timer = &slot.recorder,
                     .commands = self.list.slice(),

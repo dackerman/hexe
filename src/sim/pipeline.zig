@@ -29,6 +29,8 @@ const Stream = @import("stream.zig").Stream;
 const Coarsen = @import("coarsen.zig").Coarsen;
 const Air = @import("air.zig").Air;
 const Bodies = @import("bodies_sim.zig").Bodies;
+const Particles = @import("particles.zig").Particles;
+const Readback = @import("readback.zig").Readback;
 
 pub const frames_in_flight = 2;
 /// Most ticks recorded into one frame (catch-up after a slow frame).
@@ -47,6 +49,11 @@ pub const Config = struct {
     air_sleep: bool = true,
     /// Rigid bodies in the world (M7). Off: no body pass touches cells.
     bodies: bool = false,
+    /// Particle buffer capacity, spawn requests per tick, and the default
+    /// per-material live budget (0 = capacity / 4); docs/decisions/50.
+    particle_capacity: u32 = 1 << 20,
+    particle_queue: u32 = 1 << 18,
+    particle_budget: u32 = 0,
 };
 
 /// World-wide GPU resources every pass may use. All live at fixed bindless
@@ -84,6 +91,8 @@ pub const Frame = struct {
     substep: u32 = 0,
     /// Frame-in-flight slot, for per-slot resources.
     slot: u32,
+    /// Index of this tick within the frame (0..max_ticks_per_frame-1).
+    tick_in_frame: u32 = 0,
     shared: *const Shared,
     timer: *gpu.timestamps.Recorder,
     /// This tick's commands as uploaded; `command_base` is the index of the
@@ -150,6 +159,8 @@ pub const Pipeline = struct {
     air: Air,
     /// Rigid bodies: Box2D on the CPU, rasterized into the grid (M7).
     bodies: Bodies,
+    particles: Particles,
+    readback: Readback,
     // ---- end subsystems ----
 
     /// In place: `shared` points into `self`.
@@ -174,6 +185,10 @@ pub const Pipeline = struct {
         self.bodies = try Bodies.init(ctx, config, alloc, &self.grid.cells);
         errdefer self.bodies.deinit();
         self.bodies.setMaterials(table);
+        self.particles = try Particles.init(ctx, config, alloc);
+        errdefer self.particles.deinit();
+        self.readback = try Readback.init(ctx, config, alloc);
+        errdefer self.readback.deinit();
         // ---- end subsystem init ----
         self.shared = self.grid.shared();
         self.shared.solid_coarse = &self.coarsen.solid;
@@ -187,6 +202,8 @@ pub const Pipeline = struct {
         self.air.deinit();
         self.coarsen.deinit();
         self.stream.deinit();
+        self.readback.deinit();
+        self.particles.deinit();
         self.noise.deinit();
         self.applier.deinit();
         self.grid.deinit();
@@ -202,8 +219,12 @@ pub const Pipeline = struct {
         // ---- tick order ----
         // 1'. streamed chunk uploads (CPU streaming ran before this frame)
         self.stream.recordUploads(frame);
+        // 1''. per-tick resets: event queue, particle counters (M4)
+        self.readback.recordBegin(frame);
+        self.particles.recordBegin(frame);
         // 2. apply edits
         self.applier.record(frame);
+        self.particles.recordCommands(frame); // spray commands, CPU spawns (M4)
         //    world streaming: dirty bits from this tick's marks
         self.stream.recordDirty(frame);
         //    rasterize bodies (M7)
@@ -224,8 +245,10 @@ pub const Pipeline = struct {
         self.coarsen.record(frame);
         // 5. air field (M5): LBM steps, blast thresholds, events
         self.air.record(frame);
-        // 6. liquid solver, particles (M4, M6)
+        // 6. liquid solver (M6); ballistic particles and spawn queue (M4)
+        self.particles.record(frame);
         // 7. readback buffers, event queue (M4)
+        self.readback.record(frame, &self.particles);
         // ---- end tick order ----
     }
 };

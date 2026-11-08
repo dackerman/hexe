@@ -34,6 +34,9 @@ void main() {
     ivec2 world = pc.camera + fp / int(max(pc.scale, 1u));
     ivec2 w = wrap_coord(world);
     uint c = imageLoad(CELLS, w).x;
+    // Ballistic particles in flight (src/sim/particles.zig overlay).
+    uint particle = imageLoad(g_uimages[SLOT_IMG_PARTICLE_OVERLAY], w).x;
+    if (particle != 0u) c = particle;
     vec4 color = cell_color(c);
     if ((pc.flags & WORLD_VIEW_FLAG_TILES) != 0u) {
         uvec2 t = uvec2(w) >> TILE_SHIFT;

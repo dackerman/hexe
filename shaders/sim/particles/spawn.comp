@@ -1,0 +1,28 @@
+#version 460
+// Turn this tick's spawn requests into particles: request k takes the k-th
+// index from the top of the free stack. The only pass that pops the free
+// stack (see particles.glsl). Indirect dispatch from PCTRL_SPAWN_DISPATCH;
+// control.comp stage 1 then lowers the free count.
+#include "common.glsl"
+#include "sim/particles/particles.glsl"
+
+layout(local_size_x = 256) in;
+
+void main() {
+    uint n = min(PCTRL[PCTRL_SPAWN_COUNT], PCTRL[PCTRL_SPAWN_LIMIT]);
+    uint k = gl_GlobalInvocationID.x;
+    if (k >= n) return;
+    uint idx = P_FREE[PCTRL[PCTRL_FREE_COUNT] - 1u - k];
+    SpawnRequest r = P_SPAWN[k];
+    vec2 p = r.pos - floor(r.pos / float(WORLD_SIZE)) * float(WORLD_SIZE);
+    uint meta = pmeta_with_stuck(r.meta, 0u);
+    P_POS[idx] = p;
+    P_VEL[idx] = r.vel;
+    P_AFFINE[idx] = vec4(0.0);
+    P_META[idx] = meta;
+    P_BINDING[idx] = r.binding;
+    atomicMax(PCTRL[PCTRL_HIGH_WATER], idx + 1u);
+    if (pmeta_mode(meta) == PARTICLE_MODE_BALLISTIC) {
+        imageStore(P_OVERLAY, wrap_coord(ivec2(floor(p))), uvec4(particle_overlay_value(meta), 0u, 0u, 0u));
+    }
+}

@@ -1,0 +1,41 @@
+#version 460
+// Readback: material-id byte plane of each requested region (entity strips),
+// into this frame slot's host-visible buffer after the masks. Region r is
+// rows of ceil(w / 4) words, 4 material bytes each, little endian, at word
+// `offset_words`. Workgroup y = region index.
+#include "common.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    uint table_slot;
+    uint out_slot;
+    uint out_base_words; // first word after the masks
+} pc;
+
+struct Region {
+    int x;
+    int y;
+    uint w;
+    uint h;
+    uint offset_words;
+    uint words_per_row;
+    uint pad0;
+    uint pad1;
+};
+
+HEXE_BUFFER(RegionTableBlock, readonly, Region regions[];, g_region_tables);
+HEXE_BUFFER(RegionOutBlock, writeonly, uint words[];, g_region_out);
+
+void main() {
+    Region r = g_region_tables[pc.table_slot].regions[gl_WorkGroupID.y];
+    uint j = gl_GlobalInvocationID.x;
+    if (j >= r.words_per_row * r.h) return;
+    uint row = j / r.words_per_row;
+    uint col = (j % r.words_per_row) * 4u;
+    uint word = 0u;
+    for (uint b = 0u; b < 4u; b++) {
+        if (col + b < r.w) word |= cell_material(load_cell(ivec2(r.x + int(col + b), r.y + int(row)))) << (8u * b);
+    }
+    g_region_out[pc.out_slot].words[pc.out_base_words + r.offset_words + j] = word;
+}

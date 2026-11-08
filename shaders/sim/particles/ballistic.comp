@@ -1,0 +1,326 @@
+#version 460
+// Ballistic particles, one tick (docs/decisions/51-ballistic-pass.md). One
+// thread per particle index below the high-water mark (indirect dispatch
+// from PCTRL_DISPATCH); only BALLISTIC particles are touched.
+//   1. integrate gravity, clamp the speed to max_step px per tick;
+//   2. march the cell image (DDA) from the old to the new position;
+//   3. on the first non-passable cell: the target's impact response
+//      (splash / spray / chip / dent), then ricochet (reflect, keep flying),
+//      glance off (no support under the free cell: ceilings, wall sides) or
+//      land: claim the last air cell on the path with an atomic
+//      compare-exchange (air -> particle's material at full state);
+//   4. no free cell, or another particle won it: bounce with the target's
+//      restitution and retry next tick; after PMETA_STUCK_MAX failed ticks
+//      the particle is deleted (counted in PCTRL_LOST).
+// Gas particles become a cell at their position as soon as it is air.
+// Every surviving particle is drawn into the overlay image.
+#include "common.glsl"
+#include "sim/events.glsl"
+#include "sim/particles/particles.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    uint tick;
+    float dt; // seconds per tick
+    float gravity; // px/s^2, +y down
+    float max_step; // px per tick (speed cap)
+} pc;
+
+#define MAX_DDA_STEPS 160
+// A buried particle looks this far up for room on top of the pile.
+#define EMBED_SEARCH 128
+#define EMBED_RINGS 4
+// Below this a hit only lands (no impact response), px/s.
+#define IMPACT_MIN_SPEED 90.0
+// Splash and spray need this much, px/s.
+#define SPLASH_MIN_SPEED 200.0
+// Ricochet surfaces bounce particles faster than this, px/s.
+#define RICOCHET_MIN_SPEED 150.0
+// Bounce kept when a landing fails and the target has no restitution.
+#define DEFAULT_RESTITUTION 0.3
+#define RICOCHET_RESTITUTION 0.5
+// Normal velocity kept when glancing off a ceiling or wall with no support.
+#define GLANCE_RESTITUTION 0.2
+#define SALT_BALLISTIC 0xba11u
+
+bool is_free(uint c) { return cell_material(c) == MATERIAL_AIR && (c & (CELL_FLAG_BODY | CELL_FLAG_PARTICLE)) == 0u; }
+
+// Particles fly through air and gases (smoke does not stop debris).
+bool passable(uint c) {
+    if ((c & CELL_FLAG_BODY) != 0u) return false;
+    return mat_phase(MATERIALS[cell_material(c)].move) == PHASE_GAS;
+}
+
+bool land(ivec2 w, uint observed, uint meta) {
+    if (imageAtomicCompSwap(CELLS, w, observed, particle_cell(meta)) != observed) return false;
+    mark_tile_and_neighbors(uvec2(w) >> TILE_SHIFT);
+    return true;
+}
+
+// Lower the health of the solid at w; at zero it becomes its rubble (or air).
+void damage_cell(ivec2 w, uint amount) {
+    for (int t = 0; t < 4; t++) {
+        uint c = imageLoad(CELLS, w).x;
+        if ((c & (CELL_FLAG_BODY | CELL_FLAG_PARTICLE)) != 0u) return;
+        MaterialGpu mt = MATERIALS[cell_material(c)];
+        if (mat_phase(mt.move) != PHASE_STATIC || mat_health(mt) == 0u) return;
+        uint hp = cell_state(c);
+        uint next;
+        if (amount >= hp) {
+            uint rubble = mat_rubble(mt);
+            next = rubble != MATERIAL_NONE ? spawn_cell(rubble, cell_variant(c)) : air_hole();
+        } else {
+            next = cell_with_state(c, hp - amount);
+        }
+        if (imageAtomicCompSwap(CELLS, w, c, next) == c) {
+            mark_tile_and_neighbors(uvec2(w) >> TILE_SHIFT);
+            return;
+        }
+    }
+}
+
+// Throw the cell at p if it is still `material`, as `as_material`.
+void kick(ivec2 p, uint material, vec2 vel, uint as_material) {
+    ivec2 w = wrap_coord(p);
+    uint c = imageLoad(CELLS, w).x;
+    if (cell_material(c) != material) return;
+    eject_observed(w, c, vel, as_material);
+}
+
+// `n` is the face normal of the hit cell, pointing back at the particle.
+void apply_impact(uint impact, ivec2 hit, uint hit_cell, ivec2 n, vec2 v, float speed, uint pmat, uint h) {
+    uint tm = cell_material(hit_cell);
+    MaterialGpu tt = MATERIALS[tm];
+    vec2 nf = vec2(n);
+    ivec2 ti = ivec2(-n.y, n.x);
+    vec2 tf = vec2(ti);
+    float dp = float(mat_density(MATERIALS[pmat].density));
+    float dt_ = float(max(mat_density(tt.density), 1u));
+    if (impact == IMPACT_SPLASH || impact == IMPACT_SPRAY) {
+        // A few target cells fly back out, upward, spread sideways. The
+        // chance grows with speed and the projectile's relative density;
+        // kicked cells keep at most ~40% of the speed (~16% of the energy),
+        // so a cascade of kicks dies out within a few generations.
+        if (speed < SPLASH_MIN_SPEED) return;
+        uint k = 1u + uint(speed > 700.0) + uint(speed > 1400.0);
+        uint chance = uint(min((speed - SPLASH_MIN_SPEED) * 0.2, 160.0) * min(dp / dt_, 1.0));
+        for (uint j = 0u; j < k; j++) {
+            uint r = hash_u32(h + j * 0x9e3779b9u);
+            if ((r & 0xffu) >= chance) continue;
+            ivec2 at = hit + (j == 0u ? ivec2(0) : (j == 1u ? ti : -ti));
+            float out_s = speed * (0.1 + 0.2 * float((r >> 8) & 0xffu) / 255.0);
+            float side = (float((r >> 16) & 0xffu) / 255.0 - 0.5) * 0.4 * speed;
+            vec2 vel = nf * out_s + tf * side;
+            vel.y -= 0.1 * speed;
+            kick(at, tm, vel, tm);
+        }
+        return;
+    }
+    if (impact == IMPACT_CHIP || impact == IMPACT_DENT) {
+        if (impact == IMPACT_CHIP && speed > 300.0) {
+            // Chip: 1-3 cells of the surface fly off as rubble, chance up
+            // to 25% at 1324 px/s and above.
+            uint rubble = mat_rubble(tt);
+            uint r = hash_u32(h ^ 0x51c3u);
+            if (rubble != MATERIAL_NONE && (r & 0xfffu) < uint(min(speed - 300.0, 1024.0))) {
+                uint k = 1u + ((r >> 12) % 3u);
+                for (uint j = 0u; j < k; j++) {
+                    uint rj = hash_u32(r + j);
+                    ivec2 at = hit + (j == 0u ? ivec2(0) : (j == 1u ? ti : -ti));
+                    vec2 vel = nf * speed * (0.15 + 0.2 * float(rj & 0xffu) / 255.0) + tf * (float((rj >> 8) & 0xffu) / 255.0 - 0.5) * 0.4 * speed;
+                    kick(at, tm, vel, rubble);
+                }
+                return;
+            }
+        }
+        // Damage ~ momentum: sand (density 150) at 128 px/s takes 1 health.
+        uint dmg = max(1u, uint(speed * dp / 19200.0));
+        damage_cell(wrap_coord(hit), dmg);
+    }
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= PCTRL[PCTRL_HIGH_WATER]) return;
+    uint meta = P_META[i];
+    if (pmeta_mode(meta) != PARTICLE_MODE_BALLISTIC) return;
+    uint pm = pmeta_material(meta);
+    MaterialGpu mt = MATERIALS[pm];
+    vec2 p = P_POS[i];
+    vec2 v = P_VEL[i];
+    uint h = hash(i & 0xffffu, i >> 16, pc.tick, SALT_BALLISTIC);
+
+    ivec2 c0 = ivec2(floor(p));
+    ivec2 w0 = wrap_coord(c0);
+    uint start = imageLoad(CELLS, w0).x;
+
+    if (mat_phase(mt.move) == PHASE_GAS) {
+        // Gases rejoin the grid at once where there is room.
+        if (is_free(start) && land(w0, start, meta)) {
+            release_particle(i);
+            atomicAdd(PCTRL[PCTRL_LANDED], 1u);
+            return;
+        }
+        v *= 0.9;
+    } else {
+        v.y += pc.gravity * pc.dt;
+    }
+
+    if (!passable(start)) {
+        // Buried (another particle landed in its cell, or it spawned inside
+        // something): pop out on top of the loose cells above it, else
+        // take a free side neighbor. Never through a static solid.
+        for (int k = 1; k <= EMBED_SEARCH; k++) {
+            ivec2 wn = wrap_coord(c0 - ivec2(0, k));
+            uint cn = imageLoad(CELLS, wn).x;
+            if (is_free(cn)) {
+                if (land(wn, cn, meta)) {
+                    release_particle(i);
+                    atomicAdd(PCTRL[PCTRL_LANDED], 1u);
+                    return;
+                }
+                break;
+            }
+            if ((cn & CELL_FLAG_BODY) != 0u || mat_phase(MATERIALS[cell_material(cn)].move) == PHASE_STATIC) break;
+        }
+        // Then the nearest free cell within EMBED_RINGS cells (square rings),
+        // upper rows first.
+        for (int ring = 1; ring <= EMBED_RINGS; ring++) {
+            for (int dy = -ring; dy <= ring; dy++) {
+                for (int dx = -ring; dx <= ring; dx++) {
+                    if (max(abs(dx), abs(dy)) != ring) continue;
+                    ivec2 wn = wrap_coord(c0 + ivec2(dx, dy));
+                    uint cn = imageLoad(CELLS, wn).x;
+                    if (is_free(cn) && land(wn, cn, meta)) {
+                        release_particle(i);
+                        atomicAdd(PCTRL[PCTRL_LANDED], 1u);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    float sp = length(v);
+    float vmax = pc.max_step / pc.dt;
+    if (sp > vmax) {
+        v *= vmax / sp;
+        sp = vmax;
+    }
+    vec2 d = v * pc.dt;
+    vec2 q = p + d;
+
+    // Amanatides-Woo DDA over the cells from floor(p) to floor(q).
+    ivec2 cend = ivec2(floor(q));
+    int n = min(abs(cend.x - c0.x) + abs(cend.y - c0.y), MAX_DDA_STEPS);
+    ivec2 stp = ivec2(d.x > 0.0 ? 1 : -1, d.y > 0.0 ? 1 : -1);
+    vec2 inv = vec2(d.x != 0.0 ? 1.0 / abs(d.x) : 1e30, d.y != 0.0 ? 1.0 / abs(d.y) : 1e30);
+    vec2 frac = p - vec2(c0);
+    vec2 tmax = vec2(d.x > 0.0 ? (1.0 - frac.x) : frac.x, d.y > 0.0 ? (1.0 - frac.y) : frac.y) * inv;
+    bool have_free = is_free(start);
+    ivec2 free_c = c0;
+    uint free_v = start;
+    bool hit = false;
+    ivec2 hit_c = c0;
+    uint hit_v = 0u;
+    ivec2 normal = ivec2(0, -1);
+    ivec2 cur = c0;
+    for (int s = 0; s < n; s++) {
+        if (tmax.x < tmax.y) {
+            cur.x += stp.x;
+            tmax.x += inv.x;
+            normal = ivec2(-stp.x, 0);
+        } else {
+            cur.y += stp.y;
+            tmax.y += inv.y;
+            normal = ivec2(0, -stp.y);
+        }
+        uint cv = imageLoad(CELLS, wrap_coord(cur)).x;
+        if (is_free(cv)) {
+            have_free = true;
+            free_c = cur;
+            free_v = cv;
+            continue;
+        }
+        if (passable(cv)) continue;
+        hit = true;
+        hit_c = cur;
+        hit_v = cv;
+        break;
+    }
+    if (!hit && cur != cend && n < MAX_DDA_STEPS) {
+        // Float tie-breaking took a different staircase: check where the
+        // particle actually ends up.
+        uint cv = imageLoad(CELLS, wrap_coord(cend)).x;
+        if (!passable(cv)) {
+            hit = true;
+            hit_c = cend;
+            hit_v = cv;
+        }
+    }
+
+    if (hit) {
+        MaterialGpu tt = MATERIALS[cell_material(hit_v)];
+        uint impact = mat_impact(tt);
+        bool body = (hit_v & CELL_FLAG_BODY) != 0u;
+        if (sp > IMPACT_MIN_SPEED && !body && impact != IMPACT_NONE && impact != IMPACT_RICOCHET) {
+            atomicAdd(PCTRL[PCTRL_IMPACTS], 1u);
+            apply_impact(impact, hit_c, hit_v, normal, v, sp, pm, h);
+        }
+        uint rest = mat_restitution(tt);
+        bool ricochet = (tt.flags & MATERIAL_FLAG_RICOCHET) != 0u && !body;
+        // A particle only comes to rest on something: hitting a ceiling or
+        // the side of a wall with air under the free cell, it glances off
+        // and keeps falling as a particle (no cells stuck to walls and
+        // ceilings that then crawl down at grid speed).
+        bool supported = have_free && !passable(imageLoad(CELLS, wrap_coord(free_c + ivec2(0, 1))).x);
+        if (ricochet && sp > RICOCHET_MIN_SPEED) {
+            float e = rest != 0u ? float(rest) / 255.0 : RICOCHET_RESTITUTION;
+            if (normal.x != 0) v.x = -v.x; else v.y = -v.y;
+            v *= e;
+            p = have_free ? vec2(free_c) + 0.5 : p;
+        } else if (have_free && !supported) {
+            float e = rest != 0u ? float(rest) / 255.0 : GLANCE_RESTITUTION;
+            if (normal.x != 0) v.x = -v.x * e; else v.y = -v.y * e;
+            p = vec2(free_c) + 0.5;
+        } else if (have_free && land(wrap_coord(free_c), free_v, meta)) {
+            release_particle(i);
+            atomicAdd(PCTRL[PCTRL_LANDED], 1u);
+            return;
+        } else {
+            // No room on the path, or another particle claimed it first.
+            uint stuck = pmeta_stuck(meta) + 1u;
+            if (stuck > PMETA_STUCK_MAX) {
+                release_particle(i);
+                atomicAdd(PCTRL[PCTRL_LOST], 1u);
+                return;
+            }
+            meta = pmeta_with_stuck(meta, stuck);
+            float e = rest != 0u ? float(rest) / 255.0 : DEFAULT_RESTITUTION;
+            if (normal.x != 0) v.x = -v.x * e; else v.y = -v.y * e;
+            v.x += (float(h & 0xffu) / 255.0 - 0.5) * 40.0;
+            p = have_free ? vec2(free_c) + 0.5 : p;
+        }
+    } else {
+        p = q;
+        if (passable(start)) {
+            meta = pmeta_with_stuck(meta, 0u);
+        } else {
+            // Still buried with nowhere to go: counts as a failed landing.
+            uint stuck = pmeta_stuck(meta) + 1u;
+            if (stuck > PMETA_STUCK_MAX) {
+                release_particle(i);
+                atomicAdd(PCTRL[PCTRL_LOST], 1u);
+                return;
+            }
+            meta = pmeta_with_stuck(meta, stuck);
+        }
+    }
+
+    p -= floor(p / float(WORLD_SIZE)) * float(WORLD_SIZE);
+    P_POS[i] = p;
+    P_VEL[i] = v;
+    P_META[i] = meta;
+    imageStore(P_OVERLAY, wrap_coord(ivec2(floor(p))), uvec4(particle_overlay_value(meta), 0u, 0u, 0u));
+}

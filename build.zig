@@ -35,6 +35,16 @@ const shader_sources = [_][]const u8{
     "sim/bodies/raster.comp",
     "sim/bodies/points.comp",
     "sim/bodies/eject_fallback.comp",
+    // ---- particles, readback (M4) ----
+    "sim/particles/ballistic.comp",
+    "sim/particles/erase.comp",
+    "sim/particles/spawn.comp",
+    "sim/particles/control.comp",
+    "sim/particles/rebuild.comp",
+    "sim/particles/spray.comp",
+    "sim/particles/cpu_spawn.comp",
+    "sim/readback/mask.comp",
+    "sim/readback/region.comp",
     // ---- render ----
     "render/fullscreen.vert",
     "render/world.frag",
@@ -225,6 +235,12 @@ pub fn build(b: *std.Build) void {
     stream_run.has_side_effects = true;
     b.step("stream-test", "GPU world streaming self-test: upload, dirty bits, download, save, reload").dependOn(&stream_run.step);
     // ---- end world streaming ----
+    // ---- particles (M4): GPU tests of particles, readback mirror, events ----
+    const gpu_test_run = b.addRunArtifact(verify_exe.compile);
+    gpu_test_run.addArgs(&.{ "--headless", "--gpu-tests" });
+    gpu_test_run.addPassthruArgs();
+    b.step("gpu-test", "GPU tests: particles land and conserve cells, readback mirror vs synchronous readback, events one tick late").dependOn(&gpu_test_run.step);
+    if (gpu_tests) test_step.dependOn(&gpu_test_run.step);
 
     // ---- bench: always ReleaseFast ----
     const bench_exe = addHexe(b, .{
@@ -306,6 +322,8 @@ fn addHexe(b: *std.Build, o: HexeOptions) Hexe {
     // Raw GLSL sources the CPU mirrors are checked against (see src/sim/cell.zig tests).
     module.addAnonymousImport("common_glsl", .{ .root_source_file = b.path("shaders/common.glsl") });
     module.addAnonymousImport("bodies_glsl", .{ .root_source_file = b.path("shaders/sim/bodies/bodies.glsl") });
+    module.addAnonymousImport("particles_glsl", .{ .root_source_file = b.path("shaders/sim/particles/particles.glsl") });
+    module.addAnonymousImport("events_glsl", .{ .root_source_file = b.path("shaders/sim/events.glsl") });
     for (o.shared) |imp| module.addImport(imp.name, imp.module);
     const compile = b.addExecutable(.{ .name = o.name, .root_module = module });
     return .{ .compile = compile, .module = module };

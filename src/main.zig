@@ -6,6 +6,7 @@
 //!   hexe --headless --bench                (zig build bench)
 //!   hexe --headless --verify-determinism   (zig build verify-determinism)
 //!   hexe --world [--seed N] [--save DIR]   endless streamed world (windowed or --headless)
+//!   hexe --headless --gpu-tests            (zig build gpu-test)
 const std = @import("std");
 const builtin = @import("builtin");
 const Engine = @import("engine.zig").Engine;
@@ -22,6 +23,7 @@ const world_mode = @import("world_mode.zig");
 const air_test = @import("air_test.zig");
 const bodies_scenes = @import("sim/bodies_scenes.zig");
 const bodies_materials = @import("sim/bodies_materials.zig");
+const gpu_tests = @import("gpu_tests.zig");
 
 pub const std_options: std.Options = .{
     .log_level = if (builtin.mode == .debug) .info else .info,
@@ -40,6 +42,7 @@ pub const Cli = struct {
     validation: ?bool = null,
     bench: bool = false,
     verify: bool = false,
+    gpu_tests: bool = false,
     width: u32 = 1600,
     height: u32 = 900,
     /// Headless: also write the window view (camera, zoom, HUD) as PNG.
@@ -87,6 +90,7 @@ fn usage() void {
         \\  --zoom N                integer zoom (default 2)
         \\  --center X,Y            world pixel at the view center
         \\  --scene NAME            empty|sandbox|determinism|bench_static|bench_active|bench_mixed|noise
+        \\                          particles_demo|bench_particles|bench_particles_rain|determinism_commands
         \\  --seed N                scene seed (default 1)
         \\  --profile PATH          per-tick per-pass GPU ms as CSV (tick,pass,ms)
         \\  --no-sleep              disable activity tiles (simulate every tile)
@@ -108,6 +112,7 @@ fn usage() void {
         \\  --screenshot-every N    headless: also write PATH-<tick>.png every N ticks
         \\  --air-test              air field scenarios (sealed room, corridor blast)
         \\  --bodies / --no-bodies  rigid bodies (default: on in the window and bodies_* scenes)
+        \\  --gpu-tests             particle, readback mirror and event queue tests on the GPU
         \\
     , .{});
 }
@@ -202,6 +207,8 @@ fn parseCli(args: []const [:0]const u8) !Cli {
             cli.screenshot_every = try std.fmt.parseInt(u32, try next(args, &i), 10);
         } else if (std.mem.eql(u8, a, "--air-test")) {
             cli.air_test = true;
+        } else if (std.mem.eql(u8, a, "--gpu-tests")) {
+            cli.gpu_tests = true;
         } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
             usage();
             std.process.exit(0);
@@ -222,6 +229,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     if (cli.verify) return verify.run(gpa, io, cli);
     if (cli.air_test) return air_test.run(gpa, io, cli);
+    if (cli.gpu_tests) return gpu_tests.run(gpa, io, cli);
     if (cli.bench) return bench.run(gpa, io, cli);
     if (cli.world and cli.headless) return world_mode.runHeadless(gpa, io, cli);
     if (!cli.headless) return app.run(gpa, io, cli);
@@ -262,8 +270,10 @@ fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
     engine.profile = &profile;
 
     const start = std.Io.Timestamp.now(io, .awake);
+    var peak_particles: u32 = 0;
     for (0..cli.ticks) |t| {
         try engine.frame(1, .{ .scene = cli.scene, .seed = cli.seed }, null);
+        peak_particles = @max(peak_particles, engine.mirror().particles.live);
         if (cli.screenshot_every > 0 and (t + 1) % cli.screenshot_every == 0) {
             if (cli.screenshot) |path| {
                 var name_buf: [256]u8 = undefined;
@@ -282,6 +292,8 @@ fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
     }
     std.debug.print("  {s:<10} {d:8.4} ms/tick, active tiles at end: {d}\n", .{ "grid", profile.gridMean(), engine.last.active_tiles });
     if (bodies_on) try bodies_scenes.report(engine, gpa);
+    const ps = engine.mirror().particles;
+    std.debug.print("  particles: {d} live at end (tick {d}), peak {d}; last tick spawned {d} landed {d} refused {d} lost {d} impacts {d}\n", .{ ps.live, engine.mirror().tick, peak_particles, ps.spawned, ps.landed, ps.refused, ps.lost, ps.impacts });
     if (cli.screenshot) |path| try engine.screenshot(io, path, cli.crop);
     if (cli.view_screenshot) |path| {
         const center = cli.center orelse .{ cell.world_size / 2, cell.world_size / 2 };
@@ -313,6 +325,8 @@ test {
     _ = @import("sim/scenes.zig");
     _ = @import("sim/reference/grid.zig");
     _ = @import("sim/air_abi.zig");
+    _ = @import("sim/particles.zig");
+    _ = @import("sim/readback.zig");
     _ = @import("render/font.zig");
     _ = @import("util/png.zig");
     _ = @import("world_mode.zig");

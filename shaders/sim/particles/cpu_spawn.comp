@@ -1,0 +1,27 @@
+#version 460
+// Particles requested by the CPU (src/sim/particles.zig `spawn`), uploaded
+// into this frame slot's region of a host-visible ring. A request whose pad0
+// is 1 takes its material's spawn temperature.
+#include "common.glsl"
+#include "sim/particles/particles.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    uint ring_slot; // bindless slot of the ring
+    uint base; // first request of this upload
+    uint count;
+} pc;
+
+HEXE_BUFFER(CpuSpawnBlock, readonly, SpawnRequest req[];, g_cpu_spawns);
+
+void main() {
+    uint k = gl_GlobalInvocationID.x;
+    if (k >= pc.count) return;
+    SpawnRequest r = g_cpu_spawns[pc.ring_slot].req[pc.base + k];
+    uint meta = r.meta;
+    if (r.pad0 == 1u) {
+        meta = bitfieldInsert(meta, mat_spawn_temp(MATERIALS[pmeta_material(meta)]), int(PMETA_TEMP_SHIFT), 8);
+    }
+    spawn_particle(r.pos, r.vel, meta, r.binding);
+}

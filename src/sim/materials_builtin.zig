@@ -9,6 +9,11 @@ pub const stone: u8 = 1;
 pub const sand: u8 = 2;
 pub const water: u8 = 3;
 pub const smoke: u8 = 4;
+// M4 (particles): debris, rubble and a ricochet surface. Values from
+// materials/*.zon.
+pub const dirt: u8 = 5;
+pub const gravel: u8 = 6;
+pub const steel: u8 = 7;
 
 pub const descs = [_]materials.MaterialDesc{
     .{
@@ -26,6 +31,7 @@ pub const descs = [_]materials.MaterialDesc{
         .health = 200,
         .conductivity = 60,
         .impact = .chip,
+        .rubble = gravel,
         .blast_threshold = 200,
         .blast_response = .@"break",
         .ramp = &.{ 0x5b5a60, 0x504f55, 0x67666c, 0x48474d, 0x55545a, 0x605f66 },
@@ -67,6 +73,43 @@ pub const descs = [_]materials.MaterialDesc{
         .translucent = true,
         .ramp = &.{ 0x3b3b40, 0x47474c, 0x333338, 0x525257 },
     },
+    .{
+        .name = "dirt",
+        .phase = .powder,
+        .density = 140,
+        .slide = 60,
+        .conductivity = 20,
+        .impact = .spray,
+        .blast_threshold = 25,
+        .blast_response = .fly,
+        .drag = 70,
+        .ramp = &.{ 0x5b3a1e, 0x6b4526, 0x7a5230, 0x4e321a, 0x86603a },
+    },
+    .{
+        .name = "gravel",
+        .phase = .powder,
+        .density = 160,
+        .slide = 120,
+        .conductivity = 30,
+        .impact = .spray,
+        .blast_threshold = 40,
+        .blast_response = .fly,
+        .drag = 30,
+        .ramp = &.{ 0x6a6460, 0x7d7670, 0x5a5450, 0x8e8780, 0x4c4744 },
+    },
+    .{
+        .name = "steel",
+        .phase = .static,
+        .density = 800,
+        .health = 255,
+        .conductivity = 220,
+        .conductive = true,
+        .impact = .dent,
+        .ricochet = true,
+        .restitution = 150,
+        .drag = 5,
+        .ramp = &.{ 0x6e7782, 0x828c98, 0x5c646e, 0x98a2ae, 0x4e555e },
+    },
 };
 
 pub fn table() materials.Table {
@@ -83,4 +126,7 @@ test "builtin ids match table order" {
     try std.testing.expectEqual(sand, t.byName("sand").?);
     try std.testing.expectEqual(water, t.byName("water").?);
     try std.testing.expectEqual(smoke, t.byName("smoke").?);
+    try std.testing.expectEqual(dirt, t.byName("dirt").?);
+    try std.testing.expectEqual(gravel, t.byName("gravel").?);
+    try std.testing.expectEqual(steel, t.byName("steel").?);
 }

@@ -30,6 +30,8 @@ pub const flag_conductive: u32 = 0x1;
 pub const flag_translucent: u32 = 0x2;
 pub const flag_flammable: u32 = 0x4;
 pub const flag_emissive: u32 = 0x8;
+/// Ballistic particles bounce off it (steel), alongside its `impact`.
+pub const flag_ricochet: u32 = 0x10;
 
 /// `MaterialGpu.air_flags` bits (word 24, bits 24-31; MATERIAL_AIR_* in
 /// common.glsl). Creation of a cell of this gas adds mass to the air field.
@@ -86,13 +88,20 @@ pub const MaterialGpu = extern struct {
     // w10: glow
     glow_to: u8,
     reserved10: [3]u8 = @splat(0),
-    // w11-15
-    reserved0: [5]u32 = @splat(0),
+    // w11: impact2 (particles, M4)
+    /// Material chips and breakage land as; `none` = no rubble (removed
+    /// cells become air).
+    rubble: u8 = none,
+    /// Velocity kept by a particle bouncing off this material, /255.
+    restitution: u8 = 0,
+    reserved11: [2]u8 = @splat(0),
+    // w12-15
+    reserved0: [4]u32 = @splat(0),
     // w16-23
     ramp: [ramp_max]u32,
-    // w24: air (M5)
+    // w24: air (M5); rubble lives in w11 (shared with particles)
     pressure_event: u16 = 0,
-    rubble: u8 = none,
+    reserved24: u8 = 0,
     air_flags: u8 = 0,
     // w25-31
     reserved1: [7]u32 = @splat(0),
@@ -108,10 +117,10 @@ pub const MaterialGpu = extern struct {
 comptime {
     std.debug.assert(@sizeOf(MaterialGpu) == 128);
     const words = .{
-        .{ "phase", 0 },    .{ "density", 1 },         .{ "flags", 2 },           .{ "solver", 3 },
-        .{ "lifetime", 4 }, .{ "spawn_temp", 5 },      .{ "blast_threshold", 6 }, .{ "melt_at", 7 },
-        .{ "boil_at", 8 },  .{ "burn_ticks", 9 },      .{ "glow_to", 10 },        .{ "reserved0", 11 },
-        .{ "ramp", 16 },    .{ "pressure_event", 24 }, .{ "reserved1", 25 },
+        .{ "phase", 0 },      .{ "density", 1 },    .{ "flags", 2 },           .{ "solver", 3 },
+        .{ "lifetime", 4 },   .{ "spawn_temp", 5 }, .{ "blast_threshold", 6 }, .{ "melt_at", 7 },
+        .{ "boil_at", 8 },    .{ "burn_ticks", 9 }, .{ "glow_to", 10 },        .{ "rubble", 11 },
+        .{ "reserved0", 12 }, .{ "ramp", 16 },      .{ "pressure_event", 24 }, .{ "reserved1", 25 },
     };
     for (words) |w| std.debug.assert(@offsetOf(MaterialGpu, w[0]) == w[1] * 4);
 }
@@ -159,14 +168,18 @@ pub const MaterialDesc = struct {
     flammable: ?Flammable = null,
     conductive: bool = false,
     impact: Impact = .none,
+    /// Also bounces particles (steel: dent + ricochet).
+    ricochet: bool = false,
+    /// Chip/break product id; `none` = removed cells become air.
+    rubble: u8 = none,
+    /// Bounce velocity kept, 0-255 (0 = engine default).
+    restitution: u8 = 0,
     blast_threshold: u16 = 0,
     blast_response: BlastResponse = .none,
     drag: u8 = 0,
     /// Air overpressure (0.001 of ambient density) that appends a pressure
     /// event; 0 = never.
     pressure_event: u16 = 0,
-    /// Material that blast breakage leaves behind; `none` = air.
-    rubble: u8 = none,
     /// Creation adds mass to the air field (steam).
     feeds_air: bool = false,
     emissive: u8 = 0,
@@ -219,6 +232,7 @@ pub fn pack(d: MaterialDesc) MaterialGpu {
     if (d.translucent) flags |= flag_translucent;
     if (d.flammable != null) flags |= flag_flammable;
     if (d.emissive > 0) flags |= flag_emissive;
+    if (d.ricochet or d.impact == .ricochet) flags |= flag_ricochet;
     const is_air = std.mem.eql(u8, d.name, "air");
     return .{
         .phase = @backingInt(d.phase),
@@ -256,9 +270,10 @@ pub fn pack(d: MaterialDesc) MaterialGpu {
         .smoke_to = if (d.flammable) |f| f.smoke else none,
         .glow_from = if (d.glow) |g| tempByte(g.from) else 255,
         .glow_to = if (d.glow) |g| tempByte(g.to) else 255,
+        .rubble = d.rubble,
+        .restitution = d.restitution,
         .ramp = ramp,
         .pressure_event = d.pressure_event,
-        .rubble = d.rubble,
         .air_flags = if (d.feeds_air) air_flag_feeds_air else 0,
     };
 }

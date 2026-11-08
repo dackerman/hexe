@@ -72,6 +72,7 @@ pub const World = struct {
         const groups_x = (box.w + 15) / 16;
         const groups_y = (box.h + 15) / 16;
         const coverage = (c.flags >> commands.coverage_shift) & 0xff;
+        const kind: commands.Kind = @fromBackingInt(@intCast(c.kind));
         for (0..groups_y) |gy| {
             for (0..groups_x) |gx| {
                 var changed = false;
@@ -86,15 +87,21 @@ pub const World = struct {
                         const wx = cell.wrap(px);
                         const wy = cell.wrap(py);
                         const old = self.get(wx, wy);
-                        const h = cell.hashSalt(wx, wy, c.seed, cell.salt_spawn_variant);
-                        var replace = c.flags & commands.flag_only_air == 0 or cell.material(old) == materials.air;
-                        if (coverage != 0 and (h & 0xff) >= coverage) replace = false;
-                        if (replace) {
-                            const v = self.spawnCell(c.material, h >> 28);
-                            if (v != old) {
-                                self.set(wx, wy, v);
-                                changed = true;
-                            }
+                        const v: u32 = switch (kind) {
+                            .fill_circle, .fill_rect, .fill_line => blk: {
+                                const h = cell.hashSalt(wx, wy, c.seed, cell.salt_spawn_variant);
+                                var replace = c.flags & commands.flag_only_air == 0 or cell.material(old) == materials.air;
+                                if (coverage != 0 and (h & 0xff) >= coverage) replace = false;
+                                break :blk if (replace) self.spawnCell(c.material, h >> 28) else old;
+                            },
+                            .set_temperature => cell.withTemperature(old, cell.celsiusToTemp(c.y1)),
+                            .ignite => if (self.table.gpu[cell.material(old)].flags & materials.flag_flammable != 0) old | cell.flag_burning else old,
+                            .eject => self.ejectCell(c, px, py, old),
+                            .spray, .inject_charge, .inject_pressure => old,
+                        };
+                        if (v != old) {
+                            self.set(wx, wy, v);
+                            changed = true;
                         }
                     }
                 }
@@ -105,6 +112,33 @@ pub const World = struct {
                 }
             }
         }
+    }
+
+    /// shaders/sim/grid/commands.comp apply_eject, the cell edit only: the
+    /// cell becomes air when it flies (the GPU keeps it when the particle
+    /// budget refuses it; scenes compared here stay far below the budget),
+    /// solids lose health and become air at zero.
+    fn ejectCell(self: *const World, c: commands.CommandGpu, px: i32, py: i32, old: u32) u32 {
+        const m = cell.material(old);
+        if (m == materials.air or old & (cell.flag_body | cell.flag_particle) != 0) return old;
+        const dx = px - c.x0;
+        const dy = py - c.y0;
+        const r2 = c.x1 * c.x1;
+        const d2 = dx * dx + dy * dy;
+        const f = @divTrunc((r2 - d2) << 8, @max(r2, 1));
+        const speed = (c.y1 * f) >> 8;
+        const mt = &self.table.gpu[m];
+        const hole = self.spawnCell(materials.air, 0);
+        if (mt.phase == static) {
+            if (mt.health == 0) return old;
+            const damage: u32 = @as(u32, @intCast(speed)) >> commands.eject_damage_shift;
+            if (damage == 0) return old;
+            const hp = cell.state(old);
+            if (damage < hp) return cell.withState(old, hp - damage);
+            return hole;
+        }
+        if (speed < commands.eject_min_speed) return old;
+        return hole;
     }
 
     /// shaders/sim/grid/activity.comp.

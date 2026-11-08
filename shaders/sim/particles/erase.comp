@@ -1,0 +1,18 @@
+#version 460
+// Erase last tick's overlay pixels: every ballistic particle clears the pixel
+// it was drawn at (its current position) before the ballistic pass moves and
+// redraws it. Particles that landed last tick were erased at the start of
+// last tick's ballistic pass, so the overlay holds exactly the particles in
+// flight, and an idle particle system costs no full-image clear. A separate
+// pass, so an erase never races a redraw at the same pixel.
+#include "common.glsl"
+#include "sim/particles/particles.glsl"
+
+layout(local_size_x = 256) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= PCTRL[PCTRL_HIGH_WATER]) return;
+    if (pmeta_mode(P_META[i]) != PARTICLE_MODE_BALLISTIC) return;
+    imageStore(P_OVERLAY, wrap_coord(ivec2(floor(P_POS[i]))), uvec4(0u));
+}

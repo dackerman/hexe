@@ -9,11 +9,15 @@ const materials_builtin = @import("sim/materials_builtin.zig");
 const Profile = @import("profile.zig").Profile;
 const cell = @import("sim/cell.zig");
 
+/// What the budget applies to: grid time (commands + activity + movement)
+/// or the "particles" pass (M4: ballistic + spawn).
+const Metric = enum { grid, particles };
 const Case = struct {
     name: []const u8,
     scene: scenes.Scene,
     sleep: bool,
     budget_ms: f64,
+    metric: Metric = .grid,
     /// Air field cases (M5): budget applies to air time, not grid time.
     air: bool = false,
     air_sleep: bool = true,
@@ -28,6 +32,8 @@ const cases = [_]Case{
     .{ .name = "air field, every air tile every step, explosion every 20 ticks", .scene = .bench_air, .sleep = true, .budget_ms = 1.5, .air = true, .air_sleep = false },
     .{ .name = "air field, active air tiles, explosion every 20 ticks", .scene = .bench_air, .sleep = true, .budget_ms = 1.5, .air = true },
     .{ .name = "air field, active air tiles, static world", .scene = .bench_static, .sleep = true, .budget_ms = 0.2, .air = true },
+    .{ .name = "particles: 100K sand falling, no floor", .scene = .bench_particles, .sleep = true, .budget_ms = 1.0, .metric = .particles },
+    .{ .name = "particles: sand rain landing on a floor", .scene = .bench_particles_rain, .sleep = true, .budget_ms = 1.0, .metric = .particles },
 };
 
 /// Passes that make up "air time" (the M5 budget): coarsening and every
@@ -72,7 +78,17 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         engine.profile = &profile;
 
         const start = std.Io.Timestamp.now(io, .awake);
-        for (0..ticks) |_| try engine.frame(1, .{ .scene = case.scene, .seed = cli.seed }, null);
+        var live_sum: u64 = 0;
+        var live_n: u64 = 0;
+        var landed: u64 = 0;
+        for (0..ticks) |t| {
+            try engine.frame(1, .{ .scene = case.scene, .seed = cli.seed }, null);
+            if (t >= 10) {
+                live_sum += engine.mirror().particles.live;
+                landed += engine.mirror().particles.landed;
+                live_n += 1;
+            }
+        }
         try engine.finish();
         const wall = @as(f64, @floatFromInt(start.untilNow(io, .awake).nanoseconds)) / 1e6;
 
@@ -81,7 +97,12 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         for (0..engine.names.count) |i| {
             if (isAirPass(engine.names.get(i))) air_ms += profile.mean(i);
         }
-        const ok = if (case.air) air_ms < case.budget_ms else grid < case.budget_ms;
+        var particles_ms: f64 = 0;
+        for (0..engine.names.count) |i| {
+            if (std.mem.eql(u8, engine.names.get(i), "particles")) particles_ms = profile.mean(i);
+        }
+        const measured = if (case.air) air_ms else if (case.metric == .grid) grid else particles_ms;
+        const ok = measured < case.budget_ms;
         if (!ok) failed = true;
         std.debug.print("\n== {s}  ({s}, {d} ticks, wall {d:.1} ms)\n", .{ case.name, @tagName(case.scene), ticks, wall });
         std.debug.print("  {s:<10} {s:>9} {s:>9} {s:>9}\n", .{ "pass", "mean ms", "min", "max" });
@@ -94,8 +115,11 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
             std.debug.print("  {s:<10} {d:9.4}\n", .{ "grid", grid });
             std.debug.print("  {s:<10} {d:9.4}   budget {d:.1} ms: {s}\n", .{ "air", air_ms, case.budget_ms, if (ok) "PASS" else "FAIL" });
             std.debug.print("  air tiles active at end: {d} of {d}\n", .{ engine.pipeline.air.stats.active_tiles, cell.tile_count });
-        } else {
+        } else if (case.metric == .grid) {
             std.debug.print("  {s:<10} {d:9.4} {d:9.4} {d:9.4}   budget {d:.1} ms: {s}\n", .{ "grid", grid, profile.grid_min, profile.grid_max, case.budget_ms, if (ok) "PASS" else "FAIL" });
+        } else {
+            std.debug.print("  {s:<10} {d:9.4}   budget {d:.1} ms: {s}\n", .{ "particles", particles_ms, case.budget_ms, if (ok) "PASS" else "FAIL" });
+            std.debug.print("  live particles: mean {d:.0}, last {d}; landed per tick (sampled) {d:.0}\n", .{ @as(f64, @floatFromInt(live_sum)) / @as(f64, @floatFromInt(@max(live_n, 1))), engine.mirror().particles.live, @as(f64, @floatFromInt(landed)) / @as(f64, @floatFromInt(@max(live_n, 1))) });
         }
         std.debug.print("  active tiles: mean {d:.0} of {d}, last {d}\n", .{ mean_tiles, cell.tile_count, engine.last.active_tiles });
     }
