@@ -119,12 +119,24 @@ uint hash_salt(uint x, uint y, uint tick, uint salt) {
 
 #define SLOT_IMG_CELLS 0u
 #define SLOT_IMG_OWNER 1u
+// Air field and obstacle coarsening (M5). Slots 8-12 / 20-23 were taken as a
+// block rather than "next free" to avoid renumbering at merge
+// (docs/decisions/70-air-field-abi.md).
+#define SLOT_IMG_SOLID_COARSE 8u
+#define SLOT_IMG_LIQUID_COARSE 9u
+#define SLOT_IMG_AIR 10u
+#define SLOT_IMG_AIR_SOURCE 11u
+#define SLOT_IMG_DEBUG_OVERLAY 12u
 #define SLOT_IMG_DYNAMIC_BASE 16u
 
 #define SLOT_BUF_MATERIALS 0u
 #define SLOT_BUF_TILE_MARKS 1u
 #define SLOT_BUF_TILE_LIST 2u
 #define SLOT_BUF_COMMANDS 3u
+#define SLOT_BUF_BLAST_EJECTS 20u
+#define SLOT_BUF_AIR_EVENTS 21u
+#define SLOT_BUF_AIR_TILE_MARKS 22u
+#define SLOT_BUF_AIR_TILE_LIST 23u
 #define SLOT_BUF_DYNAMIC_BASE 32u
 
 #define SAMPLER_NEAREST_CLAMP 0u
@@ -169,7 +181,8 @@ void store_cell(ivec2 p, uint c) { imageStore(CELLS, wrap_coord(p), uvec4(c, 0u,
 //   w10 glow     glow_to | reserved
 //   w11-15       reserved
 //   w16-23 ramp  RGBA8 colors, R in the low byte; ramp_len of them valid
-//   w24-31       reserved
+//   w24 air      pressure_event(16) | rubble<<16 | air_flags<<24 (MATERIAL_AIR_*)
+//   w25-31       reserved
 // ---------------------------------------------------------------------------
 #define MATERIAL_COUNT 256u
 #define MATERIAL_WORDS 32u
@@ -207,7 +220,8 @@ struct MaterialGpu {
     uint glow;
     uint reserved0[5];
     uint ramp[8];
-    uint reserved1[8];
+    uint air;
+    uint reserved1[7];
 };
 
 HEXE_BUFFER(MaterialBlock, readonly, MaterialGpu materials[];, g_material_tables);
@@ -222,6 +236,21 @@ uint mat_sort_key(uint density) { return density >> 16; }
 uint mat_spawn_temp(MaterialGpu m) { return m.misc2 & 0xffu; }
 uint mat_initial_state(MaterialGpu m) { return m.misc1 >> 24; }
 uint mat_ramp_len(MaterialGpu m) { return m.misc3 >> 24; }
+uint mat_health(MaterialGpu m) { return (m.misc0 >> 8) & 0xffu; }
+uint mat_blast_response(MaterialGpu m) { return m.misc2 >> 24; }
+uint mat_blast_threshold(MaterialGpu m) { return m.misc3 & 0xffffu; }
+uint mat_drag(MaterialGpu m) { return (m.misc3 >> 16) & 0xffu; }
+uint mat_pressure_event(MaterialGpu m) { return m.air & 0xffffu; }
+uint mat_rubble(MaterialGpu m) { return (m.air >> 16) & 0xffu; }
+uint mat_air_flags(MaterialGpu m) { return m.air >> 24; }
+
+// MaterialGpu.misc2 blast_response values.
+#define BLAST_NONE 0u
+#define BLAST_FLY 1u
+#define BLAST_CHIP 2u
+#define BLAST_BREAK 3u
+// air_flags bits (w24 bits 24-31).
+#define MATERIAL_AIR_FEEDS_AIR 0x1u
 
 // A freshly spawned cell of `material` (commands, reactions).
 uint spawn_cell(uint material, uint variant) {
@@ -278,6 +307,10 @@ void mark_tile_and_neighbors(uvec2 t) {
 // ---------------------------------------------------------------------------
 #define CMD_FILL_CIRCLE 1u
 #define CMD_FILL_RECT 2u
+// Not a grid edit: consumed by the air field (src/sim/air.zig). Center
+// (x0, y0), radius x1 (pixels), steps y1; material = density delta as f32
+// bits, flags = radial momentum as f32 bits.
+#define CMD_INJECT_PRESSURE 3u
 #define CMD_FLAG_ONLY_AIR 0x1u
 #define CMD_COVERAGE_SHIFT 8u
 #define CMD_WORDS 8u
@@ -296,5 +329,39 @@ struct Command {
 
 HEXE_BUFFER(CommandBlock, readonly, Command commands[];, g_command_buffers);
 #define COMMANDS g_command_buffers[SLOT_BUF_COMMANDS].commands
+
+// ---------------------------------------------------------------------------
+// Air field (M5), docs/04-fluids.md "Air field", src/sim/air.zig. The
+// lattice is AIR_SIZE^2 cells of 2x2 pixels; air tiles are AIR_TILE^2
+// lattice cells, so an air tile covers exactly one grid activity tile and
+// both use the same tile coordinates. Helpers for other passes live in
+// shaders/sim/air/air_api.glsl.
+//   SLOT_IMG_SOLID_COARSE  r8ui:   static/body-owned pixels per 2x2 block, 0-4
+//   SLOT_IMG_LIQUID_COARSE r8ui:   liquid pixels per 2x2 block, 0-4
+//   SLOT_IMG_AIR           rgba32f: x density (ambient 1.0), yz velocity in
+//                                   pixels per tick, w 1.0 on wall cells
+//   SLOT_IMG_AIR_SOURCE    r32ui:  per lattice cell mass to add next step,
+//                                   int32 fixed point (AIR_MASS_ONE = 1.0)
+//   SLOT_IMG_DEBUG_OVERLAY rgba8:  debug view (air density and velocity)
+// ---------------------------------------------------------------------------
+#define AIR_SIZE 1024u
+#define AIR_MASK 1023u
+#define AIR_TILE 16u
+#define AIR_TILES_PER_SIDE 64u
+#define AIR_WAKE_TICKS 4u
+#define AIR_TILE_ACTIVE_OFFSET 4096u
+#define AIR_MASS_ONE 65536u
+// Mass a feeds_air gas pixel adds when created (removes when consumed).
+#define AIR_GAS_CELL_MASS 32768u
+// Blast ejects (SLOT_BUF_BLAST_EJECTS) and air events (SLOT_BUF_AIR_EVENTS):
+// header {count, capacity, dropped, tick}, then records.
+#define BLAST_EJECT_WORDS 6u
+#define BLAST_EJECT_CAPACITY 65536u
+#define BLAST_KIND_FLY 1u
+#define BLAST_KIND_CHIP 2u
+#define BLAST_KIND_BREAK 3u
+#define AIR_EVENT_WORDS 4u
+#define AIR_EVENT_CAPACITY 1024u
+#define AIR_EVENT_PRESSURE 1u
 
 #endif

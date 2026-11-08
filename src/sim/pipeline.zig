@@ -26,6 +26,8 @@ const Grid = @import("grid.zig").Grid;
 const Noise = @import("noise.zig").Noise;
 const materials = @import("materials.zig");
 const Stream = @import("stream.zig").Stream;
+const Coarsen = @import("coarsen.zig").Coarsen;
+const Air = @import("air.zig").Air;
 
 pub const frames_in_flight = 2;
 /// Most ticks recorded into one frame (catch-up after a slow frame).
@@ -37,6 +39,11 @@ pub const Config = struct {
     sleep: bool = true,
     /// Debug: replace the simulation with animated noise (M0 bring-up).
     noise: bool = false,
+    /// Air field (M5). Off in the determinism check: it is float-based and
+    /// has no CPU reference; when off it records nothing and no cell changes.
+    air: bool = true,
+    /// Air active-tile masking; off = every air tile every step (fallback).
+    air_sleep: bool = true,
 };
 
 /// World-wide GPU resources every pass may use. All live at fixed bindless
@@ -54,8 +61,15 @@ pub const Shared = struct {
     tile_marks: *gpu.Buffer,
     /// Indirect dispatch args + active tile list (SLOT_BUF_TILE_LIST).
     tile_list: *gpu.Buffer,
-    /// Coarsened solid mask for the fluid solvers; produced from M5 on.
-    solid_mask: ?*gpu.Image = null,
+    /// Coarsened obstacles for the fluid solvers (src/sim/coarsen.zig),
+    /// R8_UINT 1024 x 1024: solid pixels (static or body-owned) per 2 x 2
+    /// block, 0-4 (SLOT_IMG_SOLID_COARSE), and liquid pixels per block
+    /// (SLOT_IMG_LIQUID_COARSE). Written once per tick after movement.
+    solid_coarse: ?*gpu.Image = null,
+    liquid_coarse: ?*gpu.Image = null,
+    /// Air field macroscopic state, RGBA32F 1024 x 1024 (SLOT_IMG_AIR):
+    /// density, velocity in px/tick, wall flag. See src/sim/air.zig.
+    air: ?*gpu.Image = null,
 };
 
 pub const Frame = struct {
@@ -129,6 +143,8 @@ pub const Pipeline = struct {
     noise: Noise,
     /// World streaming uploads and dirty bits (M4); inert until enabled.
     stream: Stream,
+    coarsen: Coarsen,
+    air: Air,
     // ---- end subsystems ----
 
     /// In place: `shared` points into `self`.
@@ -145,12 +161,22 @@ pub const Pipeline = struct {
         self.stream = try Stream.init(ctx, config, alloc);
         errdefer self.stream.deinit();
         self.stream.cells = &self.grid.cells;
+        self.coarsen = try Coarsen.init(ctx, config, alloc);
+        errdefer self.coarsen.deinit();
+        self.air = try Air.init(ctx, config, alloc);
+        errdefer self.air.deinit();
+        self.air.temp_slot = self.coarsen.temp.slot;
         // ---- end subsystem init ----
         self.shared = self.grid.shared();
+        self.shared.solid_coarse = &self.coarsen.solid;
+        self.shared.liquid_coarse = &self.coarsen.liquid;
+        self.shared.air = &self.air.field_image;
     }
 
     pub fn deinit(self: *Pipeline) void {
         // ---- subsystem deinit (reverse order) ----
+        self.air.deinit();
+        self.coarsen.deinit();
         self.stream.deinit();
         self.noise.deinit();
         self.applier.deinit();
@@ -179,11 +205,15 @@ pub const Pipeline = struct {
         var s: u32 = 0;
         while (s < cell.substeps) : (s += 1) {
             frame.substep = s;
+            //    gas advection by last tick's air (M5); nothing when air is off
+            self.air.recordSubstep(frame);
             self.grid.recordSubstep(frame);
         }
         frame.substep = 0;
         // 4. coarsen solid mask (M5)
-        // 5. air field (M5)
+        self.coarsen.record(frame);
+        // 5. air field (M5): LBM steps, blast thresholds, events
+        self.air.record(frame);
         // 6. liquid solver, particles (M4, M6)
         // 7. readback buffers, event queue (M4)
         // ---- end tick order ----

@@ -1,0 +1,33 @@
+#version 460
+// Downsampled air field for the CPU (Air.field): 256 x 256 cells of 4 x 4
+// lattice cells (8 x 8 px), each the mean density and velocity over its
+// fluid cells and the open fraction (src/sim/air_abi.zig `FieldCell`).
+// Written straight into a host-visible buffer once per tick, ~1 MB.
+#include "common.glsl"
+#include "sim/air/air_api.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PC {
+    uint out_slot;
+} pc;
+
+HEXE_BUFFER(FieldOut, , vec4 cells[];, g_field_out);
+
+void main() {
+    uvec2 o = gl_GlobalInvocationID.xy;
+    float rho = 0.0;
+    vec2 v = vec2(0.0);
+    float n = 0.0;
+    for (int y = 0; y < 4; y++) {
+        for (int x = 0; x < 4; x++) {
+            vec4 a = imageLoad(AIR_FIELD, ivec2(o * 4u) + ivec2(x, y));
+            if (a.w != 0.0) continue;
+            rho += a.x;
+            v += a.yz;
+            n += 1.0;
+        }
+    }
+    vec4 r = n > 0.0 ? vec4(rho / n, v / n, n / 16.0) : vec4(1.0, 0.0, 0.0, 0.0);
+    g_field_out[pc.out_slot].cells[o.y * 256u + o.x] = r;
+}

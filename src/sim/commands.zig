@@ -21,7 +21,19 @@ pub const Kind = enum(u32) {
     fill_circle = 1,
     /// [x0, x1) x [y0, y1).
     fill_rect = 2,
+    /// Not a grid edit: an air-field source consumed by src/sim/air.zig.
+    /// Center (x0, y0), radius x1 (pixels), steps y1; `material` holds the
+    /// density delta and `flags` the radial momentum, both as f32 bits.
+    inject_pressure = 3,
 };
+
+/// The standard explosion (`CommandList.explosion` at strength 1): mean
+/// overpressure per lattice cell over the open-air disc, outward momentum
+/// per lattice cell, and LBM steps it is spread over
+/// (docs/decisions/77-air-blast-scaling.md).
+pub const explosion_density: f32 = 1.5;
+pub const explosion_momentum: f32 = 0.15;
+pub const explosion_steps: u32 = 4;
 
 /// Only replace air cells (pouring, scenery that must not overwrite).
 pub const flag_only_air: u32 = 0x1;
@@ -112,6 +124,28 @@ pub const CommandList = struct {
         });
     }
 
+    /// Air-field source: add `density_delta` (mean per lattice cell over the
+    /// open disc of `radius` pixels; confined, the same mass concentrates in
+    /// the fluid cells that are there) and outward momentum, spread over
+    /// `steps` LBM steps. Ignored by the grid.
+    pub fn injectPressure(self: *CommandList, cx: i32, cy: i32, radius: i32, density_delta: f32, radial_momentum: f32, steps: u32) void {
+        self.push(.{
+            .kind = @backingInt(Kind.inject_pressure),
+            .material = @bitCast(density_delta),
+            .x0 = cx,
+            .y0 = cy,
+            .x1 = std.math.clamp(radius, 1, 256),
+            .y1 = @intCast(std.math.clamp(steps, 1, 64)),
+            .flags = @bitCast(radial_momentum),
+            .seed = 0,
+        });
+    }
+
+    /// An explosion of `strength` (1 = standard, gunpowder) at a pixel.
+    pub fn explosion(self: *CommandList, cx: i32, cy: i32, radius: i32, strength: f32) void {
+        self.injectPressure(cx, cy, radius, explosion_density * strength, explosion_momentum * strength, explosion_steps);
+    }
+
     pub fn slice(self: *const CommandList) []const CommandGpu {
         return self.items[0..self.len];
     }
@@ -139,6 +173,7 @@ pub fn bounds(c: CommandGpu) ?Box {
             x1 = c.x1;
             y1 = c.y1;
         },
+        .inject_pressure => return null,
     }
     if (x1 <= x0 or y1 <= y0) return null;
     const ax = x0 & ~@as(i32, 15);
@@ -162,6 +197,7 @@ pub fn insideShape(c: CommandGpu, x: i32, y: i32) bool {
             break :blk dx * dx + dy * dy <= c.x1 * c.x1;
         },
         .fill_rect => x >= c.x0 and y >= c.y0 and x < c.x1 and y < c.y1,
+        .inject_pressure => false,
     };
 }
 

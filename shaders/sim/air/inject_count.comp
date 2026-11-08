@@ -1,0 +1,27 @@
+#version 460
+// Sum the injection weights over the disc (see inject.glsl); wake its tiles.
+#include "common.glsl"
+#include "sim/air/air_api.glsl"
+#include "sim/air/lbm.glsl"
+#include "sim/air/inject.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+shared uint s_sum;
+
+void main() {
+    if (gl_LocalInvocationIndex == 0u) s_sum = 0u;
+    barrier();
+    uint weight = 0u;
+    if (all(lessThan(gl_GlobalInvocationID.xy, pc.size))) {
+        Injection j = g_injections[pc.ring_slot].items[pc.index];
+        vec2 dir;
+        weight = inject_weight(j, pc.origin + ivec2(gl_GlobalInvocationID.xy), dir);
+    }
+    if (weight != 0u) atomicAdd(s_sum, weight);
+    barrier();
+    if (gl_LocalInvocationIndex == 0u && s_sum != 0u) {
+        atomicAdd(g_injection_counts[pc.counts_slot].weights[pc.counter], s_sum);
+        if (pc.mark != 0u) air_mark_tile(uvec2(air_wrap(pc.origin + ivec2(gl_WorkGroupID.xy * 16u))) / AIR_TILE);
+    }
+}

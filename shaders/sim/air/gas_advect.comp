@@ -1,0 +1,80 @@
+#version 460
+// Gas advection by the air field, one substep, before Margolus movement
+// (docs/decisions/76-air-gas-advection.md). Gas cells move with the air
+// velocity as discrete swaps with air: this substep pairs every pixel with
+// its neighbor along one axis (x on even substeps, y on odd; the pairing
+// parity alternates every second substep), and a pair (gas, air) swaps when
+// the air at the gas cell blows from the gas toward the air, with
+// probability |v_axis| / 2 (v in pixels per tick: each pixel gets two
+// chances per tick per direction, so gas drifts at the air speed up to
+// 2 px per tick). Pairs are disjoint, so there are no races; randomness is
+// hash(pair, tick, substep). Runs over last tick's active air tiles (an
+// air tile is a grid tile), so still air costs nothing. Only gas <-> air
+// swaps; particle-backed and body-owned cells never move here.
+#include "common.glsl"
+#include "sim/air/air_api.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PC {
+    uint tick;
+    uint substep;
+    uint mark; // nonzero: mark changed grid tiles
+    float scale; // probability per (pixel per tick) of air speed
+} pc;
+
+shared bool s_moved;
+
+bool is_gas(uint cl) {
+    uint m = cell_material(cl);
+    return m != MATERIAL_AIR && (cl & (CELL_FLAG_PARTICLE | CELL_FLAG_BODY)) == 0u && mat_phase(MATERIALS[m].move) == PHASE_GAS;
+}
+
+bool is_air(uint cl) {
+    return cell_material(cl) == MATERIAL_AIR && (cl & (CELL_FLAG_PARTICLE | CELL_FLAG_BODY)) == 0u;
+}
+
+// Try one pair: a at p, b at p + e (e = +x or +y).
+bool try_pair(ivec2 p, ivec2 e, int axis) {
+    ivec2 q = wrap_coord(p + e);
+    uint ca = imageLoad(CELLS, p).x;
+    uint cb = imageLoad(CELLS, q).x;
+    bool ga = is_gas(ca);
+    bool gb = is_gas(cb);
+    if (ga == gb) return false;
+    bool aa = is_air(ca);
+    bool ab = is_air(cb);
+    if (!(ga && ab) && !(gb && aa)) return false;
+    // Velocity at the gas cell, along the axis, toward the other cell.
+    ivec2 gp = ga ? p : q;
+    float v = air_velocity(gp)[axis] * (ga ? 1.0 : -1.0);
+    if (v <= 0.0) return false;
+    float prob = v * pc.scale;
+    uint h = hash(uint(p.x), uint(p.y), pc.tick, pc.substep ^ 0x6a5d0000u);
+    if (float(h >> 8) >= prob * 16777216.0) return false;
+    imageStore(CELLS, p, uvec4(cb, 0u, 0u, 0u));
+    imageStore(CELLS, q, uvec4(ca, 0u, 0u, 0u));
+    return true;
+}
+
+void main() {
+    if (gl_LocalInvocationIndex == 0u) s_moved = false;
+    barrier();
+
+    uint packed = AIR_TILE_LIST.tiles[gl_WorkGroupID.x];
+    uvec2 tile = uvec2(packed & 0xffffu, packed >> 16);
+    int axis = int(pc.substep & 1u);
+    int parity = int((pc.substep >> 1) & 1u);
+    ivec2 e = axis == 0 ? ivec2(1, 0) : ivec2(0, 1);
+    ivec2 n = axis == 0 ? ivec2(0, 1) : ivec2(1, 0);
+    // This thread's 2x2 pixels; the two pairs start at the block's first
+    // pixel along the axis, shifted by the parity.
+    ivec2 base = ivec2(tile * TILE_SIZE + gl_LocalInvocationID.xy * 2u) + e * parity;
+    bool moved = false;
+    moved = try_pair(wrap_coord(base), e, axis) || moved;
+    moved = try_pair(wrap_coord(base + n), e, axis) || moved;
+    if (moved) s_moved = true;
+
+    barrier();
+    if (gl_LocalInvocationIndex == 0u && s_moved && pc.mark != 0u) mark_tile_and_neighbors(tile);
+}

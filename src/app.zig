@@ -8,6 +8,8 @@
 //!   .              single tick while paused        F1            toggle HUD
 //!   F2             activity tile overlay           F12           screenshot
 //!   F5             save (--world --save DIR)    Esc           quit
+//!   F3             air field overlay (M5)          E             explosion at the cursor
+//!   Esc            quit
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("sdl");
@@ -37,9 +39,10 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         .vsync = cli.vsync,
         .table = &table,
         .validation = cli.validation orelse (builtin.mode == .debug),
-        .pipeline = .{ .sleep = cli.sleep, .noise = cli.scene == .noise },
+        .pipeline = .{ .sleep = cli.sleep, .noise = cli.scene == .noise, .air = cli.air, .air_sleep = cli.air_sleep },
     });
     defer engine.deinit();
+    engine.pipeline.air.overlay = cli.overlay;
     var profile: Profile = .{};
     engine.profile = &profile;
 
@@ -59,7 +62,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
     const scene = if (cli.world) .empty else cli.scene;
 
     const win_w, const win_h = window.pixelSize();
-    var view: View = .{ .scale = 2 };
+    var view: View = .{ .scale = 2, .show_overlay = cli.overlay };
     const start = if (session) |s| (cli.center orelse s.spawn()) else [2]i32{ cell.world_size / 2, cell.world_size / 2 };
     view.camera_x = start[0] - @as(i32, @intCast(win_w / 2 / view.scale));
     view.camera_y = start[1] - @as(i32, @intCast(win_h / 2 / view.scale));
@@ -94,6 +97,10 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         if (paused and input.wasPressed(c.SDL_SCANCODE_PERIOD)) ticks = 1;
         if (input.wasPressed(c.SDL_SCANCODE_F1)) show_hud = !show_hud;
         if (input.wasPressed(c.SDL_SCANCODE_F2)) view.show_tiles = !view.show_tiles;
+        if (input.wasPressed(c.SDL_SCANCODE_F3)) {
+            view.show_overlay = !view.show_overlay;
+            engine.pipeline.air.overlay = view.show_overlay;
+        }
 
         // Material selection: number keys pick ids 1-9.
         for (0..9) |k| {
@@ -150,6 +157,8 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
             strokeLine(&pending, from, .{ mwx, mwy }, radius, paint);
             last_paint = .{ mwx, mwy };
         } else last_paint = null;
+        // Explosion (air field pressure injection) at the cursor, brush radius.
+        if (input.wasPressed(c.SDL_SCANCODE_E)) pending.explosion(mwx, mwy, @max(radius, 4), 1.0);
 
         if (input.wasPressed(c.SDL_SCANCODE_F12)) {
             var name_buf: [64]u8 = undefined;
@@ -226,7 +235,7 @@ pub fn fillHud(engine: *Engine, profile: *const Profile, info: HudInfo) void {
     hud.print("{s}", .{w.buffered()});
     hud.print("brush {s} r{d}  zoom {d}x  cam {d},{d}  cursor {d},{d}", .{ info.material, info.radius, info.view.scale, info.view.camera_x, info.view.camera_y, info.cursor[0], info.cursor[1] });
     if (info.world) |s| s.hudLines(hud);
-    hud.print("1-{d} material  LMB paint  RMB erase  wheel size  WASD pan  =/- zoom  space pause  F2 tiles", .{info.material_count -| 1});
+    hud.print("1-{d} material  LMB paint  RMB erase  wheel size  WASD pan  =/- zoom  space pause  F2 tiles  F3 air  E boom", .{info.material_count -| 1});
 }
 
 /// Circles every radius/2 pixels from `a` to `b` (at least one).

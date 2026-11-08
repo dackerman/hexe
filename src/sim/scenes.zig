@@ -22,6 +22,13 @@ pub const Scene = enum {
     bench_mixed,
     /// Debug noise (pipeline Config.noise); emits nothing.
     noise,
+    /// Air field demo (M5): an explosion in the open beside a wall and one
+    /// in a corridor ending in a room, sand piles and smoke to throw.
+    air_demo,
+    /// Bench (M5): stone terrain with rooms and corridors, an explosion
+    /// every 20 ticks at rotating spots, heat sources; the air field stays
+    /// fully active.
+    bench_air,
 };
 
 pub fn emit(scene: Scene, tick: u32, seed: u32, list: *commands.CommandList) void {
@@ -31,6 +38,8 @@ pub fn emit(scene: Scene, tick: u32, seed: u32, list: *commands.CommandList) voi
         .determinism => determinism(tick, seed, list),
         .bench_static => if (tick == 0) benchStatic(list),
         .bench_active => if (tick == 0) list.fillRect(0, 0, cell.world_size, cell.world_size, m.sand, .{ .coverage = 128 }),
+        .air_demo => airDemo(tick, list),
+        .bench_air => benchAir(tick, list),
         .bench_mixed => if (tick == 0) {
             list.fillRect(0, 0, W, W, m.water, .{ .coverage = 80 });
             list.fillRect(0, 0, W, W, m.sand, .{ .coverage = 80, .only_air = true });
@@ -128,6 +137,52 @@ fn determinism(tick: u32, seed: u32, list: *commands.CommandList) void {
         if (tick % 3 == 1) list.fillCircle(ox + 400, oy + 70, 4, m.water, .{ .only_air = true });
         if (tick % 7 == 0) list.fillCircle(ox + 250, oy + 420, 5, m.smoke, .{ .only_air = true });
         if (tick % 50 == 25) list.fillCircle(ox + 140, oy + 245, 10, m.air, .{});
+    }
+}
+
+fn airDemo(tick: u32, list: *commands.CommandList) void {
+    if (tick == 0) {
+        // Floor across the window and a free-standing wall right of the
+        // open-air blast.
+        list.fillRect(0, 1400, W, W, m.stone, .{});
+        list.fillRect(680, 1000, 720, 1400, m.stone, .{});
+        // A stone massif with a 10 px corridor ending in a room.
+        list.fillRect(900, 1000, 1900, 1400, m.stone, .{});
+        list.fillRect(900, 1190, 1780, 1200, m.air, .{});
+        list.fillRect(1780, 1120, 1860, 1280, m.air, .{});
+        // Sand piles on the floor in the open, sand plugs in the corridor.
+        var x: i32 = 380;
+        while (x < 680) : (x += 60) list.fillRect(x, 1392, x + 6, 1400, m.sand, .{});
+        x = 1000;
+        while (x < 1780) : (x += 80) list.fillRect(x, 1190, x + 4, 1200, m.sand, .{});
+        x = 760;
+        while (x < 900) : (x += 50) list.fillRect(x, 1392, x + 6, 1400, m.sand, .{});
+        // Smoke clouds to show the flow.
+        list.fillCircle(560, 1250, 40, m.smoke, .{ .only_air = true, .coverage = 120 });
+        list.fillCircle(800, 1300, 30, m.smoke, .{ .only_air = true, .coverage = 120 });
+        list.fillRect(1790, 1130, 1850, 1270, m.smoke, .{ .only_air = true, .coverage = 60 });
+    }
+    if (tick == 30) {
+        list.explosion(560, 1380, 12, 1.0);
+        list.explosion(930, 1195, 12, 1.0);
+    }
+}
+
+fn benchAir(tick: u32, list: *commands.CommandList) void {
+    if (tick == 0) {
+        list.fillRect(0, 1500, W, W, m.stone, .{});
+        var i: i32 = 0;
+        while (i < 8) : (i += 1) {
+            const x0 = 64 + i * 250;
+            list.fillRect(x0, 200, x0 + 30, 1500, m.stone, .{});
+            list.fillRect(x0 + 30, 700 + @mod(i * 37, 300), x0 + 200, 720 + @mod(i * 37, 300), m.stone, .{});
+        }
+        list.fillRect(0, 100, W, 130, m.stone, .{});
+        list.fillRect(0, 1460, W, 1500, m.sand, .{ .coverage = 128 });
+    }
+    if (tick % 20 == 0) {
+        const k: i32 = @intCast((tick / 20) % 16);
+        list.explosion(150 + @mod(k * 523, 1800), 300 + @mod(k * 311, 1100), 16, 1.0);
     }
 }
 

@@ -22,7 +22,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         if (!cli.sleep and sleep) continue;
         const engine = try gpa.create(Engine);
         defer gpa.destroy(engine);
-        try engine.init(gpa, .{ .table = &table, .validation = cli.validation orelse false, .pipeline = .{ .sleep = sleep } });
+        try engine.init(gpa, .{ .table = &table, .validation = cli.validation orelse false, .pipeline = .{ .sleep = sleep, .air = false } });
         defer engine.deinit();
         if (n == 0) failures += try accessorTest(gpa, engine);
         failures += try determinism(gpa, engine, &table, cli, sleep);

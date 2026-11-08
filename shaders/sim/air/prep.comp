@@ -1,0 +1,109 @@
+#version 460
+// Air field, once per tick after coarsening, over the whole lattice:
+// - node word per cell: wall flag, which pull sources are walls, buoyancy;
+// - mass conservation when the obstacles change: a cell that became a wall
+//   (stone painted, water flowing in, a body moving) hands its air to its
+//   fluid neighbors through AIR_SOURCE, so flooding a sealed room compresses
+//   the air; a cell that became fluid starts at its neighbors' mean density
+//   and takes that mass from them;
+// - wakes the air tiles where walls changed or heat drives convection.
+// A lattice cell is a wall when solid + liquid pixels >= 2 of its 4.
+#include "common.glsl"
+#include "sim/air/air_api.glsl"
+#include "sim/air/lbm.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PC {
+    uint node_slot;
+    uint temp_slot;
+    uint dist0_slot;
+    uint dist1_slot;
+    ivec2 seam;
+    float buoyancy; // upward lattice force per temperature byte above ambient
+    uint ambient_temp;
+    uint first; // nonzero: initialize nodes, no conservation transfers
+    uint mark; // nonzero: mark air tiles
+} pc;
+
+bool wall_at(ivec2 c) {
+    ivec2 w = air_wrap(c);
+    return imageLoad(SOLID_COARSE, w).x + imageLoad(LIQUID_COARSE, w).x >= 2u;
+}
+
+bool open_at(ivec2 c) {
+    return air_inside(air_local(c, pc.seam)) && !wall_at(c);
+}
+
+const ivec2 N4[4] = ivec2[4](ivec2(1, 0), ivec2(0, 1), ivec2(-1, 0), ivec2(0, -1));
+
+void main() {
+    ivec2 c = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 local = air_local(c, pc.seam);
+    bool wall = wall_at(c);
+    uint node = wall ? NODE_WALL : 0u;
+    for (int i = 1; i < 9; i++) {
+        ivec2 n = local - LBM_E[i];
+        if (air_inside(n) && wall_at(c - LBM_E[i])) node |= 1u << uint(i);
+    }
+    float force = 0.0;
+    if (!wall) {
+        // Hot air rises; air at or below ambient gets no force (unpainted
+        // cells read as -40 C, and cold sinking is not modeled).
+        int dt = int(imageLoad(g_u8_images[pc.temp_slot], c).x) - int(pc.ambient_temp);
+        if (dt >= 2) force = -pc.buoyancy * float(dt);
+    }
+    node |= packHalf2x16(vec2(force, 0.0)) << 16;
+
+    uint old = imageLoad(g_uimages[pc.node_slot], c).x;
+    imageStore(g_uimages[pc.node_slot], c, uvec4(node));
+    if (pc.first != 0u) return;
+
+    bool was_wall = (old & NODE_WALL) != 0u;
+    if (pc.mark != 0u && (force != 0.0 || was_wall != wall)) air_mark_tile(uvec2(c) / AIR_TILE);
+    if (was_wall == wall) return;
+
+    if (wall) {
+        // Became a wall: push this cell's air into its fluid neighbors.
+        float rho = imageLoad(AIR_FIELD, c).x;
+        int k = 0;
+        for (int j = 0; j < 4; j++) k += open_at(c + N4[j]) ? 1 : 0;
+        if (k == 0) return;
+        int share = int(rho * float(AIR_MASS_ONE) / float(k));
+        for (int j = 0; j < 4; j++) {
+            if (open_at(c + N4[j])) imageAtomicAdd(AIR_SOURCE, air_wrap(c + N4[j]), uint(share));
+        }
+    } else {
+        // Became fluid: start at the neighbors' mean density, taken from them.
+        float sum = 0.0;
+        int k = 0;
+        for (int j = 0; j < 4; j++) {
+            ivec2 n = c + N4[j];
+            if (!open_at(n)) continue;
+            vec4 a = imageLoad(AIR_FIELD, air_wrap(n));
+            if (a.w != 0.0) continue; // was a wall last tick too
+            sum += a.x;
+            k++;
+        }
+        float rho = k > 0 ? sum / float(k) : 1.0;
+        // Debris thrown out by the blast: the air that fills in is not taken
+        // from the neighbors (that vacuum would throw the next layer, and so
+        // on). Mass is created; the particles stand in for the volume.
+        if (k > 0 && (old & NODE_BLASTED) == 0u) {
+            int share = int(rho * float(AIR_MASS_ONE) / float(k));
+            for (int j = 0; j < 4; j++) {
+                ivec2 n = c + N4[j];
+                if (!open_at(n)) continue;
+                if (imageLoad(AIR_FIELD, air_wrap(n)).w != 0.0) continue;
+                imageAtomicAdd(AIR_SOURCE, air_wrap(n), uint(-share));
+            }
+        }
+        for (int i = 0; i < 9; i++) {
+            float f = LBM_W[i] * rho;
+            g_air_dist[pc.dist0_slot].f[lbm_index(i, c)] = f;
+            g_air_dist[pc.dist1_slot].f[lbm_index(i, c)] = f;
+        }
+        // AIR_FIELD is left alone (neighbors read the old values in this
+        // dispatch); the LBM step rewrites it.
+    }
+}

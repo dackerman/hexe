@@ -31,6 +31,10 @@ pub const flag_translucent: u32 = 0x2;
 pub const flag_flammable: u32 = 0x4;
 pub const flag_emissive: u32 = 0x8;
 
+/// `MaterialGpu.air_flags` bits (word 24, bits 24-31; MATERIAL_AIR_* in
+/// common.glsl). Creation of a cell of this gas adds mass to the air field.
+pub const air_flag_feeds_air: u8 = 0x1;
+
 /// Movement ordering (see `sortKey`).
 pub const sort_key_air: u16 = 256;
 pub const sort_key_dense_base: u16 = 512;
@@ -86,8 +90,12 @@ pub const MaterialGpu = extern struct {
     reserved0: [5]u32 = @splat(0),
     // w16-23
     ramp: [ramp_max]u32,
-    // w24-31
-    reserved1: [8]u32 = @splat(0),
+    // w24: air (M5)
+    pressure_event: u16 = 0,
+    rubble: u8 = none,
+    air_flags: u8 = 0,
+    // w25-31
+    reserved1: [7]u32 = @splat(0),
 
     /// Placeholder for unused ids: static, never moves, magenta.
     pub const unused: MaterialGpu = pack(.{ .name = "", .phase = .static, .ramp = &.{0xff00ff} });
@@ -100,10 +108,10 @@ pub const MaterialGpu = extern struct {
 comptime {
     std.debug.assert(@sizeOf(MaterialGpu) == 128);
     const words = .{
-        .{ "phase", 0 },    .{ "density", 1 },    .{ "flags", 2 },           .{ "solver", 3 },
-        .{ "lifetime", 4 }, .{ "spawn_temp", 5 }, .{ "blast_threshold", 6 }, .{ "melt_at", 7 },
-        .{ "boil_at", 8 },  .{ "burn_ticks", 9 }, .{ "glow_to", 10 },        .{ "reserved0", 11 },
-        .{ "ramp", 16 },    .{ "reserved1", 24 },
+        .{ "phase", 0 },    .{ "density", 1 },         .{ "flags", 2 },           .{ "solver", 3 },
+        .{ "lifetime", 4 }, .{ "spawn_temp", 5 },      .{ "blast_threshold", 6 }, .{ "melt_at", 7 },
+        .{ "boil_at", 8 },  .{ "burn_ticks", 9 },      .{ "glow_to", 10 },        .{ "reserved0", 11 },
+        .{ "ramp", 16 },    .{ "pressure_event", 24 }, .{ "reserved1", 25 },
     };
     for (words) |w| std.debug.assert(@offsetOf(MaterialGpu, w[0]) == w[1] * 4);
 }
@@ -154,6 +162,13 @@ pub const MaterialDesc = struct {
     blast_threshold: u16 = 0,
     blast_response: BlastResponse = .none,
     drag: u8 = 0,
+    /// Air overpressure (0.001 of ambient density) that appends a pressure
+    /// event; 0 = never.
+    pressure_event: u16 = 0,
+    /// Material that blast breakage leaves behind; `none` = air.
+    rubble: u8 = none,
+    /// Creation adds mass to the air field (steam).
+    feeds_air: bool = false,
     emissive: u8 = 0,
     glow: ?Glow = null,
     translucent: bool = false,
@@ -242,6 +257,9 @@ pub fn pack(d: MaterialDesc) MaterialGpu {
         .glow_from = if (d.glow) |g| tempByte(g.from) else 255,
         .glow_to = if (d.glow) |g| tempByte(g.to) else 255,
         .ramp = ramp,
+        .pressure_event = d.pressure_event,
+        .rubble = d.rubble,
+        .air_flags = if (d.feeds_air) air_flag_feeds_air else 0,
     };
 }
 

@@ -1,0 +1,144 @@
+#version 460
+// One D2Q9 lattice Boltzmann step, fused pull-stream + BGK collision, over
+// the active air tiles (one 16x16 workgroup per tile, indirect over
+// AIR_TILE_LIST) or every tile (fallback). Reads `src`, writes `dst`
+// (ping-pong). Boundaries:
+// - walls (node bits, prep.comp): axis links bounce back; a diagonal link
+//   whose source is a wall reflects specularly off a flat wall (the
+//   population that left the axis neighbor toward the wall, mirrored) and
+//   bounces back at corners. Blended with plain bounce-back by `slip`
+//   (1 = free slip, 0 = no slip). The specular partners swap orphaned
+//   populations pairwise, so mass is conserved exactly either way
+//   (docs/decisions/71-air-boundaries.md). Free slip matters at this
+//   resolution: a 3 px corridor is one lattice cell wide, and no-slip walls
+//   on both sides stop a pressure pulse within a few cells;
+// - outside the window (past the seam) is ambient air at rest, plus a
+//   sponge band that relaxes toward ambient density: the window edges are
+//   open and drain pressure (docs/decisions/71-air-boundaries.md).
+// Stability: density and |u| are clamped before the equilibrium (Mach
+// clamp), and a cell whose post-collision populations go negative falls
+// back to equilibrium. A tile with any motion marks itself and its
+// neighbors awake.
+#include "common.glsl"
+#include "sim/air/air_api.glsl"
+#include "sim/air/lbm.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PC {
+    uint src_slot;
+    uint dst_slot;
+    uint node_slot;
+    uint flags; // LBM_*
+    float omega; // 1 / tau
+    float rho_min;
+    float rho_max;
+    float u_max; // lattice units (0.3 c_s)
+    float eps_u; // below this |u| everywhere, a tile is at rest
+    float px_per_tick; // lattice velocity -> pixels per tick (2 * steps)
+    ivec2 seam;
+    float sponge_width; // lattice cells
+    float sponge_strength; // relaxation at the very edge, 0-1
+    float slip; // wall slip, 0 = bounce-back (no slip), 1 = specular (free slip)
+} pc;
+
+#define LBM_WRITE_FIELD 1u
+#define LBM_SOURCE 2u
+#define LBM_ALL_TILES 4u
+#define LBM_MARK 8u
+
+shared bool s_moving;
+
+void main() {
+    if (gl_LocalInvocationIndex == 0u) s_moving = false;
+    barrier();
+
+    uvec2 tile;
+    if ((pc.flags & LBM_ALL_TILES) != 0u) {
+        tile = gl_WorkGroupID.xy;
+    } else {
+        uint packed = AIR_TILE_LIST.tiles[gl_WorkGroupID.x];
+        tile = uvec2(packed & 0xffffu, packed >> 16);
+    }
+    ivec2 c = ivec2(tile * AIR_TILE + gl_LocalInvocationID.xy);
+    uint node = imageLoad(g_uimages[pc.node_slot], c).x;
+
+    if ((node & NODE_WALL) != 0u) {
+        if ((pc.flags & LBM_WRITE_FIELD) != 0u) imageStore(AIR_FIELD, c, vec4(1.0, 0.0, 0.0, 1.0));
+    } else {
+        ivec2 local = air_local(c, pc.seam);
+        float f[9];
+        f[0] = g_air_dist[pc.src_slot].f[lbm_index(0, c)];
+        for (int i = 1; i < 9; i++) {
+            if ((node & (1u << uint(i))) != 0u) {
+                float bb = g_air_dist[pc.src_slot].f[lbm_index(LBM_OPP[i], c)];
+                f[i] = bb;
+                if (i >= 5 && pc.slip > 0.0) {
+                    ivec2 e = LBM_E[i];
+                    bool a_wall = (node & (1u << uint(e.x > 0 ? 1 : 3))) != 0u; // c - (e.x, 0)
+                    bool b_wall = (node & (1u << uint(e.y > 0 ? 2 : 4))) != 0u; // c - (0, e.y)
+                    float sp = bb;
+                    if (b_wall && !a_wall && air_inside(local - ivec2(e.x, 0))) {
+                        sp = g_air_dist[pc.src_slot].f[lbm_index(lbm_diag(e.x, -e.y), air_wrap(c - ivec2(e.x, 0)))];
+                    } else if (a_wall && !b_wall && air_inside(local - ivec2(0, e.y))) {
+                        sp = g_air_dist[pc.src_slot].f[lbm_index(lbm_diag(-e.x, e.y), air_wrap(c - ivec2(0, e.y)))];
+                    }
+                    f[i] = mix(bb, sp, pc.slip);
+                }
+            } else if (!air_inside(local - LBM_E[i])) {
+                f[i] = LBM_W[i];
+            } else {
+                f[i] = g_air_dist[pc.src_slot].f[lbm_index(i, air_wrap(c - LBM_E[i]))];
+            }
+        }
+        bool moving = false;
+        if ((pc.flags & LBM_SOURCE) != 0u) {
+            uint s = imageLoad(AIR_SOURCE, c).x;
+            if (s != 0u) {
+                imageStore(AIR_SOURCE, c, uvec4(0u));
+                float dm = float(int(s)) / float(AIR_MASS_ONE);
+                for (int i = 0; i < 9; i++) f[i] += LBM_W[i] * dm;
+                moving = true;
+            }
+        }
+
+        float rho = 0.0;
+        vec2 m = vec2(0.0);
+        for (int i = 0; i < 9; i++) {
+            rho += f[i];
+            m += vec2(LBM_E[i]) * f[i];
+        }
+        vec2 force = vec2(0.0, unpackHalf2x16(node >> 16).x);
+        float rho_c = clamp(rho, pc.rho_min, pc.rho_max);
+        // Velocity-shift forcing: equilibrium at u + tau F / rho.
+        vec2 u = (m + force / pc.omega) / rho_c;
+        float speed = length(u);
+        if (speed > pc.u_max) u *= pc.u_max / speed;
+        moving = moving || speed > pc.eps_u || rho_c != rho;
+
+        float edge = float(min(min(local.x, local.y), min(int(AIR_SIZE) - 1 - local.x, int(AIR_SIZE) - 1 - local.y)));
+        float sponge = edge < pc.sponge_width ? pc.sponge_strength * pow((pc.sponge_width - edge) / pc.sponge_width, 2.0) : 0.0;
+
+        float o[9];
+        bool negative = false;
+        for (int i = 0; i < 9; i++) {
+            float feq = lbm_feq(i, rho_c, u);
+            o[i] = f[i] + pc.omega * (feq - f[i]);
+            if (sponge > 0.0) o[i] = mix(o[i], lbm_feq(i, 1.0, u * (1.0 - sponge)), sponge);
+            negative = negative || o[i] < 0.0;
+        }
+        if (negative) {
+            for (int i = 0; i < 9; i++) o[i] = max(lbm_feq(i, rho_c, u), 0.0);
+        }
+        for (int i = 0; i < 9; i++) g_air_dist[pc.dst_slot].f[lbm_index(i, c)] = o[i];
+
+        if ((pc.flags & LBM_WRITE_FIELD) != 0u) {
+            vec2 v = (m + 0.5 * force) / rho_c;
+            imageStore(AIR_FIELD, c, vec4(rho, v * pc.px_per_tick, 0.0));
+        }
+        if (moving) s_moving = true;
+    }
+
+    barrier();
+    if (gl_LocalInvocationIndex == 0u && s_moving && (pc.flags & LBM_MARK) != 0u) air_mark_tile(tile);
+}

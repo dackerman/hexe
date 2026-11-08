@@ -1,0 +1,33 @@
+#version 460
+// Add one step's share of an injection to the distributions the next LBM
+// step pulls from: delta f_i = w_i (drho + 3 e_i . dm), which adds exactly
+// drho of mass and dm of momentum. Density is capped at rho_max.
+#include "common.glsl"
+#include "sim/air/air_api.glsl"
+#include "sim/air/lbm.glsl"
+#include "sim/air/inject.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+void main() {
+    if (any(greaterThanEqual(gl_GlobalInvocationID.xy, pc.size))) return;
+    Injection j = g_injections[pc.ring_slot].items[pc.index];
+    ivec2 c = pc.origin + ivec2(gl_GlobalInvocationID.xy);
+    vec2 dir;
+    uint weight = inject_weight(j, c, dir);
+    uint total = g_injection_counts[pc.counts_slot].weights[pc.counter];
+    if (weight == 0u || total == 0u) return;
+    float share = float(weight) / float(total);
+    ivec2 w = air_wrap(c);
+    float f[9];
+    float rho = 0.0;
+    for (int i = 0; i < 9; i++) {
+        f[i] = g_air_dist[pc.dist_slot].f[lbm_index(i, w)];
+        rho += f[i];
+    }
+    float drho = clamp(j.mass * share, -0.5 * rho, max(pc.rho_max - rho, 0.0));
+    vec2 dm = dir * (j.momentum * share);
+    for (int i = 0; i < 9; i++) {
+        g_air_dist[pc.dist_slot].f[lbm_index(i, w)] = f[i] + LBM_W[i] * (drho + 3.0 * dot(vec2(LBM_E[i]), dm));
+    }
+}

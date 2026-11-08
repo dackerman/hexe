@@ -7,6 +7,7 @@ const std = @import("std");
 const cell = @import("../sim/cell.zig");
 const materials = @import("../sim/materials.zig");
 const commands = @import("../sim/commands.zig");
+const air = @import("../sim/air_abi.zig");
 
 // ---- descriptor set 0 (src/gpu/descriptors.zig) ----
 pub const binding_storage_images = 0;
@@ -17,6 +18,11 @@ pub const binding_samplers = 3;
 /// Fixed storage image slots (shared world images).
 pub const slot_img_cells = 0;
 pub const slot_img_owner = 1;
+pub const slot_img_solid_coarse = 8;
+pub const slot_img_liquid_coarse = 9;
+pub const slot_img_air = 10;
+pub const slot_img_air_source = 11;
+pub const slot_img_debug_overlay = 12;
 /// First storage image slot handed out by `Descriptors.allocImageSlot`.
 pub const slot_img_dynamic_base = 16;
 
@@ -25,6 +31,10 @@ pub const slot_buf_materials = 0;
 pub const slot_buf_tile_marks = 1;
 pub const slot_buf_tile_list = 2;
 pub const slot_buf_commands = 3;
+pub const slot_buf_blast_ejects = 20;
+pub const slot_buf_air_events = 21;
+pub const slot_buf_air_tile_marks = 22;
+pub const slot_buf_air_tile_list = 23;
 /// First storage buffer slot handed out by `Descriptors.allocBufferSlot`.
 pub const slot_buf_dynamic_base = 32;
 
@@ -70,6 +80,15 @@ pub const mirrors = .{
     .{ "SLOT_IMG_CELLS", slot_img_cells },
     .{ "SLOT_IMG_OWNER", slot_img_owner },
     .{ "SLOT_IMG_DYNAMIC_BASE", slot_img_dynamic_base },
+    .{ "SLOT_IMG_SOLID_COARSE", slot_img_solid_coarse },
+    .{ "SLOT_IMG_LIQUID_COARSE", slot_img_liquid_coarse },
+    .{ "SLOT_IMG_AIR", slot_img_air },
+    .{ "SLOT_IMG_AIR_SOURCE", slot_img_air_source },
+    .{ "SLOT_IMG_DEBUG_OVERLAY", slot_img_debug_overlay },
+    .{ "SLOT_BUF_BLAST_EJECTS", slot_buf_blast_ejects },
+    .{ "SLOT_BUF_AIR_EVENTS", slot_buf_air_events },
+    .{ "SLOT_BUF_AIR_TILE_MARKS", slot_buf_air_tile_marks },
+    .{ "SLOT_BUF_AIR_TILE_LIST", slot_buf_air_tile_list },
     .{ "SLOT_BUF_MATERIALS", slot_buf_materials },
     .{ "SLOT_BUF_TILE_MARKS", slot_buf_tile_marks },
     .{ "SLOT_BUF_TILE_LIST", slot_buf_tile_list },
@@ -106,6 +125,28 @@ pub const mirrors = .{
     .{ "CMD_COVERAGE_SHIFT", commands.coverage_shift },
     .{ "CMD_WORDS", @sizeOf(commands.CommandGpu) / 4 },
     .{ "SALT_SPAWN_VARIANT", cell.salt_spawn_variant },
+    .{ "CMD_INJECT_PRESSURE", @backingInt(commands.Kind.inject_pressure) },
+    .{ "BLAST_NONE", @backingInt(materials.BlastResponse.none) },
+    .{ "BLAST_FLY", @backingInt(materials.BlastResponse.fly) },
+    .{ "BLAST_CHIP", @backingInt(materials.BlastResponse.chip) },
+    .{ "BLAST_BREAK", @backingInt(materials.BlastResponse.@"break") },
+    .{ "MATERIAL_AIR_FEEDS_AIR", materials.air_flag_feeds_air },
+    .{ "AIR_SIZE", air.size },
+    .{ "AIR_MASK", air.size - 1 },
+    .{ "AIR_TILE", air.tile },
+    .{ "AIR_TILES_PER_SIDE", air.tiles_per_side },
+    .{ "AIR_WAKE_TICKS", air.wake_ticks },
+    .{ "AIR_TILE_ACTIVE_OFFSET", air.tile_active_offset },
+    .{ "AIR_MASS_ONE", air.mass_one },
+    .{ "AIR_GAS_CELL_MASS", air.gas_cell_mass },
+    .{ "BLAST_EJECT_WORDS", @sizeOf(air.BlastEject) / 4 },
+    .{ "BLAST_EJECT_CAPACITY", air.blast_eject_capacity },
+    .{ "BLAST_KIND_FLY", @backingInt(air.BlastKind.fly) },
+    .{ "BLAST_KIND_CHIP", @backingInt(air.BlastKind.chip) },
+    .{ "BLAST_KIND_BREAK", @backingInt(air.BlastKind.@"break") },
+    .{ "AIR_EVENT_WORDS", @sizeOf(air.AirEvent) / 4 },
+    .{ "AIR_EVENT_CAPACITY", air.event_capacity },
+    .{ "AIR_EVENT_PRESSURE", @backingInt(air.EventKind.pressure) },
 };
 
 pub const Define = struct { name: []const u8, value: u64 };

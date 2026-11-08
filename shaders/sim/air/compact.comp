@@ -1,0 +1,27 @@
+#version 460
+// Air tile compaction, once per tick after prep and injection marking: every
+// air tile with a nonzero wake countdown goes on this tick's list (LBM,
+// effects and next tick's gas advection dispatch over it) and the countdown
+// is decremented. Same scheme as the grid's activity tiles
+// (docs/decisions/29-activity-tiles.md). The CPU zeroes the count first.
+#include "common.glsl"
+#include "sim/air/air_api.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PC {
+    uint all_active; // nonzero: every tile, ignore the marks (fallback)
+} pc;
+
+void main() {
+    uvec2 t = gl_GlobalInvocationID.xy;
+    uint i = air_tile_index(t);
+    uint wake = uint(AIR_TILE_MARKS[i]);
+    bool is_active = pc.all_active != 0u || wake != 0u;
+    AIR_TILE_MARKS[i] = uint8_t(wake > 0u ? wake - 1u : 0u);
+    AIR_TILE_MARKS[AIR_TILE_ACTIVE_OFFSET + i] = uint8_t(is_active ? 1 : 0);
+    if (is_active) {
+        uint slot = atomicAdd(AIR_TILE_LIST.dispatch_x, 1u);
+        AIR_TILE_LIST.tiles[slot] = t.x | (t.y << 16);
+    }
+}
