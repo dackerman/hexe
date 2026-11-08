@@ -244,7 +244,8 @@ pub const Renderer = struct {
             self.light_bufs[i] = try gpu.Buffer.initSlotted(ctx, max_lights * @sizeOf(LightGpu), .{}, .cpu_to_gpu);
             self.quad_bufs[i] = try gpu.Buffer.initSlotted(ctx, max_quads * @sizeOf(sprites.QuadGpu), .{}, .cpu_to_gpu);
         }
-        self.skyline = try gpu.Buffer.initSlotted(ctx, lighting.max_region * 4, .{}, .gpu_only);
+        // Per region column: skyline, then terrain surface (skyline.comp).
+        self.skyline = try gpu.Buffer.initSlotted(ctx, lighting.max_region * 2 * 4, .{}, .gpu_only);
 
         const W = cell.world_size;
         const ov = gpu.constants.debug_overlay_size;
@@ -559,12 +560,16 @@ pub const Renderer = struct {
         // ---- light scene ----
         const t_build = timer.begin("light_build");
         ctx.vkd.cmdBindPipeline(cmd, .compute, self.p_skyline);
-        gpu.pipelines.push(ctx, cmd, extern struct { f: u32 }{ .f = frame_slot });
+        gpu.pipelines.push(ctx, cmd, extern struct { f: u32, pass: u32 }{ .f = frame_slot, .pass = 0 });
         ctx.vkd.cmdDispatch(cmd, p.size[0], 1, 1);
         ctx.vkd.cmdBindPipeline(cmd, .compute, self.p_scene);
         gpu.pipelines.push(ctx, cmd, extern struct { f: u32 }{ .f = frame_slot });
         ctx.vkd.cmdDispatch(cmd, groups(p.size[0]), groups(p.size[1]), 1);
         computeBarrier(ctx, cmd);
+        // Terrain surface from the skyline (read by world.frag and sprites).
+        ctx.vkd.cmdBindPipeline(cmd, .compute, self.p_skyline);
+        gpu.pipelines.push(ctx, cmd, extern struct { f: u32, pass: u32 }{ .f = frame_slot, .pass = 1 });
+        ctx.vkd.cmdDispatch(cmd, (p.size[0] + 63) / 64, 1, 1);
         const top_mip = if (s.light_mode == .cascades) p.maxMip() else @max(p.shift, 1);
         ctx.vkd.cmdBindPipeline(cmd, .compute, self.p_mip);
         var level: u32 = 1;

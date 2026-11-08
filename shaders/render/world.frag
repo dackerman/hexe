@@ -66,9 +66,10 @@ vec3 sky_color(ivec2 wu) {
     return mix(FR.sky.rgb * vec3(0.5, 0.6, 0.95), FR.sky.rgb * vec3(1.0, 0.96, 0.9), t);
 }
 
-// The sky shows behind air only above the terrain: open to the sky here and
-// 24 px to either side, so narrow shafts show the back wall (they still let
-// sky light in through the cascades).
+// The sky shows behind air only above the terrain surface (surface_at:
+// the skyline without narrow objects and narrow shafts), so caves and
+// narrow shafts show the back wall (shafts still let sky light in through
+// the cascades) and small objects in the open show sky beside them.
 vec3 background(ivec2 wu, vec3 light) {
     if ((FR.flags & RFRAME_SKY) != 0u && wu.y < surface_at(wu.x)) return sky_color(wu);
     return back_wall(wu) * light * FR.tuning2.x;

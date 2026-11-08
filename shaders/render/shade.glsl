@@ -27,10 +27,14 @@ vec3 irradiance_at(ivec2 wu) {
     return textureLod(sampler2D(g_textures[FR.irradiance_tex], g_samplers[SAMPLER_LINEAR_CLAMP]), rp / size, 0.0).rgb * FR.tuning2.z;
 }
 
-// Terrain surface height: the skyline here and 24 px to either side, so a
-// narrow shaft does not carry the surface down into the rock.
+// Terrain surface height for the sky-versus-back-wall choice and ambient:
+// the skyline with features narrower than 49 columns removed (opening, then
+// closing; skyline.comp pass 1), so a small object standing on the floor
+// does not lift the surface of its neighbours, and a narrow shaft does not
+// carry the surface down into the rock.
 int surface_at(int wx) {
-    return min(skyline_at(wx), min(skyline_at(wx - 24), skyline_at(wx + 24)));
+    int col = clamp(wx - FR.region_origin.x, 0, int(FR.region_size.x) - 1);
+    return g_ints[FR.skyline_slot].v[int(FR.region_size.x) + col];
 }
 
 // Ambient light: the surface value near and above the terrain surface,
