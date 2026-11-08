@@ -21,6 +21,7 @@ const shader_sources = [_][]const u8{
     "sim/coarsen.comp",
     "sim/air/init.comp",
     "sim/air/prep.comp",
+    "sim/air/pending.comp",
     "sim/air/inject_count.comp",
     "sim/air/inject_apply.comp",
     "sim/air/compact.comp",

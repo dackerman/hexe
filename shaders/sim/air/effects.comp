@@ -25,6 +25,10 @@
 // Pressure events: materials with pressure_event > 0 whose local
 // overpressure (0.001 ambient) exceeds it append to AIR_EVENTS, at most one
 // per lattice cell per tick.
+// Peak loads (diag buffer, Air.Stats): the highest load on a pixel with a
+// blast threshold, in thousandths of that threshold, loose (fly) and solid,
+// whether or not it was exceeded (decision 107: harnesses assert a margin,
+// not just zero ejects).
 // Changed pixels mark their grid tile; damage keeps the air tile awake.
 // Particle-backed and body-owned pixels are left to their owners.
 #include "common.glsl"
@@ -47,6 +51,7 @@ layout(push_constant) uniform PC {
     float eject_push; // pixels per tick per blast unit of excess
     float eject_max; // pixels per tick
     float wall_scale; // blast units per density difference per cell, wall load
+    uint diag_slot; // {peak fly load, peak solid load}, thousandths of the threshold
 } pc;
 
 #define EFFECTS_ALL_TILES 1u
@@ -56,11 +61,13 @@ layout(push_constant) uniform PC {
 
 HEXE_BUFFER(EjectBlock, , uint count; uint capacity; uint dropped; uint tick; uint words[];, g_ejects);
 HEXE_BUFFER(AirEventBlock, , uint count; uint capacity; uint dropped; uint tick; uint words[];, g_air_events);
+HEXE_BUFFER(AirDiagBlock, , uint peak[2];, g_air_diag);
 #define EJECTS g_ejects[SLOT_BUF_BLAST_EJECTS]
 #define AIR_EVENTS g_air_events[SLOT_BUF_AIR_EVENTS]
 
 shared bool s_changed;
 shared bool s_damaged;
+shared uint s_peak[2];
 
 bool fluid_at(ivec2 c) {
     if (!air_inside(air_local(c, pc.seam))) return false;
@@ -152,6 +159,8 @@ void main() {
     if (gl_LocalInvocationIndex == 0u) {
         s_changed = false;
         s_damaged = false;
+        s_peak[0] = 0u;
+        s_peak[1] = 0u;
     }
     barrier();
 
@@ -213,6 +222,7 @@ void main() {
             uint resp = mt.blast_response;
             bool fly = resp == BLAST_FLY;
             float units = fly ? units_f : units_w;
+            if (thr != 0u) atomicMax(s_peak[fly ? 0 : 1], uint(min(units / float(thr), 1000.0) * 1000.0));
             if (!blast || thr == 0u || units <= float(thr)) continue;
             float excess = units - float(thr);
             vec2 g = fly ? gf : gw;
@@ -260,5 +270,7 @@ void main() {
     if (gl_LocalInvocationIndex == 0u) {
         if (s_changed && (pc.flags & EFFECTS_MARK) != 0u) mark_tile_and_neighbors(tile);
         if (s_damaged) air_mark_tile(tile);
+        if (s_peak[0] != 0u) atomicMax(g_air_diag[pc.diag_slot].peak[0], s_peak[0]);
+        if (s_peak[1] != 0u) atomicMax(g_air_diag[pc.diag_slot].peak[1], s_peak[1]);
     }
 }

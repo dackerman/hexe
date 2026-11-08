@@ -6,7 +6,9 @@
 // (mode 0: red = overpressure, blue = underpressure, |rho - 1| *
 // pressure_gain) or OVERLAY_AIR_VELOCITY (mode 1: green = speed, |v| px/tick
 // * speed_gain, hue from the direction). Walls faint grey, active air tile
-// edges yellow. Alpha = intensity (the renderer alpha-blends).
+// edges yellow; in pressure mode, air waiting in the soft-wall pending store
+// (decision 107) green, |pending| * pressure_gain / 4. Alpha = intensity
+// (the renderer alpha-blends).
 #define HEXE_WANT_DEBUG_OVERLAY
 #include "common.glsl"
 #include "sim/air/air_api.glsl"
@@ -17,6 +19,7 @@ layout(push_constant) uniform PC {
     float pressure_gain;
     float speed_gain;
     uint mode; // 0 pressure, 1 velocity
+    uint pending_slot; // r32ui (int32) pending store
 } pc;
 
 void main() {
@@ -35,6 +38,10 @@ void main() {
             // Direction tint so flows read: hue from the angle.
             if (sp > 0.02) col += 0.35 * min(sp, 1.0) * (0.5 + 0.5 * vec3(cos(atan(a.z, a.y)), 0.0, sin(atan(a.z, a.y))));
         }
+    }
+    if (pc.mode == 0u) {
+        float pend = float(int(imageLoad(g_uimages[pc.pending_slot], c).x)) / float(AIR_MASS_ONE);
+        col.g += abs(pend) * pc.pressure_gain * 0.25;
     }
     uint t = air_tile_index(uvec2(c) / AIR_TILE);
     bool awake = uint(AIR_TILE_MARKS[AIR_TILE_ACTIVE_OFFSET + t]) != 0u;

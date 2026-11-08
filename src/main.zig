@@ -127,7 +127,7 @@ fn usage() void {
         \\  --center X,Y            world pixel at the view center
         \\  --scene NAME            empty|sandbox|determinism|fire_demo|bench_static|bench_active|bench_mixed|bench_fire|noise|lighting
         \\                          particles_demo|bench_particles|bench_particles_rain|determinism_commands
-        \\                          air_demo|bench_air|bodies_crate|bodies_slab|bodies_beam|bodies_water|bodies_bench
+        \\                          air_demo|air_flood|bench_air|bodies_crate|bodies_slab|bodies_beam|bodies_water|bodies_bench
         \\  --seed N                scene seed (default 1)
         \\  --profile PATH          per-tick per-pass GPU ms as CSV (tick,pass,ms)
         \\  --no-sleep              disable activity tiles (simulate every tile)

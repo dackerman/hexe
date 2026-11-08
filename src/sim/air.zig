@@ -7,6 +7,9 @@
 //! Per tick, after the grid substeps and coarsening (`record`):
 //!   prep        node words (walls, buoyancy), mass conservation when walls
 //!               change, wakes tiles                              full window
+//!   pending     lets the mass prep booked (walls that changed, gas
+//!               sources) into the air at a bounded rate, decision 107
+//!                                                                full window
 //!   inject      explosion / pressure sources from CMD_INJECT_PRESSURE
 //!   compact     active air tiles -> AIR_TILE_LIST (indirect)
 //!   lbm x N     N = `params.steps` stream+collide steps          active tiles
@@ -23,7 +26,7 @@
 //!   `events()` pressure events of the last completed frame
 //!   `stats` per-frame counts (active tiles, ejects, events)
 //! GPU ABI for other passes: shaders/sim/air/air_api.glsl, common.glsl
-//! "Air field" section, src/sim/air_abi.zig. Decisions 70-79.
+//! "Air field" section, src/sim/air_abi.zig. Decisions 70-79, 107, 117.
 const std = @import("std");
 const gpu = @import("../gpu/gpu.zig");
 const vk = gpu.vk;
@@ -39,7 +42,7 @@ const frames = pipeline_mod.frames_in_flight;
 const max_ticks = pipeline_mod.max_ticks_per_frame;
 pub const max_injections = 64;
 
-const P = enum { init, prep, inject_count, inject_apply, compact, lbm, effects, gas, overlay, sample, downsample };
+const P = enum { init, prep, pending, inject_count, inject_apply, compact, lbm, effects, gas, overlay, sample, downsample };
 const pipe_count = @typeInfo(P).@"enum".field_names.len;
 
 /// Runtime-tunable parameters (docs/decisions/72-air-lbm-parameters.md).
@@ -78,6 +81,17 @@ pub const Params = struct {
     wall_search: i32 = 3,
     /// Gas advection: swap probability per (pixel per tick) of air speed.
     gas_scale: f32 = 0.5,
+    /// Pending store (docs/decisions/107-air-soft-wall-compression.md): the
+    /// air a new wall covers, the debt of a wall that opens and the gas mass
+    /// reactions add or remove enter the field at most this fraction of a
+    /// cell of ambient air per lattice cell per tick (the rest diffuses on
+    /// through the open cells). 0: off; wall changes move no air at all and
+    /// sources apply at once (decision 117's behavior for liquid walls).
+    pending_cap: f32 = 1.0 / 128.0,
+    /// A cell moves pending air only after keeping its wall state this many
+    /// ticks (at most 7): a wall that flickers books +rho, -rho and nothing
+    /// reaches the air.
+    pending_settle: u32 = 4,
     /// Overlay gains.
     overlay_pressure_gain: f32 = 4.0,
     overlay_speed_gain: f32 = 1.5,
@@ -113,6 +127,11 @@ pub const Stats = struct {
     ejects_dropped: u32 = 0,
     events: u32 = 0,
     events_dropped: u32 = 0,
+    /// Highest blast load the effects pass saw on a loose (fly) / solid
+    /// pixel over the frame, in thousandths of that pixel's
+    /// blast_threshold (1000 = at the threshold; decision 107).
+    peak_fly_load: u32 = 0,
+    peak_solid_load: u32 = 0,
     first_tick: u32 = 0,
     ticks: u32 = 0,
 };
@@ -165,10 +184,16 @@ pub const Air = struct {
     node: gpu.Image,
     field_image: gpu.Image,
     source: gpu.Image,
+    /// Air displaced by soft walls, not yet released (int32 fixed point,
+    /// ping-pong; pending.comp). `pending[pending_parity]` is current.
+    pending: [2]gpu.Image,
+    pending_parity: u1 = 0,
     tile_marks: gpu.Buffer,
     tile_list: gpu.Buffer,
     ejects: gpu.Buffer,
     events_buf: gpu.Buffer,
+    /// {peak fly load, peak solid load} of the tick (effects.comp).
+    diag: gpu.Buffer,
     inject_ring: gpu.Buffer,
     inject_counts: gpu.Buffer,
     readback: [frames]Readback,
@@ -197,6 +222,9 @@ pub const Air = struct {
     /// Totals since init (harness, bench).
     total_ejects: u64 = 0,
     total_events: u64 = 0,
+    /// Highest `Stats.peak_*_load` since init.
+    max_fly_load: u32 = 0,
+    max_solid_load: u32 = 0,
 
     pub fn init(ctx: *gpu.Context, cfg: pipeline_mod.Config, alloc: std.mem.Allocator) !Air {
         var self: Air = undefined;
@@ -209,6 +237,7 @@ pub const Air = struct {
         self.field_readback = false;
         self.temp_slot = 0;
         self.parity = 0;
+        self.pending_parity = 0;
         self.first = true;
         self.active_len = 0;
         self.dropped_injections = 0;
@@ -221,6 +250,8 @@ pub const Air = struct {
         self.stats = .{};
         self.total_ejects = 0;
         self.total_events = 0;
+        self.max_fly_load = 0;
+        self.max_solid_load = 0;
 
         self.field_cpu = try alloc.alloc(abi.FieldCell, abi.field_size * abi.field_size);
         errdefer alloc.free(self.field_cpu);
@@ -237,6 +268,10 @@ pub const Air = struct {
         errdefer self.field_image.deinit(ctx);
         self.source = try makeImage(ctx, .r32_uint, gpu.constants.slot_img_air_source);
         errdefer self.source.deinit(ctx);
+        self.pending[0] = try makeImage(ctx, .r32_uint, try ctx.descriptors.allocImageSlot());
+        errdefer self.pending[0].deinit(ctx);
+        self.pending[1] = try makeImage(ctx, .r32_uint, try ctx.descriptors.allocImageSlot());
+        errdefer self.pending[1].deinit(ctx);
 
         self.tile_marks = try gpu.Buffer.init(ctx, abi.tile_mark_bytes, .{ .storage_buffer = true, .transfer_dst = true }, .gpu_only);
         errdefer self.tile_marks.deinit(ctx);
@@ -250,6 +285,8 @@ pub const Air = struct {
         self.events_buf = try gpu.Buffer.init(ctx, events_stride, .{ .storage_buffer = true, .transfer_dst = true, .transfer_src = true }, .gpu_only);
         errdefer self.events_buf.deinit(ctx);
         self.events_buf.register(ctx, gpu.constants.slot_buf_air_events);
+        self.diag = try gpu.Buffer.initSlotted(ctx, 16, .{ .transfer_dst = true, .transfer_src = true }, .gpu_only);
+        errdefer self.diag.deinit(ctx);
 
         self.inject_ring = try gpu.Buffer.initSlotted(ctx, frames * max_ticks * max_injections * @sizeOf(InjectionGpu), .{}, .cpu_to_gpu);
         errdefer self.inject_ring.deinit(ctx);
@@ -264,10 +301,10 @@ pub const Air = struct {
         }
 
         const codes = [pipe_count]gpu.pipelines.Spirv{
-            &shaders.sim_air_init_comp,         &shaders.sim_air_prep_comp,       &shaders.sim_air_inject_count_comp,
-            &shaders.sim_air_inject_apply_comp, &shaders.sim_air_compact_comp,    &shaders.sim_air_lbm_comp,
-            &shaders.sim_air_effects_comp,      &shaders.sim_air_gas_advect_comp, &shaders.sim_air_overlay_comp,
-            &shaders.sim_air_sample_comp,       &shaders.sim_air_downsample_comp,
+            &shaders.sim_air_init_comp,         &shaders.sim_air_prep_comp,         &shaders.sim_air_pending_comp,
+            &shaders.sim_air_inject_count_comp, &shaders.sim_air_inject_apply_comp, &shaders.sim_air_compact_comp,
+            &shaders.sim_air_lbm_comp,          &shaders.sim_air_effects_comp,      &shaders.sim_air_gas_advect_comp,
+            &shaders.sim_air_overlay_comp,      &shaders.sim_air_sample_comp,       &shaders.sim_air_downsample_comp,
         };
         var built: usize = 0;
         errdefer for (self.pipes[0..built]) |pl| gpu.pipelines.destroy(ctx, pl);
@@ -325,10 +362,13 @@ pub const Air = struct {
         for (&self.readback) |*r| deinitReadback(ctx, r);
         self.inject_counts.deinit(ctx);
         self.inject_ring.deinit(ctx);
+        self.diag.deinit(ctx);
         self.events_buf.deinit(ctx);
         self.ejects.deinit(ctx);
         self.tile_list.deinit(ctx);
         self.tile_marks.deinit(ctx);
+        self.pending[1].deinit(ctx);
+        self.pending[0].deinit(ctx);
         self.source.deinit(ctx);
         self.field_image.deinit(ctx);
         self.node.deinit(ctx);
@@ -401,6 +441,8 @@ pub const Air = struct {
             const ej: abi.ListHeader = .{ .count = words[0], .capacity = words[1], .dropped = words[2], .tick = words[3] };
             const ev: abi.ListHeader = .{ .count = words[4], .capacity = words[5], .dropped = words[6], .tick = words[7] };
             st.active_tiles = words[8];
+            st.peak_fly_load = @max(st.peak_fly_load, words[9]);
+            st.peak_solid_load = @max(st.peak_solid_load, words[10]);
             st.ejects += @min(ej.count, abi.blast_eject_capacity);
             st.ejects_dropped += ej.dropped;
             const n_ev = @min(ev.count, abi.event_capacity);
@@ -417,6 +459,8 @@ pub const Air = struct {
         self.stats = st;
         self.total_ejects += st.ejects;
         self.total_events += st.events;
+        self.max_fly_load = @max(self.max_fly_load, st.peak_fly_load);
+        self.max_solid_load = @max(self.max_solid_load, st.peak_solid_load);
         self.sample_len = r.samples;
         self.sample_tick = r.first_tick + r.ticks - 1;
         const res = r.sample_res.typed(abi.Sample);
@@ -590,10 +634,12 @@ pub const Air = struct {
         const args = [4]u32{ 0, 1, 1, 0 };
         ctx.vkd.cmdUpdateBuffer(cmd, self.tile_list.handle, 0, @sizeOf(@TypeOf(args)), &args);
         ctx.vkd.cmdFillBuffer(cmd, self.inject_counts.handle, 0, vk.WHOLE_SIZE, 0);
+        ctx.vkd.cmdFillBuffer(cmd, self.diag.handle, 0, vk.WHOLE_SIZE, 0);
         gpu.memory.memoryBarrier(ctx, cmd, .{ .all_transfer = true }, .{ .transfer_write = true }, .{ .compute_shader = true }, .{ .shader_storage_read = true, .shader_storage_write = true });
 
         frame.bindCompute(self.pipes[@backingInt(P.prep)]);
-        frame.push(extern struct { node: u32, temp: u32, d0: u32, d1: u32, seam: [2]i32, buoyancy: f32, ambient: u32, first: u32, mark: u32, fresh: [2]u32 }{
+        const pending = self.params.pending_cap > 0;
+        frame.push(extern struct { node: u32, temp: u32, d0: u32, d1: u32, seam: [2]i32, buoyancy: f32, ambient: u32, first: u32, mark: u32, fresh: [2]u32, pending: u32, pending_other: u32, on: u32 }{
             .node = self.node.slot,
             .temp = self.temp_slot,
             .d0 = self.dist[0].slot,
@@ -604,10 +650,29 @@ pub const Air = struct {
             .first = @intFromBool(self.first),
             .mark = 1,
             .fresh = .{ @truncate(self.fresh_slots), @truncate(self.fresh_slots >> 32) },
+            .pending = self.pending[self.pending_parity].slot,
+            .pending_other = self.pending[self.pending_parity ^ 1].slot,
+            .on = @intFromBool(pending),
         });
         self.fresh_slots = 0;
         frame.dispatch(size / 16, size / 16, 1);
         frame.barrier();
+
+        if (pending and !self.first) {
+            frame.bindCompute(self.pipes[@backingInt(P.pending)]);
+            frame.push(extern struct { seam: [2]i32, node: u32, src: u32, dst: u32, cap: i32, settle: u32, mark: u32 }{
+                .seam = self.seam,
+                .node = self.node.slot,
+                .src = self.pending[self.pending_parity].slot,
+                .dst = self.pending[self.pending_parity ^ 1].slot,
+                .cap = @max(@as(i32, @intFromFloat(@min(self.params.pending_cap, 1.0) * @as(f32, @floatFromInt(abi.mass_one)))), 1),
+                .settle = @min(self.params.pending_settle, 7),
+                .mark = 1,
+            });
+            frame.dispatch(size / 16, size / 16, 1);
+            frame.barrier();
+            self.pending_parity ^= 1;
+        }
 
         if (n_inject > 0) {
             frame.bindCompute(self.pipes[@backingInt(P.inject_count)]);
@@ -700,6 +765,7 @@ pub const Air = struct {
             eject_push: f32,
             eject_max: f32,
             wall_scale: f32,
+            diag: u32,
         }{
             .seam = self.seam,
             .node = self.node.slot,
@@ -712,6 +778,7 @@ pub const Air = struct {
             .eject_push = p.eject_push,
             .eject_max = p.eject_max,
             .wall_scale = p.wall_scale,
+            .diag = self.diag.slot,
         });
         self.dispatchTiles(frame);
         frame.barrier();
@@ -723,10 +790,11 @@ pub const Air = struct {
         // The renderer's debug overlay modes air_pressure (2) / air_velocity (3).
         if (frame.overlay == gpu.constants.overlay_air_pressure or frame.overlay == gpu.constants.overlay_air_velocity) {
             frame.bindCompute(self.pipes[@backingInt(P.overlay)]);
-            frame.push(extern struct { pg: f32, sg: f32, mode: u32 }{
+            frame.push(extern struct { pg: f32, sg: f32, mode: u32, pending: u32 }{
                 .pg = self.params.overlay_pressure_gain,
                 .sg = self.params.overlay_speed_gain,
                 .mode = @intFromBool(frame.overlay == gpu.constants.overlay_air_velocity),
+                .pending = self.pending[self.pending_parity].slot,
             });
             frame.dispatch(size / 16, size / 16, 1);
         }
@@ -746,6 +814,7 @@ pub const Air = struct {
         ctx.vkd.cmdCopyBuffer(cmd, self.ejects.handle, r.stats.handle, &.{.{ .src_offset = 0, .dst_offset = so, .size = 16 }});
         ctx.vkd.cmdCopyBuffer(cmd, self.events_buf.handle, r.stats.handle, &.{.{ .src_offset = 0, .dst_offset = so + 16, .size = 16 }});
         ctx.vkd.cmdCopyBuffer(cmd, self.tile_list.handle, r.stats.handle, &.{.{ .src_offset = 0, .dst_offset = so + 32, .size = 4 }});
+        ctx.vkd.cmdCopyBuffer(cmd, self.diag.handle, r.stats.handle, &.{.{ .src_offset = 0, .dst_offset = so + 36, .size = 8 }});
         ctx.vkd.cmdCopyBuffer(cmd, self.events_buf.handle, r.events.handle, &.{.{ .src_offset = 0, .dst_offset = k * events_stride, .size = events_stride }});
     }
 };
