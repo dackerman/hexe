@@ -113,6 +113,12 @@ pub const Cli = struct {
     liquid_test: ?[]const u8 = null,
     liquid_params: @import("sim/liquid.zig").Params = .{},
     // ---- end liquid solver ----
+    // ---- tech demo (src/game/level_demo.zig) ----
+    /// Headless: the Proving Grounds showcase, view screenshots as PREFIX-<shot>-<tick>.png.
+    demo_script: ?[]const u8 = null,
+    /// Headless: every showcase event inside 5 s; per-pass GPU ms and tick wall time.
+    bench_demo: bool = false,
+    // ---- end tech demo ----
 };
 
 fn usage() void {
@@ -167,6 +173,9 @@ fn usage() void {
         \\  --liquid-overlay        same as --overlay liquid_particles (Tab in the window)
         \\  --liquid-test [NAME]    liquid scenarios: utube|dam|pool|reaction|determinism|all|residual
         \\  --liquid-param K=V      set a liquid solver tunable (src/sim/liquid.zig Params)
+        \\  --scene proving_grounds  the tech-demo level (also proving_grounds_auto: scripted showcase)
+        \\  --demo-script PREFIX    headless showcase: PNGs of each scripted event (PREFIX-<shot>-<tick>.png)
+        \\  --bench-demo            headless: every showcase event in 5 s, per-pass GPU ms and tick wall time
         \\
     , .{});
 }
@@ -302,6 +311,12 @@ fn parseCli(args: []const [:0]const u8) !Cli {
                 i += 1;
                 cli.liquid_test = args[i];
             }
+        } else if (std.mem.eql(u8, a, "--demo-script")) {
+            cli.demo_script = try next(args, &i);
+            cli.headless = true;
+        } else if (std.mem.eql(u8, a, "--bench-demo")) {
+            cli.bench_demo = true;
+            cli.headless = true;
         } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
             usage();
             std.process.exit(0);
@@ -328,6 +343,8 @@ pub fn main(init: std.process.Init) !u8 {
     if (cli.gpu_tests) return gpu_tests.run(gpa, io, cli, &lib);
     if (cli.liquid_test) |name| return liquid_test.run(gpa, io, cli, name, &lib);
     if (cli.bench_render) return bench_render.run(gpa, io, cli, &lib);
+    if (cli.demo_script) |prefix| return @import("game/level_demo.zig").runScript(gpa, io, cli, &lib, prefix);
+    if (cli.bench_demo) return @import("game/level_demo.zig").runBench(gpa, io, cli, &lib);
     if (cli.bench) return bench.run(gpa, io, cli, &lib);
     if (cli.scenario != null or cli.scenarios != null) return scenario_runner.run(gpa, io, cli, &lib);
     if (cli.world and cli.headless) return world_mode.runHeadless(gpa, io, cli, &lib);
@@ -365,7 +382,7 @@ fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *const materia
     try engine.init(gpa, .{
         .library = lib,
         .validation = cli.validation orelse (builtin.mode == .debug),
-        .pipeline = .{ .sleep = cli.sleep, .noise = cli.scene == .noise, .air = cli.air and cli.scene != .determinism, .air_sleep = cli.air_sleep, .bodies = bodies_on, .liquid = cli.liquid, .liquid_params = cli.liquid_params },
+        .pipeline = .{ .sleep = cli.sleep, .noise = cli.scene == .noise, .air = cli.air and cli.scene != .determinism, .air_sleep = cli.air_sleep, .bodies = bodies_on, .liquid = cli.liquid or scenes.levelVariant(cli.scene) != null, .liquid_params = cli.liquid_params },
         .overlap = cli.overlap,
     });
     defer engine.deinit();
@@ -420,7 +437,7 @@ fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *const materia
     if (bodies_on) try bodies_scenes.report(engine, gpa);
     const ps = engine.mirror().particles;
     std.debug.print("  particles: {d} live at end (tick {d}), peak {d}; last tick spawned {d} landed {d} refused {d} lost {d} impacts {d}\n", .{ ps.live, engine.mirror().tick, peak_particles, ps.spawned, ps.landed, ps.refused, ps.lost, ps.impacts });
-    if (cli.liquid) {
+    if (engine.pipeline.config.liquid) {
         const ls = engine.pipeline.liquid.stats();
         std.debug.print("  liquid: {d} particles awake ({d} ballistic), last tick: {d} woke, {d} slept, {d} merged, {d} killed, {d} refused\n", .{ ls.alive, ls.ballistic, ls.spawned, ls.slept, ls.merged, ls.killed, ls.refused });
     }
@@ -476,4 +493,5 @@ test {
     _ = @import("sim/terrain_source.zig");
     _ = @import("sim/events.zig");
     _ = @import("game/explode.zig");
+    _ = @import("game/level.zig");
 }

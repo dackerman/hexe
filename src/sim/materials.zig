@@ -121,6 +121,11 @@ pub const Ids = struct {
     steam: u8 = air,
     concrete: u8 = air,
     gravel: u8 = air,
+    // ---- proving grounds (src/game/level.zig) ----
+    acid: u8 = air,
+    moss: u8 = air,
+    rubble: u8 = air,
+    // ---- end proving grounds ----
 
     pub fn resolve(set: *const MaterialSet) Ids {
         var r: Ids = .{};

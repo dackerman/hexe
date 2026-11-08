@@ -27,6 +27,7 @@ const Scene = scenes.Scene;
 pub fn isBodiesScene(s: Scene) bool {
     return switch (s) {
         .bodies_crate, .bodies_slab, .bodies_beam, .bodies_water, .bodies_bench => true,
+        .proving_grounds, .proving_grounds_auto, .proving_grounds_burst => true, // tech demo
         else => false,
     };
 }
@@ -69,6 +70,7 @@ pub fn terrain(scene: Scene, tick: u32, m: *const materials.Ids, list: *commands
 /// (ejects) are applied this tick and seen as destruction events.
 pub fn script(scene: Scene, tick: u32, sim: *BodySim, list: *commands.CommandList) void {
     if (!isBodiesScene(scene)) return;
+    if (scenes.levelVariant(scene)) |v| return @import("../game/level.zig").script(v, tick, sim, list); // tech demo
     const r = sim.mats.roles;
     switch (scene) {
         .bodies_crate => {
