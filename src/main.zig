@@ -50,6 +50,8 @@ pub const Cli = struct {
     /// Run one scenario file / every scenario in a directory, headless.
     scenario: ?[]const u8 = null,
     scenarios: ?[]const u8 = null,
+    /// Scenario runner: with --screenshot PREFIX, also write a PNG every N ticks.
+    shot_every: u32 = 0,
 };
 
 fn usage() void {
@@ -74,6 +76,8 @@ fn usage() void {
         \\  --materials DIR         materials directory (default ./materials)
         \\  --scenario FILE         run one scenario headless and check its assertions
         \\  --scenarios DIR         run every scenario in DIR (zig build scenarios)
+        \\                          with --screenshot PREFIX: PNGs at assertion ticks
+        \\  --shot-every N          scenario runner: also a PNG every N ticks
         \\
     , .{});
 }
@@ -139,6 +143,8 @@ fn parseCli(args: []const [:0]const u8) !Cli {
             cli.scenario = try next(args, &i);
         } else if (std.mem.eql(u8, a, "--scenarios")) {
             cli.scenarios = try next(args, &i);
+        } else if (std.mem.eql(u8, a, "--shot-every")) {
+            cli.shot_every = try std.fmt.parseInt(u32, try next(args, &i), 10);
         } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
             usage();
             std.process.exit(0);

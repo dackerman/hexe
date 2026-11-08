@@ -166,6 +166,12 @@ fn runOne(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *const materials.Li
 
             var wanted = false;
             for (def.assertions) |a| wanted = wanted or s.assertionTick(a) == t;
+            const shot_now = cli.screenshot != null and run_index == 0 and (wanted or (cli.shot_every > 0 and t % cli.shot_every == 0));
+            if (shot_now) {
+                var name_buf: [256]u8 = undefined;
+                const name = try std.fmt.bufPrint(&name_buf, "{s}-{s}-{d:0>5}.png", .{ cli.screenshot.?, def.name, t });
+                try engine.screenshot(io, name, .{ .x = origin - 1, .y = origin - 1, .w = def.size.w + 2, .h = def.size.h + 2 });
+            }
             if (!wanted) continue;
             try engine.readbackCells(cells);
             for (def.assertions, 0..) |a, i| {

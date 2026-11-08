@@ -350,10 +350,12 @@ pub const World = struct {
         const emit_self = mt.emits_heat + (if (burning) mt.burn_heat else 0);
         var flow: i32 = 0;
         var emit: i32 = 0;
+        var given: i32 = 0;
         var extinguisher_near = false;
         var fire_near = false;
         var head_near = false;
         const flame = mt.flame;
+        const self_gas = (mt.move & 0xff) == gas;
         for (n) |nc| {
             const nm = cell.material(nc);
             const nt = self.mat(nm);
@@ -363,18 +365,18 @@ pub const World = struct {
             const nburning = nflags & Flag.flammable != 0 and cell.has(nc, cell.flag_burning);
             if (tick_step and nm != m) {
                 const en = nt.emits_heat + (if (nburning) nt.burn_heat else 0);
-                if (tn > t) {
+                if (tn > t and !self_gas) {
                     emit += @intCast(@min(en, @as(u32, @intCast(tn - t)) >> rx.emit_gap_shift));
-                } else if (t > tn) {
-                    emit -= @intCast(@min(emit_self, @as(u32, @intCast(t - tn)) >> rx.emit_gap_shift));
+                } else if (t > tn and (nt.move & 0xff) != gas) {
+                    given += @intCast(@min(emit_self, @as(u32, @intCast(t - tn)) >> rx.emit_gap_shift));
                 }
             }
             extinguisher_near = extinguisher_near or nflags & Flag.extinguisher != 0;
             fire_near = fire_near or nburning or (flame != materials.air and nm == flame);
             head_near = head_near or (nflags & Flag.conductive != 0 and cell.state(nc) >> cell.charge_shift == cell.charge_head);
         }
-        t += (flow + @as(i32, @intCast(h & 1023))) >> rx.heat_shift;
-        t += emit;
+        t += (flow + @as(i32, @intCast(h & 8191))) >> rx.heat_shift;
+        t += emit - (given >> rx.emit_drain_shift);
         if (burning and tick_step and t < @as(i32, rx.burn_temp)) t = @min(t + @as(i32, @intCast(mt.burn_heat)), @as(i32, rx.burn_temp));
         t = std.math.clamp(t, 0, 255);
         var tu: u32 = @intCast(t);
@@ -396,7 +398,7 @@ pub const World = struct {
                 }
             } else if (!doused) {
                 var ign = tu > mt.ignite_at;
-                if (!ign and tick_step and fire_near) ign = ((h >> 12) & 0xff) < rx.ignite_contact_chance;
+                if (!ign and tick_step and fire_near) ign = ((h >> 16) & 0xff) < rx.ignite_contact_chance;
                 if (ign) {
                     burning = true;
                     if (mflags & Flag.has_health == 0) life = mt.burn_fuel;

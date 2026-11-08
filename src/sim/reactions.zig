@@ -17,10 +17,14 @@ const shaders = @import("shaders");
 // ---- tuning, mirrored in shaders/common.glsl ----
 pub const salt_cell: u32 = 0x4e1;
 pub const salt_pair: u32 = 0x4e2;
-/// Conduction per substep: dT = sum(min(k_a, k_b) * (T_n - T)) >> heat_shift.
-pub const heat_shift = 10;
+/// Conduction per substep: dT = sum(min(k_a, k_b) * (T_n - T)) >> heat_shift
+/// (k / 1024 per tick over the 8 substeps), stochastically rounded.
+pub const heat_shift = 13;
 /// Emission per tick moves at most (gap >> emit_gap_shift) bytes per pair.
 pub const emit_gap_shift = 3;
+/// An emitter loses (what it gave) >> emit_drain_shift: emitters are mostly
+/// heat sources, but pools of them still cool down eventually.
+pub const emit_drain_shift = 2;
 /// Burning cells heat themselves up to this temperature byte (900 C).
 pub const burn_temp: u32 = 118;
 /// Per tick, out of 256: a flammable cell next to fire ignites.

@@ -13,8 +13,9 @@
 //                  even, vertical even, horizontal odd, vertical odd domino
 //                  tilings), so each adjacent pair is offered once per tick
 //                  and both cells agree through the pair's hash
-//   heat           conduction every substep; emission, burn heat once per
-//                  tick (substep 0)
+//   heat           conduction every substep (rates per tick spread over the
+//                  8 substeps); emission and burn heat once per tick
+//                  (substep 0), emission only into solids and liquids
 //   burning        extinguish, fuel, burn out (substep 0), ignition
 //   phase change   boil, melt, freeze on the new temperature
 //   lifetime       decay once per lifetime period (substep 0)
@@ -117,27 +118,31 @@ uint react_cell(ivec2 p, uint c) {
     uint emit_self = MATERIALS[m].emits_heat + (burning ? MATERIALS[m].burn_heat : 0u);
     int flow = 0;
     int emit = 0;
+    int given = 0;
     bool extinguisher_near = false;
     bool fire_near = false;
     bool head_near = false;
     uint flame = MATERIALS[m].flame;
+    bool self_gas = mat_phase(MATERIALS[m].move) == PHASE_GAS;
     for (int i = 0; i < 4; i++) {
         uint nm = cell_material(n[i]);
         uint nflags = MATERIALS[nm].flags;
         int tn = int(cell_temperature(n[i]));
         flow += int(min(k, MATERIALS[nm].conductivity)) * (tn - t);
         bool nburning = (nflags & MATERIAL_FLAG_FLAMMABLE) != 0u && cell_has(n[i], CELL_FLAG_BURNING);
+        // Emission heats solids and liquids only (gases conduct): the hotter
+        // cell of a pair of different materials gives, the other receives.
         if (tick_step && nm != m) {
             uint en = MATERIALS[nm].emits_heat + (nburning ? MATERIALS[nm].burn_heat : 0u);
-            if (tn > t) emit += int(min(en, uint(tn - t) >> EMIT_GAP_SHIFT));
-            else if (t > tn) emit -= int(min(emit_self, uint(t - tn) >> EMIT_GAP_SHIFT));
+            if (tn > t && !self_gas) emit += int(min(en, uint(tn - t) >> EMIT_GAP_SHIFT));
+            else if (t > tn && mat_phase(MATERIALS[nm].move) != PHASE_GAS) given += int(min(emit_self, uint(t - tn) >> EMIT_GAP_SHIFT));
         }
         extinguisher_near = extinguisher_near || (nflags & MATERIAL_FLAG_EXTINGUISHER) != 0u;
         fire_near = fire_near || nburning || (flame != MATERIAL_AIR && nm == flame);
         head_near = head_near || ((nflags & MATERIAL_FLAG_CONDUCTIVE) != 0u && cell_charge(n[i]) == CHARGE_HEAD);
     }
-    t += (flow + int(h & 1023u)) >> HEAT_SHIFT;
-    t += emit;
+    t += (flow + int(h & 8191u)) >> HEAT_SHIFT;
+    t += emit - (given >> EMIT_DRAIN_SHIFT);
     if (burning && tick_step && t < int(BURN_TEMP)) t = min(t + int(MATERIALS[m].burn_heat), int(BURN_TEMP));
     t = clamp(t, 0, 255);
     uint tu = uint(t);
@@ -160,7 +165,7 @@ uint react_cell(ivec2 p, uint c) {
             }
         } else if (!doused) {
             bool ignite = tu > MATERIALS[m].ignite_at;
-            if (!ignite && tick_step && fire_near) ignite = ((h >> 12) & 0xffu) < IGNITE_CONTACT_CHANCE;
+            if (!ignite && tick_step && fire_near) ignite = ((h >> 16) & 0xffu) < IGNITE_CONTACT_CHANCE;
             if (ignite) {
                 burning = true;
                 if ((mflags & MATERIAL_FLAG_HAS_HEALTH) == 0u) life = MATERIALS[m].burn_fuel;

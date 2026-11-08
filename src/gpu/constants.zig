@@ -152,6 +152,7 @@ pub const mirrors = .{
     .{ "SALT_REACT_PAIR", reactions.salt_pair },
     .{ "HEAT_SHIFT", reactions.heat_shift },
     .{ "EMIT_GAP_SHIFT", reactions.emit_gap_shift },
+    .{ "EMIT_DRAIN_SHIFT", reactions.emit_drain_shift },
     .{ "BURN_TEMP", reactions.burn_temp },
     .{ "IGNITE_CONTACT_CHANCE", reactions.ignite_contact_chance },
     .{ "FLAME_CHANCE", reactions.flame_chance },
