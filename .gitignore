@@ -6,3 +6,4 @@ zig-out/
 /profiles/
 .worktrees/
 zig-pkg/
+playtest-*.png

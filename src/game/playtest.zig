@@ -319,6 +319,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *const materials.L
                 .camera_y = c[1] - @as(i32, @intCast(cli.height / 2 / zoom)),
             };
             engine.hud.clear();
+            @import("../render/demo.zig").decorate(cli.scene, engine.tick, &engine.renderer, &engine.hud);
             game.draw(view, .{ cli.width, cli.height }, &input);
             if (cli.hud and show_help) Game.helpLines(&engine.hud) else if (cli.hud) {
                 game.hudLines(&engine.hud);

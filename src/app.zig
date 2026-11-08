@@ -558,6 +558,8 @@ fn runPlay(gpa: std.mem.Allocator, io: std.Io, cli_in: Cli, lib: *materials.Libr
 
         // ---- draw ----
         engine.hud.clear();
+        // Level decorations: torches and the floating zone signs.
+        demo.decorate(scene, engine.tick, &engine.renderer, &engine.hud);
         game.draw(view, .{ win_w, win_h }, &input);
         if (show_help) game_mod.Game.helpLines(&engine.hud) else {
             game.hudLines(&engine.hud);
