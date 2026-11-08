@@ -9,6 +9,7 @@ pub const stone: u8 = 1;
 pub const sand: u8 = 2;
 pub const water: u8 = 3;
 pub const smoke: u8 = 4;
+pub const wood: u8 = 5;
 
 pub const descs = [_]materials.MaterialDesc{
     .{
@@ -44,7 +45,7 @@ pub const descs = [_]materials.MaterialDesc{
     .{
         .name = "water",
         .phase = .liquid,
-        .solver = .cellular, // .flip once the liquid solver lands (M6)
+        .solver = .flip, // FLIP solver when Config.liquid is on, cellular otherwise
         .density = 100,
         .dispersion = 5,
         .conductivity = 40,
@@ -67,6 +68,14 @@ pub const descs = [_]materials.MaterialDesc{
         .translucent = true,
         .ramp = &.{ 0x3b3b40, 0x47474c, 0x333338, 0x525257 },
     },
+    .{
+        // Static here (no reactions yet); values from materials/wood.zon.
+        .name = "wood",
+        .phase = .static,
+        .density = 60,
+        .health = 120,
+        .ramp = &.{ 0x6b4423, 0x7d522c, 0x5a3a1e, 0x8f6236, 0x4e3219 },
+    },
 };
 
 pub fn table() materials.Table {
@@ -83,4 +92,5 @@ test "builtin ids match table order" {
     try std.testing.expectEqual(sand, t.byName("sand").?);
     try std.testing.expectEqual(water, t.byName("water").?);
     try std.testing.expectEqual(smoke, t.byName("smoke").?);
+    try std.testing.expectEqual(wood, t.byName("wood").?);
 }

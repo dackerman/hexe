@@ -1,0 +1,60 @@
+#version 460
+// One thread: update the particle count and the indirect dispatch arguments.
+//   mode 0  after wake: count += spawned (wake scan total, clamped to the
+//           budget and the capacity); the grace countdown restarts
+//           (pc.level ticks) while particles exist or a body of cellular
+//           solver liquid is moving
+//   mode 1  after the sort: count = live particles (bin scan total)
+//   mode 2  flush: count = 0
+// Every grid pass is dispatched indirectly through gated arguments that are
+// zero when there are no particles and the grace countdown has run out, so
+// a world with no awake or moving solver liquid runs no solver work beyond
+// these few dispatches. During grace the projection runs over sleeping
+// liquid alone, so water that fell asleep out of balance is found and woken
+// (wake.comp, imbalance trigger).
+#include "sim/liquid/liquid.glsl"
+
+layout(local_size_x = 1) in;
+
+void set_args(uint at, uint x, uint y) {
+    LQ_STATE[at] = x;
+    LQ_STATE[at + 1u] = y;
+    LQ_STATE[at + 2u] = 1u;
+}
+
+void main() {
+    uint n = LQ_STATE[LQ_ST_COUNT];
+    if (pc.mode == 0u) {
+        uint total = LQ_U32(LQ_BUF_TILE_SUMS)[TILE_COUNT / 1024u];
+        uint room = pc.cap > n ? pc.cap - n : 0u;
+        uint spawned = min(total, min(pc.n, room));
+        LQ_STATE[LQ_ST_SPAWNED] = spawned;
+        LQ_STATE[LQ_ST_CANDIDATES] = total;
+        n += spawned;
+        uint grace = LQ_STATE[LQ_ST_GRACE];
+        LQ_STATE[LQ_ST_GRACE] = (n > 0u || LQ_STATE[LQ_ST_MOVED] > 0u) ? pc.level : (grace > 0u ? grace - 1u : 0u);
+    } else if (pc.mode == 1u) {
+        n = LQ_U32(LQ_BUF_BIN_SUMS)[LQ_GRID * LQ_GRID / 1024u];
+        LQ_STATE[LQ_ST_ALIVE] = n;
+        // Next tick's wake reads the grid velocity only if it was computed.
+        LQ_STATE[LQ_ST_GRID_VALID] = (n > 0u || LQ_STATE[LQ_ST_GRACE] > 0u) ? 1u : 0u;
+    } else {
+        n = 0u;
+        LQ_STATE[LQ_ST_ALIVE] = 0u;
+        LQ_STATE[LQ_ST_GRID_VALID] = 0u;
+        LQ_STATE[LQ_ST_GRACE] = 0u;
+    }
+    LQ_STATE[LQ_ST_COUNT] = n;
+    bool on = n > 0u || LQ_STATE[LQ_ST_GRACE] > 0u;
+    set_args(LQ_ST_ARGS_PARTICLES, (n + 255u) / 256u, 1u);
+    set_args(LQ_ST_ARGS_CELLS, on ? LQ_GRID / 16u : 0u, on ? LQ_GRID / 16u : 0u);
+    set_args(LQ_ST_ARGS_SCAN, on ? LQ_GRID * LQ_GRID / 1024u : 0u, 1u);
+    for (uint l = 0u; l < LQ_LEVELS; l++) {
+        uint s = level_size(l);
+        uint cells = max(s / 16u, 1u);
+        uint tiles = max(s / 32u, 1u);
+        set_args(LQ_ST_ARGS_MG + 6u * l, on ? cells : 0u, cells);
+        // Checkerboard of tiles: half the tiles per dispatch (mg_smooth).
+        set_args(LQ_ST_ARGS_MG + 6u * l + 3u, on ? max(tiles / 2u, 1u) : 0u, tiles);
+    }
+}

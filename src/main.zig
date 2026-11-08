@@ -17,6 +17,7 @@ const cell = @import("sim/cell.zig");
 const View = @import("render/world.zig").View;
 const bench = @import("bench.zig");
 const verify = @import("verify.zig");
+const liquid_test = @import("liquid_test.zig");
 
 pub const std_options: std.Options = .{
     .log_level = if (builtin.mode == .debug) .info else .info,
@@ -42,6 +43,13 @@ pub const Cli = struct {
     zoom: u32 = 2,
     /// World pixel at the center of the view (default: world center).
     center: ?[2]i32 = null,
+    // ---- liquid solver (M6) ----
+    liquid: bool = false,
+    liquid_overlay: bool = false,
+    /// --liquid-test [name]: run the liquid scenarios (all when name is "all").
+    liquid_test: ?[]const u8 = null,
+    liquid_params: @import("sim/liquid.zig").Params = .{},
+    // ---- end liquid solver ----
 };
 
 fn usage() void {
@@ -63,6 +71,10 @@ fn usage() void {
         \\  --size WxH              window size (default 1600x900)
         \\  --bench                 run the benchmark scenes (with --headless)
         \\  --verify-determinism    CPU reference vs GPU, bit for bit
+        \\  --liquid                FLIP liquid solver on (headless; windowed: L toggles)
+        \\  --liquid-overlay        tint awake liquid particles (windowed: F3)
+        \\  --liquid-test [NAME]    liquid scenarios: utube|dam|pool|determinism|all
+        \\  --liquid-param K=V      set a liquid solver tunable (src/sim/liquid.zig Params)
         \\
     , .{});
 }
@@ -122,6 +134,18 @@ fn parseCli(args: []const [:0]const u8) !Cli {
             cli.bench = true;
         } else if (std.mem.eql(u8, a, "--verify-determinism")) {
             cli.verify = true;
+        } else if (std.mem.eql(u8, a, "--liquid")) {
+            cli.liquid = true;
+        } else if (std.mem.eql(u8, a, "--liquid-overlay")) {
+            cli.liquid_overlay = true;
+        } else if (std.mem.eql(u8, a, "--liquid-param")) {
+            try @import("sim/liquid.zig").parseParam(&cli.liquid_params, try next(args, &i));
+        } else if (std.mem.eql(u8, a, "--liquid-test")) {
+            cli.liquid_test = "all";
+            if (i + 1 < args.len and args[i + 1].len > 0 and args[i + 1][0] != '-') {
+                i += 1;
+                cli.liquid_test = args[i];
+            }
         } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
             usage();
             std.process.exit(0);
@@ -141,6 +165,7 @@ pub fn main(init: std.process.Init) !u8 {
     const cli = parseCli(args) catch return 2;
 
     if (cli.verify) return verify.run(gpa, io, cli);
+    if (cli.liquid_test) |name| return liquid_test.run(gpa, io, cli, name);
     if (cli.bench) return bench.run(gpa, io, cli);
     if (!cli.headless) return app.run(gpa, io, cli);
     return runHeadless(gpa, io, cli);
@@ -153,7 +178,7 @@ fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
     try engine.init(gpa, .{
         .table = &table,
         .validation = cli.validation orelse (builtin.mode == .debug),
-        .pipeline = .{ .sleep = cli.sleep, .noise = cli.scene == .noise },
+        .pipeline = .{ .sleep = cli.sleep, .noise = cli.scene == .noise, .liquid = cli.liquid, .liquid_overlay = cli.liquid_overlay, .liquid_params = cli.liquid_params },
     });
     defer engine.deinit();
 
@@ -183,10 +208,15 @@ fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         std.debug.print("  {s:<10} {d:8.4} ms/tick (min {d:.4}, max {d:.4})\n", .{ engine.names.get(i), profile.mean(i), profile.min[i], profile.max[i] });
     }
     std.debug.print("  {s:<10} {d:8.4} ms/tick, active tiles at end: {d}\n", .{ "grid", profile.gridMean(), engine.last.active_tiles });
+    if (cli.liquid) {
+        const ls = engine.pipeline.liquid.stats();
+        std.debug.print("  liquid: {d} particles awake ({d} ballistic), last tick: {d} woke, {d} slept, {d} merged, {d} killed, {d} refused\n", .{ ls.alive, ls.ballistic, ls.spawned, ls.slept, ls.merged, ls.killed, ls.refused });
+    }
     if (cli.screenshot) |path| try engine.screenshot(io, path, cli.crop);
     if (cli.view_screenshot) |path| {
         const center = cli.center orelse .{ cell.world_size / 2, cell.world_size / 2 };
         const view: View = .{
+            .show_liquid = cli.liquid_overlay,
             .scale = cli.zoom,
             .camera_x = center[0] - @as(i32, @intCast(cli.width / 2 / cli.zoom)),
             .camera_y = center[1] - @as(i32, @intCast(cli.height / 2 / cli.zoom)),
@@ -213,6 +243,7 @@ test {
     _ = @import("sim/commands.zig");
     _ = @import("sim/scenes.zig");
     _ = @import("sim/reference/grid.zig");
+    _ = @import("sim/liquid.zig");
     _ = @import("render/font.zig");
     _ = @import("util/png.zig");
 }

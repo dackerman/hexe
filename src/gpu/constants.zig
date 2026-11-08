@@ -17,6 +17,9 @@ pub const binding_samplers = 3;
 /// Fixed storage image slots (shared world images).
 pub const slot_img_cells = 0;
 pub const slot_img_owner = 1;
+/// Liquid solver wake mask and debug overlay (src/sim/liquid.zig).
+pub const slot_img_liquid_wake = 14;
+pub const slot_img_liquid_overlay = 15;
 /// First storage image slot handed out by `Descriptors.allocImageSlot`.
 pub const slot_img_dynamic_base = 16;
 
@@ -69,6 +72,8 @@ pub const mirrors = .{
     .{ "BINDING_SAMPLERS", binding_samplers },
     .{ "SLOT_IMG_CELLS", slot_img_cells },
     .{ "SLOT_IMG_OWNER", slot_img_owner },
+    .{ "SLOT_IMG_LIQUID_WAKE", slot_img_liquid_wake },
+    .{ "SLOT_IMG_LIQUID_OVERLAY", slot_img_liquid_overlay },
     .{ "SLOT_IMG_DYNAMIC_BASE", slot_img_dynamic_base },
     .{ "SLOT_BUF_MATERIALS", slot_buf_materials },
     .{ "SLOT_BUF_TILE_MARKS", slot_buf_tile_marks },
@@ -102,6 +107,7 @@ pub const mirrors = .{
     .{ "TILE_WAKE_TICKS", cell.tile_wake_ticks },
     .{ "CMD_FILL_CIRCLE", @backingInt(commands.Kind.fill_circle) },
     .{ "CMD_FILL_RECT", @backingInt(commands.Kind.fill_rect) },
+    .{ "CMD_WAKE_LIQUID", @backingInt(commands.Kind.wake_liquid) },
     .{ "CMD_FLAG_ONLY_AIR", commands.flag_only_air },
     .{ "CMD_COVERAGE_SHIFT", commands.coverage_shift },
     .{ "CMD_WORDS", @sizeOf(commands.CommandGpu) / 4 },

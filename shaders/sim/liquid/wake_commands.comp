@@ -1,0 +1,41 @@
+#version 460
+// Wake trigger "the world was edited here": every sleeping solver-liquid
+// pixel inside a command's box, grown by 16 pixels, gets a wake request.
+// Covers removed solids next to liquid (a dam taken out), solids or powders
+// painted into liquid, and CMD_WAKE_LIQUID (its circle only, with its own
+// hop count). Commands that place solver liquid itself do not wake: poured
+// water falls with the cellular rules (8 px per tick) and wakes when it
+// piles up (wake.comp), like any other plain water. One dispatch per
+// command, recorded by the CPU after command application.
+#include "sim/liquid/liquid.glsl"
+#include "sim/liquid/wake.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+shared bool s_any;
+
+void main() {
+    if (gl_LocalInvocationIndex == 0u) s_any = false;
+    barrier();
+    Command c = COMMANDS[pc.level];
+    ivec2 p = pc.box_origin + ivec2(gl_GlobalInvocationID.xy);
+    uint hops = LQ_WAKE_HOPS_COMMAND;
+    bool inside = all(lessThan(gl_GlobalInvocationID.xy, pc.box_size)) && !mat_is_flip(c.material & 0xffu);
+    if (c.kind == CMD_WAKE_LIQUID) {
+        ivec2 d = p - ivec2(c.x0, c.y0);
+        inside = inside && d.x * d.x + d.y * d.y <= c.x1 * c.x1;
+        hops = clamp(c.material, 1u, 8u);
+    }
+    if (inside) {
+        ivec2 w = wrap_coord(p);
+        if (cell_flip_plain(imageLoad(CELLS, w).x)) {
+            imageAtomicOr(LIQUID_WAKE, w, liquid_wake_code(hops));
+            s_any = true;
+        }
+    }
+    barrier();
+    if (gl_LocalInvocationIndex == 0u && s_any) {
+        ivec2 corner = wrap_coord(pc.box_origin + ivec2(gl_WorkGroupID.xy * 16u));
+        mark_tile_and_neighbors(uvec2(corner) >> TILE_SHIFT);
+    }
+}

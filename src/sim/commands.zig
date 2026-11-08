@@ -21,6 +21,10 @@ pub const Kind = enum(u32) {
     fill_circle = 1,
     /// [x0, x1) x [y0, y1).
     fill_rect = 2,
+    /// Wake sleeping solver liquid (src/sim/liquid.zig) in the circle
+    /// center (x0, y0), radius x1, spreading `material` (hop count) pixels
+    /// further. Changes no cell; the grid applier skips it.
+    wake_liquid = 32,
 };
 
 /// Only replace air cells (pouring, scenery that must not overwrite).
@@ -112,6 +116,21 @@ pub const CommandList = struct {
         });
     }
 
+    /// Wake sleeping solver liquid within `radius` of (cx, cy); the wake then
+    /// spreads `hops` (1-8) more pixels, one per tick (docs/04-fluids.md "Wake").
+    pub fn wakeLiquid(self: *CommandList, cx: i32, cy: i32, radius: i32, hops: u8) void {
+        self.push(.{
+            .kind = @backingInt(Kind.wake_liquid),
+            .material = std.math.clamp(hops, 1, 8),
+            .x0 = cx,
+            .y0 = cy,
+            .x1 = std.math.clamp(radius, 0, max_radius),
+            .y1 = 0,
+            .flags = 0,
+            .seed = 0,
+        });
+    }
+
     pub fn slice(self: *const CommandList) []const CommandGpu {
         return self.items[0..self.len];
     }
@@ -127,7 +146,7 @@ pub fn bounds(c: CommandGpu) ?Box {
     var x1: i32 = undefined; // exclusive
     var y1: i32 = undefined;
     switch (@as(Kind, @fromBackingInt(@intCast(c.kind)))) {
-        .fill_circle => {
+        .fill_circle, .wake_liquid => {
             x0 = c.x0 - c.x1;
             y0 = c.y0 - c.x1;
             x1 = c.x0 + c.x1 + 1;
@@ -162,6 +181,8 @@ pub fn insideShape(c: CommandGpu, x: i32, y: i32) bool {
             break :blk dx * dx + dy * dy <= c.x1 * c.x1;
         },
         .fill_rect => x >= c.x0 and y >= c.y0 and x < c.x1 and y < c.y1,
+        // Fills nothing (the liquid solver consumes it).
+        .wake_liquid => false,
     };
 }
 
@@ -208,6 +229,7 @@ pub const Applier = struct {
     fn recordInner(self: *Applier, frame: *Frame) void {
         frame.bindCompute(self.pipeline);
         for (frame.commands, 0..) |c, i| {
+            if (c.kind == @backingInt(Kind.wake_liquid)) continue;
             const box = bounds(c) orelse continue;
             frame.push(extern struct { x: i32, y: i32, w: u32, h: u32, index: u32, mark: u32 }{
                 .x = box.x,

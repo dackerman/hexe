@@ -119,6 +119,13 @@ uint hash_salt(uint x, uint y, uint tick, uint salt) {
 
 #define SLOT_IMG_CELLS 0u
 #define SLOT_IMG_OWNER 1u
+// ---- liquid solver (M6) ----
+// Wake requests for sleeping solver liquid, R32_UINT; write only through
+// liquid_wake_at() in shaders/sim/liquid/wake.glsl.
+#define SLOT_IMG_LIQUID_WAKE 14u
+// Debug overlay of awake liquid particles, RGBA8 (render/world.frag).
+#define SLOT_IMG_LIQUID_OVERLAY 15u
+// ---- end liquid solver ----
 #define SLOT_IMG_DYNAMIC_BASE 16u
 
 #define SLOT_BUF_MATERIALS 0u
@@ -278,6 +285,8 @@ void mark_tile_and_neighbors(uvec2 t) {
 // ---------------------------------------------------------------------------
 #define CMD_FILL_CIRCLE 1u
 #define CMD_FILL_RECT 2u
+// Wake sleeping solver liquid in a circle (x0, y0, radius x1); changes no cell.
+#define CMD_WAKE_LIQUID 32u
 #define CMD_FLAG_ONLY_AIR 0x1u
 #define CMD_COVERAGE_SHIFT 8u
 #define CMD_WORDS 8u

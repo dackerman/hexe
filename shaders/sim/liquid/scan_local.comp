@@ -1,0 +1,37 @@
+#version 460
+// Work-efficient exclusive scan, level 1: each workgroup scans 1024 u32
+// (256 threads x 4) of LQ_U32(mode) into LQ_U32(level) and writes its block
+// total to LQ_U32(dst)[block]. scan_sums.comp scans the block totals; a
+// consumer adds them back with scan_prefix(). n = element count.
+#include "sim/liquid/liquid.glsl"
+
+layout(local_size_x = 256) in;
+
+shared uint s_sum[256];
+
+void main() {
+    uint t = gl_LocalInvocationID.x;
+    uint base = gl_WorkGroupID.x * 1024u + t * 4u;
+    uint v[4];
+    uint run = 0u;
+    for (uint k = 0u; k < 4u; k++) {
+        uint i = base + k;
+        uint x = i < pc.n ? LQ_U32(pc.mode)[i] : 0u;
+        v[k] = run;
+        run += x;
+    }
+    s_sum[t] = run;
+    barrier();
+    for (uint s = 1u; s < 256u; s <<= 1) {
+        uint add = t >= s ? s_sum[t - s] : 0u;
+        barrier();
+        s_sum[t] += add;
+        barrier();
+    }
+    uint prefix = s_sum[t] - run;
+    for (uint k = 0u; k < 4u; k++) {
+        uint i = base + k;
+        if (i < pc.n) LQ_U32(pc.level)[i] = prefix + v[k];
+    }
+    if (t == 255u) LQ_U32(pc.dst)[gl_WorkGroupID.x] = s_sum[255];
+}

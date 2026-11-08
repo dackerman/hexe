@@ -1,0 +1,22 @@
+#version 460
+// Restriction: the coarse right-hand side at level pc.level + 1 is the sum
+// of the fine residuals of its fluid children; the coarse pressure (the
+// correction) starts at zero.
+#include "sim/liquid/mg.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+void main() {
+    uint l = pc.level;
+    uint n = level_size(l + 1u);
+    ivec2 cc = ivec2(gl_GlobalInvocationID.xy);
+    if (cc.x >= int(n) || cc.y >= int(n)) return;
+    uint ci = lidx(l + 1u, cc);
+    float r = 0.0;
+    if (mg_type(MG_TYPE(ci)) == LQ_FLUID) {
+        ivec2 f = cc * 2;
+        r = mg_residual(l, f) + mg_residual(l, f + ivec2(1, 0)) + mg_residual(l, f + ivec2(0, 1)) + mg_residual(l, f + ivec2(1, 1));
+    }
+    MG_B(ci) = r;
+    MG_P(ci) = 0.0;
+}

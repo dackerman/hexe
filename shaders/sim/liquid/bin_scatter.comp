@@ -1,0 +1,18 @@
+#version 460
+// Sort, step 3: each particle takes a slot in its bin (bin start from the
+// scan of the counts). The slot order inside a bin depends on scheduling;
+// bin_fixup.comp sorts each bin by particle index afterwards. Counting down
+// leaves BIN_COUNT all zero for the next tick.
+#include "sim/liquid/liquid.glsl"
+
+layout(local_size_x = 256) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= LQ_STATE[LQ_ST_COUNT]) return;
+    uint bin = LQ_U32(LQ_BUF_BIN_OF)[i];
+    if (bin == LQ_NONE) return;
+    uint start = scan_prefix(LQ_BUF_BIN_SCAN, LQ_BUF_BIN_SUMS, bin);
+    uint k = atomicAdd(LQ_U32(LQ_BUF_BIN_COUNT)[bin], 0xffffffffu) - 1u;
+    LQ_U32(LQ_BUF_SORTED)[start + k] = i;
+}

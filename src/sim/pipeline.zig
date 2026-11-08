@@ -25,6 +25,7 @@ const commands = @import("commands.zig");
 const Grid = @import("grid.zig").Grid;
 const Noise = @import("noise.zig").Noise;
 const materials = @import("materials.zig");
+const Liquid = @import("liquid.zig").Liquid;
 
 pub const frames_in_flight = 2;
 /// Most ticks recorded into one frame (catch-up after a slow frame).
@@ -36,6 +37,14 @@ pub const Config = struct {
     sleep: bool = true,
     /// Debug: replace the simulation with animated noise (M0 bring-up).
     noise: bool = false,
+    // ---- liquid solver (M6) ----
+    /// FLIP liquid solver on. Off: no particles; solver liquids are plain
+    /// cellular liquid (switching off flushes awake particles into cells).
+    liquid: bool = false,
+    /// Debug overlay: awake liquid particles drawn in the overlay image.
+    liquid_overlay: bool = false,
+    liquid_params: @import("liquid.zig").Params = .{},
+    // ---- end liquid solver ----
 };
 
 /// World-wide GPU resources every pass may use. All live at fixed bindless
@@ -126,6 +135,7 @@ pub const Pipeline = struct {
     grid: Grid,
     applier: commands.Applier,
     noise: Noise,
+    liquid: Liquid,
     // ---- end subsystems ----
 
     /// In place: `shared` points into `self`.
@@ -139,12 +149,15 @@ pub const Pipeline = struct {
         errdefer self.applier.deinit();
         self.noise = try Noise.init(ctx, config, alloc);
         errdefer self.noise.deinit();
+        self.liquid = try Liquid.init(ctx, config, alloc);
+        errdefer self.liquid.deinit();
         // ---- end subsystem init ----
         self.shared = self.grid.shared();
     }
 
     pub fn deinit(self: *Pipeline) void {
         // ---- subsystem deinit (reverse order) ----
+        self.liquid.deinit();
         self.noise.deinit();
         self.applier.deinit();
         self.grid.deinit();
@@ -173,7 +186,9 @@ pub const Pipeline = struct {
         frame.substep = 0;
         // 4. coarsen solid mask (M5)
         // 5. air field (M5)
-        // 6. liquid solver, particles (M4, M6)
+        // 6. liquid solver (M6), particles (M4)
+        self.liquid.show_overlay = self.config.liquid_overlay;
+        if (self.config.liquid) self.liquid.record(frame) else self.liquid.recordOff(frame);
         // 7. readback buffers, event queue (M4)
         // ---- end tick order ----
     }

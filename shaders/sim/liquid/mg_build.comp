@@ -1,0 +1,32 @@
+#version 460
+// Coarsen cell types and face weights from level pc.level to pc.level + 1
+// (once per tick, before the V-cycles). A coarse cell is air if any child is
+// air (McAdams et al. 2010: Dirichlet wins, which keeps the coarse problem
+// well posed near the free surface), else fluid if any child is fluid, else
+// solid. A coarse face's weight is the sum of the two fine faces it covers
+// (Galerkin coarsening for piecewise-constant prolongation).
+#include "sim/liquid/mg.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+void main() {
+    uint l = pc.level;
+    uint n = level_size(l + 1u);
+    ivec2 cc = ivec2(gl_GlobalInvocationID.xy);
+    if (cc.x >= int(n) || cc.y >= int(n)) return;
+    ivec2 f = cc * 2;
+    uint w00 = MG_TYPE(lidx(l, f));
+    uint w10 = MG_TYPE(lidx(l, f + ivec2(1, 0)));
+    uint w01 = MG_TYPE(lidx(l, f + ivec2(0, 1)));
+    uint w11 = MG_TYPE(lidx(l, f + ivec2(1, 1)));
+    bool any_air = false, any_fluid = false;
+    uint ws[4] = uint[4](w00, w10, w01, w11);
+    for (int k = 0; k < 4; k++) {
+        any_air = any_air || mg_type(ws[k]) == LQ_AIR;
+        any_fluid = any_fluid || mg_type(ws[k]) == LQ_FLUID;
+    }
+    uint type = any_air ? LQ_AIR : (any_fluid ? LQ_FLUID : LQ_SOLID);
+    uint wl = min(mg_wl(w00) + mg_wl(w01), 255u);
+    uint wt = min(mg_wt(w00) + mg_wt(w10), 255u);
+    MG_TYPE(lidx(l + 1u, cc)) = type | (wl << 8) | (wt << 16);
+}

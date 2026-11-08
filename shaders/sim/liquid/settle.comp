@@ -1,0 +1,60 @@
+#version 460
+// After rasterization, per particle that owns a pixel:
+//   sleep  rest counter >= pc.sleep_ticks (slow for that long) and
+//          supported by things that do not move: the pixel below is
+//          sleeping liquid or an obstacle and neither pixel diagonally below
+//          is an awake particle (air is fine: a step edge sleeps and the
+//          cellular rules level it). So a body falls asleep from the bottom
+//          up, layer by layer, and never as frozen chunks inside water that
+//          is still moving (which would jam it). The cell keeps its material and loses the particle-backed
+//          flag, the particle dies. Air above and beside is allowed, so
+//          surfaces and the edges of a pool sleep too; the cellular rules
+//          then level any step that is left
+//          (docs/decisions/80-liquid-solver.md).
+//   marks  the activity tile of the pixel (the grid passes then see it)
+//   overlay (debug) liquid particles cyan, ballistic yellow.
+// Two dispatches: mode 0 decides (marks LQ_BIND_PENDING) against the cells
+// as rasterized, mode 1 applies, so the result does not depend on the
+// order in which neighbors fall asleep.
+#include "sim/liquid/liquid.glsl"
+
+layout(local_size_x = 256) in;
+
+// Occupied by something that will not move: sleeping liquid or an
+// obstacle (a neighbor falling asleep this tick does not count yet).
+bool resting(ivec2 p) {
+    uint c = load_cell(p);
+    return !cell_free(c) && !cell_has(c, CELL_FLAG_PARTICLE);
+}
+
+void main() {
+    uint k = gl_GlobalInvocationID.x;
+    if (k >= LQ_STATE[LQ_ST_COUNT]) return;
+    uint info = LQ_INFO(pc.dst)[k];
+    if (info_mode(info) == LQ_MODE_DEAD) return;
+    uint b = LQ_BIND(pc.dst)[k];
+    if (b == LQ_NONE) return;
+    if (pc.mode == 0u) {
+        ivec2 p = unpack_pixel(b);
+        bool supported = resting(p + ivec2(0, 1)) && !cell_has(load_cell(p + ivec2(-1, 1)), CELL_FLAG_PARTICLE) &&
+            !cell_has(load_cell(p + ivec2(1, 1)), CELL_FLAG_PARTICLE);
+        if (info_rest(info) >= pc.sleep_ticks && supported) LQ_BIND(pc.dst)[k] = b | LQ_BIND_PENDING;
+        return;
+    }
+    ivec2 p = unpack_pixel(b & ~LQ_BIND_PENDING);
+    if ((pc.flags & LQ_PC_MARK_TILES) != 0u) mark_pixel_tile(p);
+    if ((b & LQ_BIND_PENDING) != 0u) {
+        uint c = imageLoad(CELLS, p).x;
+        imageStore(CELLS, p, uvec4(c & ~CELL_FLAG_PARTICLE, 0u, 0u, 0u));
+        LQ_INFO(pc.dst)[k] = info_with_mode(info, LQ_MODE_DEAD);
+        LQ_BIND(pc.dst)[k] = LQ_NONE;
+        atomicAdd(LQ_STATE[LQ_ST_SLEPT], 1u);
+        atomicAdd(LQ_STATE[LQ_ST_TOTAL_SLEPT], 1u);
+        atomicAdd(LQ_STATE[LQ_ST_ALIVE], 0xffffffffu);
+        return;
+    }
+    if ((pc.flags & LQ_PC_OVERLAY) != 0u) {
+        vec4 color = info_mode(info) == LQ_MODE_BALLISTIC ? vec4(1.0, 0.85, 0.1, 1.0) : vec4(0.1, 0.95, 1.0, 1.0);
+        imageStore(lq_rgba8_images[pc.overlay], p, color);
+    }
+}

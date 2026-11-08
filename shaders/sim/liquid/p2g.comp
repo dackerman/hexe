@@ -1,0 +1,54 @@
+#version 460
+// Particle to grid (APIC). One thread per grid cell (i, j) computes the two
+// MAC faces it owns: u on its left face at (i, j + 1/2) and v on its top face
+// at (i + 1/2, j), in cell units (1 cell = 2 pixels). Gather, not scatter:
+// it reads the bins of the 3x3 cells around, each bin's particles in index
+// order (sorted), with bilinear (tent) weights, so no atomics are involved.
+//   u_face = sum w (u_p + c_u . (x_face - x_p)) / sum w
+// Writes U_OLD / V_OLD (velocity before forces), UW / VW (weights) and the
+// count of liquid particles in the cell itself (bits 24-31 of the level-0
+// multigrid word; classify.comp fills in the rest). Ballistic particles are
+// not transferred.
+#include "sim/liquid/liquid.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+void main() {
+    ivec2 cid = ivec2(gl_GlobalInvocationID.xy);
+    vec2 fu = vec2(cid) + vec2(0.0, 0.5);
+    vec2 fv = vec2(cid) + vec2(0.5, 0.0);
+    float su = 0.0, wu = 0.0, sv = 0.0, wv = 0.0;
+    uint here = 0u;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            uint bin = gidx(cid + ivec2(dx, dy));
+            uint start = scan_prefix(LQ_BUF_BIN_SCAN, LQ_BUF_BIN_SUMS, bin);
+            uint end = bin + 1u < LQ_GRID * LQ_GRID ? scan_prefix(LQ_BUF_BIN_SCAN, LQ_BUF_BIN_SUMS, bin + 1u) : LQ_STATE[LQ_ST_COUNT];
+            for (uint k = start; k < end; k++) {
+                if (info_mode(LQ_INFO(pc.dst)[k]) != LQ_MODE_LIQUID) continue;
+                if (dx == 0 && dy == 0) here++;
+                vec2 x = LQ_POS(pc.dst)[k] * 0.5;
+                vec2 vel = LQ_VEL(pc.dst)[k];
+                vec4 aff = LQ_AFF(pc.dst)[k];
+                vec2 du = gdiff(fu, x);
+                if (abs(du.x) < 1.0 && abs(du.y) < 1.0) {
+                    float w = (1.0 - abs(du.x)) * (1.0 - abs(du.y));
+                    su += w * (vel.x + dot(aff.xy, du));
+                    wu += w;
+                }
+                vec2 dv = gdiff(fv, x);
+                if (abs(dv.x) < 1.0 && abs(dv.y) < 1.0) {
+                    float w = (1.0 - abs(dv.x)) * (1.0 - abs(dv.y));
+                    sv += w * (vel.y + dot(aff.zw, dv));
+                    wv += w;
+                }
+            }
+        }
+    }
+    uint c = gidx(cid);
+    LQ_F32(LQ_BUF_U_OLD)[c] = wu > 1e-6 ? su / wu : 0.0;
+    LQ_F32(LQ_BUF_V_OLD)[c] = wv > 1e-6 ? sv / wv : 0.0;
+    LQ_F32(LQ_BUF_UW)[c] = wu;
+    LQ_F32(LQ_BUF_VW)[c] = wv;
+    LQ_U32(LQ_BUF_MG_TYPE)[c] = min(here, 255u) << 24;
+}

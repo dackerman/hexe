@@ -5,6 +5,7 @@ const std = @import("std");
 const cell = @import("cell.zig");
 const commands = @import("commands.zig");
 const m = @import("materials_builtin.zig");
+const liquid_scenes = @import("liquid_scenes.zig");
 
 pub const Scene = enum {
     /// Nothing; paint with the mouse.
@@ -22,6 +23,13 @@ pub const Scene = enum {
     bench_mixed,
     /// Debug noise (pipeline Config.noise); emits nothing.
     noise,
+    // ---- liquid solver (M6), src/sim/liquid_scenes.zig ----
+    liquid_utube,
+    liquid_dam,
+    liquid_pool,
+    liquid_slosh,
+    liquid_basin,
+    // ---- end liquid solver ----
 };
 
 pub fn emit(scene: Scene, tick: u32, seed: u32, list: *commands.CommandList) void {
@@ -31,6 +39,11 @@ pub fn emit(scene: Scene, tick: u32, seed: u32, list: *commands.CommandList) voi
         .determinism => determinism(tick, seed, list),
         .bench_static => if (tick == 0) benchStatic(list),
         .bench_active => if (tick == 0) list.fillRect(0, 0, cell.world_size, cell.world_size, m.sand, .{ .coverage = 128 }),
+        .liquid_utube => liquid_scenes.emit(.utube, tick, seed, list),
+        .liquid_dam => liquid_scenes.emit(.dam, tick, seed, list),
+        .liquid_pool => liquid_scenes.emit(.pool, tick, seed, list),
+        .liquid_slosh => liquid_scenes.emit(.slosh, tick, seed, list),
+        .liquid_basin => liquid_scenes.emit(.basin, tick, seed, list),
         .bench_mixed => if (tick == 0) {
             list.fillRect(0, 0, W, W, m.water, .{ .coverage = 80 });
             list.fillRect(0, 0, W, W, m.sand, .{ .coverage = 80, .only_air = true });

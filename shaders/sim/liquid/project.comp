@@ -1,0 +1,25 @@
+#version 460
+// Pressure projection: subtract the pressure gradient on every open face
+// that touches a fluid cell (air cells have p = 0). Each thread owns its
+// cell's left u face and top v face.
+#include "sim/liquid/mg.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+float pressure(uint i) { return mg_type(MG_TYPE(i)) == LQ_FLUID ? MG_P(i) : 0.0; }
+
+void main() {
+    ivec2 cid = ivec2(gl_GlobalInvocationID.xy);
+    uint c = gidx(cid);
+    uint w = MG_TYPE(c);
+    bool fc = mg_type(w) == LQ_FLUID;
+    float pc_ = pressure(c);
+    if (mg_wl(w) != 0u) {
+        uint l = gidx(cid + ivec2(-1, 0));
+        if (fc || mg_type(MG_TYPE(l)) == LQ_FLUID) LQ_F32(LQ_BUF_U)[c] -= pc_ - pressure(l);
+    }
+    if (mg_wt(w) != 0u) {
+        uint t = gidx(cid + ivec2(0, -1));
+        if (fc || mg_type(MG_TYPE(t)) == LQ_FLUID) LQ_F32(LQ_BUF_V)[c] -= pc_ - pressure(t);
+    }
+}

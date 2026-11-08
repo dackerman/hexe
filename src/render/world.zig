@@ -14,6 +14,9 @@ pub const View = struct {
     scale: u32 = 1,
     /// Tint tiles on this tick's active list.
     show_tiles: bool = false,
+    /// Liquid solver overlay: awake particles cyan (ballistic yellow),
+    /// sleeping solver liquid dimmed (needs Config.liquid_overlay).
+    show_liquid: bool = false,
 };
 
 pub const WorldPass = struct {
@@ -44,7 +47,7 @@ pub const WorldPass = struct {
             .ox = 0,
             .oy = 0,
             .scale = @max(view.scale, 1),
-            .flags = @intFromBool(view.show_tiles),
+            .flags = @as(u32, @intFromBool(view.show_tiles)) | (@as(u32, @intFromBool(view.show_liquid)) << 1),
         });
         ctx.vkd.cmdDraw(cmd, 3, 1, 0, 0);
     }

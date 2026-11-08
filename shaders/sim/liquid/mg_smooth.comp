@@ -1,0 +1,88 @@
+#version 460
+// Tile-local red-black Gauss-Seidel at level pc.level. One workgroup loads a
+// T x T tile (T = min(32, level size)) plus a 1-cell halo of pressures and
+// cell words into shared memory, runs pc.n red-black iterations there and
+// writes the tile back. Halo values stay as loaded (block Gauss-Seidel
+// across tiles): two dispatches per smoothing step instead of two per
+// iteration, which is what the barrier-bound coarse levels need.
+// Tiles are updated in checkerboard order, pc.level >> 8 = tile color, so a
+// tile's halo (edge neighbors, the other color) never changes while it is
+// read: the result does not depend on scheduling (determinism).
+// mode 1 first adds the coarse-grid correction (prolongation): p +=
+// pc.correction * p(parent) for fluid cells under a fluid parent. The first
+// color also corrects its halo copy; the second color's halo cells were
+// already corrected (and smoothed) by the first.
+// At level 0 the update is projected onto p >= 0 (projected Gauss-Seidel):
+// liquid may pull away from walls, ceilings and sleeping liquid instead of
+// hanging from them by suction; it can push but not pull.
+#include "sim/liquid/mg.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+#define TMAX 32u
+#define HMAX (TMAX + 2u)
+
+shared float s_p[HMAX * HMAX];
+shared uint s_w[HMAX * HMAX];
+shared float s_b[TMAX * TMAX];
+
+void main() {
+    uint l = pc.level & 0xffu;
+    uint color = pc.level >> 8;
+    uint n = level_size(l);
+    uint T = min(TMAX, n);
+    uint H = T + 2u;
+    // Dispatch is half width: workgroup x indexes tiles of this color.
+    uvec2 tile = uvec2(gl_WorkGroupID.x * 2u + ((gl_WorkGroupID.y + color) & 1u), gl_WorkGroupID.y);
+    if (tile.x * T >= n) return;
+    ivec2 org = ivec2(tile * T);
+    uint tid = gl_LocalInvocationIndex;
+    for (uint k = tid; k < H * H; k += 256u) {
+        ivec2 q = ivec2(int(k % H), int(k / H)) - 1;
+        ivec2 g = org + q;
+        uint gi = lidx(l, g);
+        uint w = MG_TYPE(gi);
+        float p = MG_P(gi);
+        bool halo = q.x < 0 || q.y < 0 || q.x >= int(T) || q.y >= int(T);
+        if (pc.mode == 1u && mg_type(w) == LQ_FLUID && (!halo || color == 0u)) {
+            uint pi = lidx(l + 1u, g >> 1);
+            if (mg_type(MG_TYPE(pi)) == LQ_FLUID) p += pc.correction * MG_P(pi);
+            if (l == 0u) p = max(p, 0.0);
+        }
+        s_w[k] = w;
+        s_p[k] = p;
+    }
+    for (uint k = tid; k < T * T; k += 256u) {
+        ivec2 q = ivec2(int(k % T), int(k / T));
+        s_b[k] = MG_B(lidx(l, org + q));
+    }
+    barrier();
+    for (uint it = 0u; it < pc.n; it++) {
+        for (uint rb = 0u; rb < 2u; rb++) {
+            for (uint k = tid; k < T * T; k += 256u) {
+                ivec2 q = ivec2(int(k % T), int(k / T));
+                if ((uint(q.x + q.y + org.x + org.y) & 1u) != rb) continue;
+                uint s = uint(q.y + 1) * H + uint(q.x + 1);
+                uint w = s_w[s];
+                if (mg_type(w) != LQ_FLUID) continue;
+                uint wl = mg_wl(w), wt = mg_wt(w);
+                uint wr = mg_wl(s_w[s + 1u]), wb = mg_wt(s_w[s + H]);
+                float diag = float(wl + wr + wt + wb);
+                if (diag <= 0.0) continue;
+                float off = 0.0;
+                if (mg_type(s_w[s - 1u]) == LQ_FLUID) off += float(wl) * s_p[s - 1u];
+                if (mg_type(s_w[s + 1u]) == LQ_FLUID) off += float(wr) * s_p[s + 1u];
+                if (mg_type(s_w[s - H]) == LQ_FLUID) off += float(wt) * s_p[s - H];
+                if (mg_type(s_w[s + H]) == LQ_FLUID) off += float(wb) * s_p[s + H];
+                float p = (s_b[k] + off) / diag;
+                s_p[s] = l == 0u ? max(p, 0.0) : p;
+            }
+            barrier();
+        }
+    }
+    for (uint k = tid; k < T * T; k += 256u) {
+        ivec2 q = ivec2(int(k % T), int(k / T));
+        uint s = uint(q.y + 1) * H + uint(q.x + 1);
+        if (mg_type(s_w[s]) == LQ_FLUID) MG_P(lidx(l, org + q)) = s_p[s];
+    }
+}

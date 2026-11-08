@@ -230,6 +230,11 @@ const Block = struct {
         const mt = &table.gpu[cell.material(b.cell[i])];
         b.move[i] = mt.moveWord();
         b.key[i] = mt.sort_key;
+        // Particle-backed cells belong to the liquid solver: static here.
+        if (cell.has(b.cell[i], cell.flag_particle)) {
+            b.move[i] = static;
+            b.key[i] = materials.sort_key_static;
+        }
         b.moved[i] = false;
     }
 

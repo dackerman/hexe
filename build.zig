@@ -13,6 +13,31 @@ const shader_sources = [_][]const u8{
     "sim/grid/commands.comp",
     "sim/grid/activity.comp",
     "sim/grid/movement.comp",
+    // ---- liquid solver (M6) ----
+    "sim/liquid/wake_commands.comp",
+    "sim/liquid/lift.comp",
+    "sim/liquid/wake.comp",
+    "sim/liquid/scan_local.comp",
+    "sim/liquid/scan_sums.comp",
+    "sim/liquid/finalize.comp",
+    "sim/liquid/bin_count.comp",
+    "sim/liquid/bin_scatter.comp",
+    "sim/liquid/bin_fixup.comp",
+    "sim/liquid/reorder.comp",
+    "sim/liquid/p2g.comp",
+    "sim/liquid/classify.comp",
+    "sim/liquid/divergence.comp",
+    "sim/liquid/mg_build.comp",
+    "sim/liquid/mg_smooth.comp",
+    "sim/liquid/mg_restrict.comp",
+    "sim/liquid/mg_coarsest.comp",
+    "sim/liquid/project.comp",
+    "sim/liquid/g2p.comp",
+    "sim/liquid/claim.comp",
+    "sim/liquid/drop.comp",
+    "sim/liquid/settle.comp",
+    "sim/liquid/flush.comp",
+    // ---- end liquid solver ----
     // ---- render ----
     "render/fullscreen.vert",
     "render/world.frag",
@@ -247,6 +272,7 @@ fn addHexe(b: *std.Build, o: HexeOptions) Hexe {
     });
     // Raw GLSL sources the CPU mirrors are checked against (see src/sim/cell.zig tests).
     module.addAnonymousImport("common_glsl", .{ .root_source_file = b.path("shaders/common.glsl") });
+    module.addAnonymousImport("liquid_glsl", .{ .root_source_file = b.path("shaders/sim/liquid/liquid.glsl") }); // liquid (M6) mirror test
     for (o.shared) |imp| module.addImport(imp.name, imp.module);
     const compile = b.addExecutable(.{ .name = o.name, .root_module = module });
     return .{ .compile = compile, .module = module };

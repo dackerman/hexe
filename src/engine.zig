@@ -376,7 +376,7 @@ pub const Engine = struct {
     /// Render the whole world 1:1 through world.frag into the capture image
     /// and return its RGBA8 pixels (valid until the next capture/readback).
     pub fn captureWorld(self: *Engine) ![]const u8 {
-        return self.captureView(.{}, .{ .width = cell.world_size, .height = cell.world_size }, false);
+        return self.captureView(.{ .show_liquid = self.pipeline.config.liquid_overlay }, .{ .width = cell.world_size, .height = cell.world_size }, false);
     }
 
     /// Render `view` (and the HUD) as the window would show it, into the
