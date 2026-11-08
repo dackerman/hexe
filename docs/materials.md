@@ -294,7 +294,7 @@ std140- and std430-compatible. Every field is a `uint`; `ramp` is
 | 140 | `move` |
 | 144 | `sort_key` |
 | 148 | `flame` |
-| 152 | `reserved` |
+| 152 | `restitution` |
 | 156 | `ramp_len` |
 | 160 | `ramp` |
 

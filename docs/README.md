@@ -16,5 +16,7 @@ check before changing anything structural.
 | [08-engineering.md](08-engineering.md) | toolchain, build targets, code and shader conventions, testing, decision recording, git |
 | [decisions/](decisions/) | implementation-time decisions, one file each |
 
-`materials.md` will be generated from the ZON files by `zig build docs`
-starting at milestone 3 and will replace the tables in `03-materials.md`.
+`materials.md` is generated from the ZON files in `materials/` by
+`zig build docs`; the loaded set is the engine's only material table
+(decisions/110-integrate-material-layout.md). Decisions 110-119 record the
+integration of the milestone branches.

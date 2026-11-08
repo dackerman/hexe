@@ -123,11 +123,16 @@ uint hash_pass(uint x, uint y, uint tick, uint substep, uint salt) {
 #define BINDING_SAMPLED_IMAGES 2
 #define BINDING_SAMPLERS 3
 
+// Fixed slot map after the integration (docs/decisions/112-integrate-overlay.md):
+//   images   0 cells, 1 owner, 2 debug overlay (renderer), 8 solid coarse,
+//            9 liquid coarse, 10 air, 11 air source, 13 particle overlay,
+//            14 liquid wake; 3-7, 12, 15 free
+//   buffers  0 materials, 1 tile marks, 2 tile list, 3 commands, 4 eject
+//            queue, 12 reactions, 16 events, 17-24 particles, 25 blast
+//            ejects, 26 air events, 27-28 air tiles; 5-11, 13-15, 29-31 free
 #define SLOT_IMG_CELLS 0u
 #define SLOT_IMG_OWNER 1u
-// Air field and obstacle coarsening (M5). Slots 8-12 / 20-23 were taken as a
-// block rather than "next free" to avoid renumbering at merge
-// (docs/decisions/70-air-field-abi.md).
+// Air field and obstacle coarsening (M5), docs/decisions/70-air-field-abi.md.
 #define SLOT_IMG_SOLID_COARSE 8u
 #define SLOT_IMG_LIQUID_COARSE 9u
 #define SLOT_IMG_AIR 10u
