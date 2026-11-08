@@ -59,6 +59,20 @@ pub fn materialIds(lib: *const materials.Library) procgen.MaterialIds {
     return ids;
 }
 
+/// Initial state bytes for procgen's damageable solids, taken from the
+/// loaded table's `state_init` (health) so generated cells never start with
+/// an out-of-range state (steel's health is capped at 63 because bits 6-7
+/// of its state byte hold the electric charge, decision 42).
+pub fn spawnState(lib: *const materials.Library, ids: procgen.MaterialIds) procgen.SpawnState {
+    const t = lib.tables.materials;
+    return .{
+        .stone = @intCast(t[ids.stone].state_init & 0xff),
+        .concrete = @intCast(t[ids.concrete].state_init & 0xff),
+        .steel = @intCast(t[ids.steel].state_init & 0xff),
+        .wood = @intCast(t[ids.wood].state_init & 0xff),
+    };
+}
+
 pub const TickStats = struct {
     ticks: u64 = 0,
     sum_ns: u64 = 0,
@@ -134,7 +148,7 @@ pub const Session = struct {
             }
         }
 
-        const params: procgen.Params = .{ .ids = self.ids };
+        const params: procgen.Params = .{ .ids = self.ids, .spawn_state = spawnState(lib, self.ids) };
         self.store = try Store.init(gpa, self.seed, params, .{});
         errdefer self.store.deinit();
         if (save_dir) |d| {
