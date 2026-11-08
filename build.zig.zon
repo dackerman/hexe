@@ -3,7 +3,12 @@
     .version = "0.0.0",
     .fingerprint = 0x4bf46f12bc2a0cc5, // Changing this has security and trust implications.
     .minimum_zig_version = "0.17.1",
-    .dependencies = .{},
+    .dependencies = .{
+        .vulkan = .{
+            .url = "git+https://github.com/Snektron/vulkan-zig.git#8a0bc54894ed546ad1ecc4c072e0070cef022ee4",
+            .hash = "vulkan-0.0.0-r7Ytx_KJAwA4dG8cx7pUBhfdqz80XWCV7xsCFHCA1upR",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",
