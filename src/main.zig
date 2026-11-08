@@ -235,7 +235,7 @@ fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *const materia
             .radius = 8,
             .view = view,
             .cursor = center,
-            .material_count = lib.len(),
+            .material_count = app.palette.len,
         });
         try engine.screenshotView(io, path, view, cli.width, cli.height);
     }

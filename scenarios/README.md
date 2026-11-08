@@ -21,6 +21,7 @@ the world edge.
     .name = "dam_break",              // must equal the file name
     .description = "...",             // one or two sentences, shown on failure
     .size = .{ .w = 256, .h = 256 },  // optional, default 256 x 256, max 2048
+    .requires = .{ .flip },           // optional: systems needed (flip, air_field, explosions, particles, bodies)
     .seed = 0,                        // optional, seeds the simulation hash
     .ticks = 900,                     // how long to run
     .fills = .{ ... },                // optional, applied in order before tick 0
@@ -122,6 +123,14 @@ Assertion rects and points must lie inside the world.
 The numeric thresholds (counts, ticks, pressures) are first guesses from
 the material tables; expect to tune them when the runner first executes
 these, and record any change of intent in `docs/decisions/`.
+
+## Running
+
+`zig build scenarios` runs every file here; `hexe --headless --scenario
+FILE` runs one (`--screenshot PREFIX` writes PNGs at assertion ticks,
+`--shot-every N` more). A scenario whose `.requires` names a system not
+built yet is reported SKIP with the reason. The world is framed by a
+one-cell bedrock ring. Details: docs/decisions/44-reactions-scenario-runner.md.
 
 ## Adding a scenario
 

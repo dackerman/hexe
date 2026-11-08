@@ -31,7 +31,7 @@ rejects unknown names, cycles in phase-change chains, and missing ramps.
     .melt = null,                // .{ .at = 1200, .to = "molten_glass" }
     .freeze = null,              // .{ .at = 0, .to = "ice" }
     .boil = .{ .at = 100, .to = "steam" },
-    .flammable = null,           // .{ .ignite_at = 300, .burn_ticks = 600, .to = "charcoal", .smoke = "smoke", .heat = 24, .event = .none }
+    .flammable = null,           // .{ .ignite_at = 300, .burn_ticks = 600, .to = "charcoal", .smoke = "smoke", .heat = 24, .event = .none, .flame = "flame" }
     .conductive = true,          // carries electricity
     .impact = .splash,           // .none, .splash, .spray, .chip, .dent, .ricochet
     .ricochet = false,           // also ricochets, for .dent materials (steel)

@@ -27,7 +27,7 @@ const Profile = @import("profile.zig").Profile;
 const tick_ns: i96 = std.time.ns_per_s / 60;
 
 /// Brush materials on keys 1-9, by name (missing ones are skipped).
-const palette = [_][]const u8{ "sand", "water", "stone", "lava", "wood", "oil", "flame", "steel", "gunpowder" };
+pub const palette = [_][]const u8{ "sand", "water", "stone", "lava", "wood", "oil", "flame", "steel", "gunpowder" };
 /// Ticks between polls of the materials directory.
 const reload_poll_ticks = 30;
 /// How long the reload message stays in the HUD.
