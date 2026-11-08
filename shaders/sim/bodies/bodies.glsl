@@ -6,6 +6,9 @@
 #define HEXE_BODIES_GLSL
 
 #include "common.glsl"
+#include "sim/events.glsl"
+#include "sim/particles/particles.glsl"
+#include "sim/liquid/wake.glsl"
 
 // Pass modes of raster.comp. Every mode walks the same work items: one 16x16
 // workgroup per 16x16 block of a body's world-space bounding box.
@@ -88,11 +91,14 @@ HEXE_BUFFER(BodyAtlasBlock, readonly, uint8_t px[];, g_body_atlas);
 HEXE_BUFFER(BodyStatsBlock, , uint words[];, g_body_stats);
 
 // ---------------------------------------------------------------------------
-// Eject queue at SLOT_BUF_EJECT (common.glsl): cells pushed out of the grid
-// by bodies (displaced liquid, powder, gas) and debris requested by the CPU
-// (sparks). The particles layer is meant to drain it into ballistic
-// particles; until it does, eject_fallback.comp reinserts each cell at the
-// first air cell above it (docs/decisions/91-bodies-gpu-eject-queue.md).
+// Displaced cells (liquid, powder, gas pushed out by a body) and debris
+// requested by the CPU (sparks) fly as ballistic particles of the shared
+// particle buffer (src/sim/particles.zig). A spawn the particle budget
+// refuses goes to the eject queue at SLOT_BUF_EJECT, and eject_fallback.comp
+// reinserts it at the first air cell above it, so displaced fluid is never
+// lost (docs/decisions/91-bodies-gpu-eject-queue.md,
+// 115-integrate-explode.md). Displaced solver liquid also wakes the liquid
+// around it (liquid_wake_at).
 // ---------------------------------------------------------------------------
 struct EjectEntry {
     ivec2 p; // world px (wrapped)
@@ -104,6 +110,9 @@ HEXE_BUFFER(EjectBlock, , uint count; uint dropped; uint pad0; uint pad1; EjectE
 #define EJECT g_eject_queue[SLOT_BUF_EJECT]
 
 void bodies_eject_cell(ivec2 p, uint c, vec2 velocity) {
+    uint m = cell_material(c);
+    if ((MATERIALS[m].flags & MATERIAL_FLAG_SOLVER_FLIP) != 0u) liquid_wake_at(p, 2u);
+    if (spawn_particle(vec2(wrap_coord(p)) + 0.5, velocity, pmeta_from_cell(c, m, PARTICLE_MODE_BALLISTIC), PARTICLE_UNBOUND)) return;
     uint i = atomicAdd(EJECT.count, 1u);
     if (i < EJECT_CAPACITY) {
         EJECT.items[i].p = wrap_coord(p);

@@ -196,6 +196,13 @@ pub const Session = struct {
             .y => sy = .{ m.slots[0].y, (m.slots[0].y + 1) % window.chunks },
         };
         self.engine.pipeline.stream.setSeams(sx, sy);
+        // The air field's open edge follows the window's origin seam
+        // (docs/decisions/71-air-boundaries.md): lattice cells of 2x2 px.
+        // TODO(integrate: Air.resetRegion): newly streamed-in chunks keep
+        // the air state of the chunk they replaced until it relaxes; a reset
+        // of their lattice cells to ambient at upload is not implemented.
+        const lattice_per_chunk: i32 = @intCast(chunk.size / 2);
+        self.engine.pipeline.air.seam = .{ @as(i32, @intCast(o.x)) * lattice_per_chunk, @as(i32, @intCast(o.y)) * lattice_per_chunk };
     }
 
     /// Parks every dirty resident chunk and writes the save directory (if

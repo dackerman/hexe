@@ -44,6 +44,10 @@ pub const Kind = enum(u32) {
     /// Center (x0, y0), radius x1 (pixels), steps y1; `material` holds the
     /// density delta and `flags` the radial momentum, both as f32 bits.
     inject_pressure = 9,
+    /// Wake sleeping solver liquid (src/sim/liquid.zig) in the circle
+    /// center (x0, y0), radius x1, spreading `material` (hop count) pixels
+    /// further. Changes no cell; the grid applier skips it.
+    wake_liquid = 32,
 };
 pub const shape_mask: u32 = 0xff;
 
@@ -316,6 +320,21 @@ pub const CommandList = struct {
         });
     }
 
+    /// Wake sleeping solver liquid within `radius` of (cx, cy); the wake then
+    /// spreads `hops` (1-8) more pixels, one per tick (docs/04-fluids.md "Wake").
+    pub fn wakeLiquid(self: *CommandList, cx: i32, cy: i32, radius: i32, hops: u8) void {
+        self.push(.{
+            .kind = @backingInt(Kind.wake_liquid),
+            .material = std.math.clamp(hops, 1, 8),
+            .x0 = cx,
+            .y0 = cy,
+            .x1 = std.math.clamp(radius, 0, max_radius),
+            .y1 = 0,
+            .flags = 0,
+            .seed = 0,
+        });
+    }
+
     pub fn slice(self: *const CommandList) []const CommandGpu {
         return self.items[0..self.len];
     }
@@ -332,7 +351,7 @@ pub fn bounds(c: CommandGpu) ?Box {
     var y1: i32 = undefined;
     const shape = std.enums.fromInt(Kind, c.kind & shape_mask) orelse return null;
     switch (shape) {
-        .fill_circle, .eject => {
+        .fill_circle, .eject, .wake_liquid => {
             x0 = c.x0 - c.x1;
             y0 = c.y0 - c.x1;
             x1 = c.x0 + c.x1 + 1;
@@ -381,6 +400,8 @@ pub fn insideShape(c: CommandGpu, x: i32, y: i32) bool {
         .inject_pressure => false,
         .fill_line => insideCapsule(c.x0, c.y0, c.x1, c.y1, @intCast(c.material >> line_radius_shift), x, y),
         .spray => false,
+        // Fills nothing (the liquid solver consumes it).
+        .wake_liquid => false,
     };
 }
 
@@ -447,6 +468,7 @@ pub const Applier = struct {
     fn recordInner(self: *Applier, frame: *Frame) void {
         frame.bindCompute(self.pipeline);
         for (frame.commands, 0..) |c, i| {
+            if (c.kind == @backingInt(Kind.wake_liquid)) continue;
             const box = bounds(c) orelse continue;
             frame.push(extern struct { x: i32, y: i32, w: u32, h: u32, index: u32, mark: u32 }{
                 .x = box.x,

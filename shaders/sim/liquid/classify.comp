@@ -1,0 +1,55 @@
+#version 460
+// Cell types, cut-cell face weights, gravity and solid boundaries.
+// Obstacles are read from the full-resolution cell image (after lift, so
+// awake liquid is not an obstacle to itself): anything that is not air, gas
+// or sleeping solver liquid -- static solids, powders, other liquids, body
+// cells. A face between two cells spans two pixel rows (columns); each half
+// is open when both pixels beside it are passable, so a 1-pixel wall closes
+// the face whichever pixel column it sits on, and a half-blocked face gets
+// weight 1 of 2 (cut cell). A cell is solid when all 4 of its pixels are
+// obstacles, fluid when it holds a liquid particle or a sleeping liquid
+// pixel, air otherwise.
+// Sleeping liquid is in the solve as liquid at rest: its faces have zero
+// velocity before forces and get gravity like any liquid face. At rest the
+// projection gives it hydrostatic pressure and zero velocity; where the
+// awake water pushes or pulls on it (a dam break, a U-tube), the projected
+// velocity is not zero, and the next wake pass wakes those cells with that
+// velocity. Particles still cannot enter a sleeping pixel (g2p march).
+// Velocity on closed faces is zero (static boundary; body velocity later).
+// This pass is the liquid solver's obstacle coarsening; see
+// docs/decisions/80-liquid-integration.md for how it relates to the shared mask.
+#include "sim/liquid/liquid.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+bool obstacle(ivec2 p) { return !cell_passable(load_cell(p)); }
+bool sleeping(ivec2 p) { return cell_flip_plain(load_cell(p)); }
+
+void main() {
+    ivec2 cid = ivec2(gl_GlobalInvocationID.xy);
+    uint c = gidx(cid);
+    ivec2 p = cid * 2;
+    bool o[3][3]; // [row dy+1][col dx+1] for pixels p + (dx, dy), dx, dy in -1..1
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) o[dy + 1][dx + 1] = obstacle(p + ivec2(dx, dy));
+    }
+    bool o11 = obstacle(p + ivec2(1, 1));
+    uint wl = uint(!o[1][0] && !o[1][1]) + uint(!o[2][0] && !o[2][1]);
+    uint wt = uint(!o[0][1] && !o[1][1]) + uint(!o[0][2] && !o[1][2]);
+    uint blocked = uint(o[1][1]) + uint(o[1][2]) + uint(o[2][1]) + uint(o11);
+    bool s00 = sleeping(p), s10 = sleeping(p + ivec2(1, 0)), s01 = sleeping(p + ivec2(0, 1)), s11 = sleeping(p + ivec2(1, 1));
+    bool asleep = s00 || s10 || s01 || s11;
+    // Faces touching sleeping liquid count as liquid faces (gravity).
+    bool v_liquid = s00 || s10 || sleeping(p + ivec2(0, -1)) || sleeping(p + ivec2(1, -1));
+    uint liquid = mg_liquid(LQ_U32(LQ_BUF_MG_TYPE)[c]);
+    uint type = blocked == 4u ? LQ_SOLID : (liquid > 0u || asleep ? LQ_FLUID : LQ_AIR);
+    LQ_U32(LQ_BUF_MG_TYPE)[c] = type | (wl << 8) | (wt << 16) | (liquid << 24);
+
+    float u = LQ_F32(LQ_BUF_U_OLD)[c];
+    float v = LQ_F32(LQ_BUF_V_OLD)[c];
+    if (LQ_F32(LQ_BUF_VW)[c] > 1e-6 || v_liquid) v += pc.gravity * pc.dt;
+    if (wl == 0u) u = 0.0;
+    if (wt == 0u) v = 0.0;
+    LQ_F32(LQ_BUF_U)[c] = u;
+    LQ_F32(LQ_BUF_V)[c] = v;
+}

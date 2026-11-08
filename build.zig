@@ -48,6 +48,31 @@ const shader_sources = [_][]const u8{
     // ---- reactions (M3) ----
     "sim/grid/reactions.comp",
     "sim/grid/reactions_commit.comp",
+    // ---- liquid solver (M6) ----
+    "sim/liquid/wake_commands.comp",
+    "sim/liquid/lift.comp",
+    "sim/liquid/wake.comp",
+    "sim/liquid/scan_local.comp",
+    "sim/liquid/scan_sums.comp",
+    "sim/liquid/finalize.comp",
+    "sim/liquid/bin_count.comp",
+    "sim/liquid/bin_scatter.comp",
+    "sim/liquid/bin_fixup.comp",
+    "sim/liquid/reorder.comp",
+    "sim/liquid/p2g.comp",
+    "sim/liquid/classify.comp",
+    "sim/liquid/divergence.comp",
+    "sim/liquid/mg_build.comp",
+    "sim/liquid/mg_smooth.comp",
+    "sim/liquid/mg_restrict.comp",
+    "sim/liquid/mg_coarsest.comp",
+    "sim/liquid/project.comp",
+    "sim/liquid/g2p.comp",
+    "sim/liquid/claim.comp",
+    "sim/liquid/drop.comp",
+    "sim/liquid/settle.comp",
+    "sim/liquid/flush.comp",
+    // ---- end liquid solver ----
     // ---- render ----
     "render/fullscreen.vert",
     "render/world.frag",
@@ -289,6 +314,14 @@ pub fn build(b: *std.Build) void {
     air_test_run.has_side_effects = true;
     b.step("air-test", "Air field scenarios 3 and 4 (docs/04-fluids.md) headless on the GPU").dependOn(&air_test_run.step);
 
+    // ---- liquid solver scenarios (M6): U-tube, dam break, pool, determinism ----
+    const liquid_test_run = b.addRunArtifact(bench_exe.compile);
+    liquid_test_run.addArgs(&.{ "--headless", "--liquid-test", "all" });
+    liquid_test_run.setCwd(b.path(".")); // materials/
+    liquid_test_run.addPassthruArgs();
+    liquid_test_run.has_side_effects = true;
+    b.step("liquid-test", "Liquid solver scenarios 1, 2, 5, 6 (docs/04-fluids.md) and reactions coupling, headless (ReleaseFast)").dependOn(&liquid_test_run.step);
+
     // ---- scenarios: headless GPU regression worlds (ReleaseSafe, reuses the verify binary) ----
     const scenarios_run = b.addRunArtifact(verify_exe.compile);
     scenarios_run.addArgs(&.{ "--headless", "--scenarios", "scenarios" });
@@ -365,6 +398,7 @@ fn addHexe(b: *std.Build, o: HexeOptions) Hexe {
     module.addAnonymousImport("particles_glsl", .{ .root_source_file = b.path("shaders/sim/particles/particles.glsl") });
     module.addAnonymousImport("events_glsl", .{ .root_source_file = b.path("shaders/sim/events.glsl") });
     module.addAnonymousImport("render_glsl", .{ .root_source_file = b.path("shaders/render/render.glsl") });
+    module.addAnonymousImport("liquid_glsl", .{ .root_source_file = b.path("shaders/sim/liquid/liquid.glsl") }); // liquid (M6) mirror test
     for (o.shared) |imp| module.addImport(imp.name, imp.module);
     const compile = b.addExecutable(.{ .name = o.name, .root_module = module });
     return .{ .compile = compile, .module = module };

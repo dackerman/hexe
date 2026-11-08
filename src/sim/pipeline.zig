@@ -32,6 +32,7 @@ const Bodies = @import("bodies_sim.zig").Bodies;
 const Particles = @import("particles.zig").Particles;
 const Readback = @import("readback.zig").Readback;
 const Reactions = @import("reactions.zig").Reactions;
+const Liquid = @import("liquid.zig").Liquid;
 
 pub const frames_in_flight = 2;
 /// Most ticks recorded into one frame (catch-up after a slow frame).
@@ -55,6 +56,17 @@ pub const Config = struct {
     particle_capacity: u32 = 1 << 20,
     particle_queue: u32 = 1 << 18,
     particle_budget: u32 = 0,
+    // ---- liquid solver (M6) ----
+    /// FLIP liquid solver on. Off: no particles; solver liquids are plain
+    /// cellular liquid (switching off flushes awake particles into cells).
+    liquid: bool = false,
+    /// Liquid particles that leave the liquid fly in the shared ballistic
+    /// pass (src/sim/particles.zig). Off keeps them in the solver's own
+    /// ballistic mode: the solver alone is bit-reproducible, the shared
+    /// pass is not (landing claims race), docs/decisions/116.
+    liquid_handoff: bool = true,
+    liquid_params: @import("liquid.zig").Params = .{},
+    // ---- end liquid solver ----
 };
 
 /// World-wide GPU resources every pass may use. All live at fixed bindless
@@ -167,6 +179,7 @@ pub const Pipeline = struct {
     particles: Particles,
     readback: Readback,
     reactions: Reactions,
+    liquid: Liquid,
     // ---- end subsystems ----
 
     /// In place: `shared` points into `self`.
@@ -200,6 +213,8 @@ pub const Pipeline = struct {
         self.reactions = try Reactions.init(ctx, config, alloc);
         errdefer self.reactions.deinit();
         try self.reactions.uploadReactions(tables);
+        self.liquid = try Liquid.init(ctx, config, alloc);
+        errdefer self.liquid.deinit();
         // ---- end subsystem init ----
         self.shared = self.grid.shared();
         self.shared.solid_coarse = &self.coarsen.solid;
@@ -209,6 +224,7 @@ pub const Pipeline = struct {
 
     pub fn deinit(self: *Pipeline) void {
         // ---- subsystem deinit (reverse order) ----
+        self.liquid.deinit();
         self.bodies.deinit();
         self.air.deinit();
         self.coarsen.deinit();
@@ -265,7 +281,12 @@ pub const Pipeline = struct {
         self.coarsen.record(frame);
         // 5. air field (M5): LBM steps, blast thresholds, events
         self.air.record(frame);
-        // 6. liquid solver (M6); ballistic particles and spawn queue (M4)
+        // 6. liquid solver (M6), then ballistic particles and the spawn
+        //    queue (M4)
+        self.liquid.handoff = self.config.liquid_handoff;
+        if (self.config.liquid) self.liquid.record(frame) else self.liquid.recordOff(frame);
+        self.particles.air_on = self.config.air;
+        self.particles.liquid_on = self.config.liquid;
         self.particles.record(frame);
         // 7. readback buffers, event queue (M4)
         self.readback.record(frame, &self.particles);

@@ -1,0 +1,39 @@
+#version 460
+// Compaction after rasterization: a slow liquid particle whose pixel has a
+// free pixel directly below moves down into it, so pixel holes in a liquid
+// body rise like bubbles (one pixel per tick) and resting water packs to
+// one particle per pixel, as the cellular rules would pack it. Lowers the
+// particle, so it cannot add energy. Each hole has exactly one candidate
+// (the particle straight above), and the decision is made against the
+// cells as they were before any move:
+//   mode 0  decide: mark LQ_BIND_PENDING on particles that will drop
+//   mode 1  apply:  move cell, owner and position down one pixel
+#include "sim/liquid/liquid.glsl"
+
+layout(local_size_x = 256) in;
+
+void main() {
+    uint k = gl_GlobalInvocationID.x;
+    if (k >= LQ_STATE[LQ_ST_COUNT]) return;
+    uint info = LQ_INFO(pc.dst)[k];
+    if (info_mode(info) != LQ_MODE_LIQUID) return;
+    uint b = LQ_BIND(pc.dst)[k];
+    if (b == LQ_NONE) return;
+    if (pc.mode == 0u) {
+        ivec2 p = unpack_pixel(b);
+        if (length(LQ_VEL(pc.dst)[k]) < pc.settle_speed && cell_free(load_cell(p + ivec2(0, 1)))) {
+            LQ_BIND(pc.dst)[k] = b | LQ_BIND_PENDING;
+        }
+        return;
+    }
+    if ((b & LQ_BIND_PENDING) == 0u) return;
+    ivec2 p = unpack_pixel(b & ~LQ_BIND_PENDING);
+    ivec2 q = wrap_coord(p + ivec2(0, 1));
+    uint c = imageLoad(CELLS, p).x;
+    imageStore(CELLS, q, uvec4(c, 0u, 0u, 0u));
+    imageStore(CELLS, p, uvec4(cell_make(MATERIAL_AIR, cell_temperature(c), 0u, 0u, 0u), 0u, 0u, 0u));
+    imageStore(OWNER, q, uvec4(k, 0u, 0u, 0u));
+    LQ_BIND(pc.dst)[k] = pack_pixel(q);
+    vec2 pos = LQ_POS(pc.dst)[k];
+    LQ_POS(pc.dst)[k] = wrap_pos(vec2(pos.x, floor(pos.y) + 1.5));
+}

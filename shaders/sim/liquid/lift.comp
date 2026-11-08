@@ -1,0 +1,34 @@
+#version 460
+// Lift: take last tick's rasterized particles out of the cell image so the
+// solver sees the world without them. A particle whose pixel still holds
+// its own particle-backed cell turns that pixel back into air (keeping the
+// cell's temperature, which heat may have changed). A particle whose pixel
+// was changed by another pass (a reaction turned the water into steam, a
+// command painted over it, an erase) dies: this is the reactions coupling,
+// with no list shared between passes.
+#include "sim/liquid/liquid.glsl"
+
+layout(local_size_x = 256) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= LQ_STATE[LQ_ST_COUNT]) return;
+    uint info = LQ_INFO(pc.src)[i];
+    if (info_mode(info) == LQ_MODE_DEAD) return;
+    uint b = LQ_BIND(pc.src)[i];
+    if (b == LQ_NONE) return;
+    ivec2 p = unpack_pixel(b);
+    uint c = imageLoad(CELLS, p).x;
+    bool ours = cell_has(c, CELL_FLAG_PARTICLE) && imageLoad(OWNER, p).x == i && cell_material(c) == info_material(info);
+    if (ours) {
+        info = info_with_temp(info, cell_temperature(c));
+        imageStore(CELLS, p, uvec4(cell_make(MATERIAL_AIR, cell_temperature(c), 0u, 0u, 0u), 0u, 0u, 0u));
+    } else {
+        info = info_with_mode(info, LQ_MODE_DEAD);
+        atomicAdd(LQ_STATE[LQ_ST_KILLED], 1u);
+        atomicAdd(LQ_STATE[LQ_ST_TOTAL_KILLED], 1u);
+        if ((pc.flags & LQ_PC_MARK_TILES) != 0u) mark_pixel_tile(p);
+    }
+    LQ_INFO(pc.src)[i] = info;
+    LQ_BIND(pc.src)[i] = LQ_NONE;
+}

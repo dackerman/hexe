@@ -47,7 +47,7 @@ const host_bytes = (2 * mask_words) * 4 + region_bytes;
 /// `struct Region` in shaders/sim/readback/region.comp.
 const RegionGpu = extern struct { x: i32, y: i32, w: u32, h: u32, offset_words: u32, words_per_row: u32, pad0: u32 = 0, pad1: u32 = 0 };
 
-const TickEvents = struct {
+pub const TickEvents = struct {
     tick: u32 = 0,
     valid: bool = false,
     len: u32 = 0,

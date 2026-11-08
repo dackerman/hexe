@@ -1,0 +1,241 @@
+#version 460
+// Wake: sleeping solver-liquid cells become particles. One workgroup per
+// active tile, one thread per 2x2 pixels. Two dispatches with the same
+// inputs:
+//   mode 0  decide and count: each pixel's decision (hop count, falling
+//           flag) goes into bits 24-31 of its wake word, candidates per
+//           tile into TILE_COUNT
+//   (scan of TILE_COUNT in tile order)
+//   mode 1  spawn from the stored decisions (spawning writes cells, so the
+//           neighborhood tests must not run again): each candidate's rank
+//           is its tile's prefix plus its
+//           position inside the tile (thread order, then pixel order), so
+//           particle indices do not depend on GPU scheduling. Ranks below
+//           min(budget, capacity - count) spawn at index count + rank; the
+//           rest are refused (budget: retried next tick; capacity: dropped).
+// A candidate is a sleeping solver-liquid pixel with a wake request (byte 0:
+// requests from other passes, byte 1 + (tick & 1): spread from last tick),
+// or one that the cellular rules moved in the last substep onto something
+// at rest with at least 6 solver-liquid neighbors (water arriving in a body
+// of water: a pour landing, cellular flow joining a pool), or one with a
+// moved powder neighbor (something sank into it). Droplets, films and a
+// sleeping surface being leveled by the cellular rules keep moving
+// cellularly without waking, so nothing ping-pongs between the solver and
+// the cellular rules. Runs before lift, so awake water is still in the cell
+// image.
+// A woken pixel spreads its hop count minus one to its 4 neighbors for next
+// tick, so a disturbance ripples outward one pixel per tick.
+// Flow trigger: last tick's projection treated sleeping liquid as liquid at
+// rest. A sleeping pixel wakes when a face of its cell that awake particles
+// touched got a velocity above pc.wake_speed / 2 (pushed or pulled by awake
+// water), or, in the interior of a body (liquid cells 2 cells away on all
+// four sides), a face no particle touched got one above
+// pc.imbalance_accel * dt: it started from rest, so that velocity is one
+// tick of acceleration, zero in hydrostatic balance and not zero when the
+// levels are uneven (water asleep out of balance, a cellular pour piling up
+// in one arm of a U-tube). Near the surface every bump the cellular rules
+// are still leveling is locally out of balance, so the surface is left out.
+// A new particle inherits the flow it joins: last tick's grid velocity at
+// its position; failing that, a cell the cellular rules moved onto free
+// space or moving liquid is falling, and starts at half the cellular fall
+// speed (8 px per tick) straight down.
+#include "sim/liquid/liquid.glsl"
+#include "sim/liquid/wake.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+shared uint s_scan[256];
+shared bool s_mark;
+
+uint hop_count(uint code) { return code == 0u ? 0u : uint(findMSB(code)) + 1u; }
+
+// Hops for the neighborhood triggers (0 = none).
+uint neighbor_trigger(ivec2 p, uint c) {
+    bool moved = cell_has(c, CELL_FLAG_MOVED);
+    uint hops = 0u;
+    uint liquid = 0u;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            uint n = load_cell(p + ivec2(dx, dy));
+            if (cell_has(n, CELL_FLAG_MOVED) && mat_phase_of(cell_material(n)) == PHASE_POWDER) hops = max(hops, LQ_WAKE_HOPS_POWDER);
+
+            if (mat_is_flip(cell_material(n))) liquid++;
+        }
+    }
+    // Piling up: landed on something at rest (not mid-stream, where the
+    // cell below is moving too), and no spread up the stream.
+    uint below = load_cell(p + ivec2(0, 1));
+    bool landed = !cell_free(below) && !cell_has(below, CELL_FLAG_MOVED);
+    if (hops > 0u) atomicAdd(LQ_STATE[LQ_ST_TRIGGERS + 1u], 1u);
+    if (moved && liquid >= 6u && landed) {
+        hops = max(hops, 1u);
+        atomicAdd(LQ_STATE[LQ_ST_TRIGGERS + 2u], 1u);
+    }
+    // A body of cellular solver liquid is moving: keep the solver checking
+    // its balance (finalize grace).
+    if (moved && liquid >= 3u) atomicAdd(LQ_STATE[LQ_ST_MOVED], 1u);
+    return hops;
+}
+
+// Last tick's grid velocity at pixel center p (bilinear over the MAC faces).
+vec2 grid_velocity(ivec2 p) {
+    vec2 x = (vec2(p) + 0.5) * 0.5;
+    vec2 v;
+    for (uint which = 0u; which < 2u; which++) {
+        vec2 g = x - (which == 0u ? vec2(0.0, 0.5) : vec2(0.5, 0.0));
+        ivec2 i0 = ivec2(floor(g));
+        vec2 f = g - vec2(i0);
+        float a, b, c, d;
+        if (which == 0u) {
+            a = LQ_F32(LQ_BUF_U)[gidx(i0)]; b = LQ_F32(LQ_BUF_U)[gidx(i0 + ivec2(1, 0))];
+            c = LQ_F32(LQ_BUF_U)[gidx(i0 + ivec2(0, 1))]; d = LQ_F32(LQ_BUF_U)[gidx(i0 + ivec2(1, 1))];
+        } else {
+            a = LQ_F32(LQ_BUF_V)[gidx(i0)]; b = LQ_F32(LQ_BUF_V)[gidx(i0 + ivec2(1, 0))];
+            c = LQ_F32(LQ_BUF_V)[gidx(i0 + ivec2(0, 1))]; d = LQ_F32(LQ_BUF_V)[gidx(i0 + ivec2(1, 1))];
+        }
+        v[which] = mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+    }
+    return v;
+}
+
+// 1: pushed by awake water, 2: out of balance, 0: neither.
+uint face_moving(uint buf_vel, uint buf_weight, uint i, bool interior) {
+    float v = abs(LQ_F32(buf_vel)[i]);
+    if (LQ_F32(buf_weight)[i] > 1e-6) return v > 0.5 * pc.wake_speed ? 1u : 0u;
+    return interior && v > pc.imbalance_accel * pc.dt ? 2u : 0u;
+}
+
+bool fluid_cell(ivec2 c) { return mg_type(LQ_U32(LQ_BUF_MG_TYPE)[gidx(c)]) == LQ_FLUID; }
+
+// Is a face of the grid cell holding pixel p moving (last tick)? 0 no,
+// 1 pushed by awake water, 2 out of balance.
+uint cell_flow(ivec2 p) {
+    ivec2 c = p >> 1;
+    bool interior = fluid_cell(c + ivec2(2, 0)) && fluid_cell(c - ivec2(2, 0)) && fluid_cell(c + ivec2(0, 2)) && fluid_cell(c - ivec2(0, 2));
+    return max(max(face_moving(LQ_BUF_U, LQ_BUF_UW, gidx(c), interior), face_moving(LQ_BUF_U, LQ_BUF_UW, gidx(c + ivec2(1, 0)), interior)),
+        max(face_moving(LQ_BUF_V, LQ_BUF_VW, gidx(c), interior), face_moving(LQ_BUF_V, LQ_BUF_VW, gidx(c + ivec2(0, 1)), interior)));
+}
+
+void main() {
+    uint packed = TILE_LIST.tiles[gl_WorkGroupID.x];
+    uvec2 tile = uvec2(packed & 0xffffu, packed >> 16);
+    uint t_index = tile_index(tile);
+    ivec2 base = ivec2(tile * TILE_SIZE + gl_LocalInvocationID.xy * 2u);
+    uint cur_shift = 8u * (1u + (pc.tick & 1u));
+    bool grid_valid = LQ_STATE[LQ_ST_GRID_VALID] != 0u;
+    uint next_shift = 8u * (1u + ((pc.tick + 1u) & 1u));
+
+    uint hops[4];
+    uint cells[4];
+    uint masks[4];
+    bool falling[4];
+    uint count = 0u;
+    for (uint k = 0u; k < 4u; k++) {
+        ivec2 p = base + ivec2(int(k & 1u), int(k >> 1));
+        uint c = imageLoad(CELLS, p).x;
+        uint m = imageLoad(LIQUID_WAKE, p).x;
+        cells[k] = c;
+        hops[k] = 0u;
+        falling[k] = false;
+        if (pc.mode == 0u) {
+            if (cell_flip_plain(c)) {
+                uint h = hop_count((m & 0xffu) | ((m >> cur_shift) & 0xffu));
+                if (h > 0u) atomicAdd(LQ_STATE[LQ_ST_TRIGGERS], 1u);
+                h = max(h, neighbor_trigger(p, c));
+                uint flow = grid_valid ? cell_flow(p) : 0u;
+                if (flow > 0u) {
+                    h = max(h, LQ_WAKE_HOPS_FLOW);
+                    atomicAdd(LQ_STATE[LQ_ST_TRIGGERS + 2u + flow], 1u);
+                }
+                hops[k] = h;
+                if (h > 0u && cell_has(c, CELL_FLAG_MOVED)) {
+                    uint below = load_cell(p + ivec2(0, 1));
+                    falling[k] = cell_free(below) || cell_has(below, CELL_FLAG_MOVED);
+                }
+            }
+            // Only this thread writes this pixel's word in this pass.
+            m = (m & 0x00ffffffu) | (hops[k] << 24) | (falling[k] ? 0x10000000u : 0u);
+            imageStore(LIQUID_WAKE, p, uvec4(m, 0u, 0u, 0u));
+        } else {
+            hops[k] = (m >> 24) & 0xfu;
+            falling[k] = (m & 0x10000000u) != 0u;
+        }
+        masks[k] = m;
+        if (hops[k] > 0u) count++;
+    }
+
+    if (pc.mode == 0u) {
+        s_scan[gl_LocalInvocationIndex] = count;
+        barrier();
+        for (uint s = 128u; s > 0u; s >>= 1) {
+            if (gl_LocalInvocationIndex < s) s_scan[gl_LocalInvocationIndex] += s_scan[gl_LocalInvocationIndex + s];
+            barrier();
+        }
+        if (gl_LocalInvocationIndex == 0u) LQ_U32(LQ_BUF_TILE_COUNT)[t_index] = s_scan[0];
+        return;
+    }
+
+    // Exclusive scan of per-thread counts in thread order (Hillis-Steele).
+    if (gl_LocalInvocationIndex == 0u) s_mark = false;
+    s_scan[gl_LocalInvocationIndex] = count;
+    barrier();
+    for (uint s = 1u; s < 256u; s <<= 1) {
+        uint v = gl_LocalInvocationIndex >= s ? s_scan[gl_LocalInvocationIndex - s] : 0u;
+        barrier();
+        s_scan[gl_LocalInvocationIndex] += v;
+        barrier();
+    }
+    uint rank = scan_prefix(LQ_BUF_TILE_SCAN, LQ_BUF_TILE_SUMS, t_index) + s_scan[gl_LocalInvocationIndex] - count;
+
+    uint n_old = LQ_STATE[LQ_ST_COUNT];
+    uint room = pc.cap > n_old ? pc.cap - n_old : 0u;
+    uint limit = min(pc.n, room);
+    bool mark = false;
+    for (uint k = 0u; k < 4u; k++) {
+        ivec2 p = base + ivec2(int(k & 1u), int(k >> 1));
+        uint m = masks[k];
+        // Consume this tick's requests and the decision (the next tick's
+        // byte is left alone).
+        uint consumed = 0xff0000ffu | (0xffu << cur_shift);
+        if ((m & consumed) != 0u) imageAtomicAnd(LIQUID_WAKE, p, ~consumed);
+        if (hops[k] > 0u && (pc.flags & LQ_PC_NO_SPAWN) != 0u) {
+            // Deferred: keep the request (byte 0) for the next full tick.
+            imageAtomicOr(LIQUID_WAKE, p, liquid_wake_code(hops[k]));
+            mark = true;
+        } else if (hops[k] > 0u) {
+            uint c = cells[k];
+            if (rank < limit) {
+                uint idx = n_old + rank;
+                uint temp = cell_temperature(c);
+                vec2 vel = grid_valid ? grid_velocity(p) : vec2(0.0);
+                if (dot(vel, vel) < 1.0 && falling[k]) vel = vec2(0.0, 0.5 * pc.max_speed);
+                LQ_POS(pc.src)[idx] = vec2(p) + 0.5;
+                LQ_VEL(pc.src)[idx] = vel;
+                LQ_AFF(pc.src)[idx] = vec4(0.0);
+                LQ_INFO(pc.src)[idx] = info_make(cell_material(c), LQ_MODE_LIQUID, cell_variant(c), temp);
+                LQ_BIND(pc.src)[idx] = LQ_NONE;
+                imageStore(CELLS, p, uvec4(cell_make(MATERIAL_AIR, temp, 0u, 0u, 0u), 0u, 0u, 0u));
+                if (hops[k] > 1u) {
+                    uint code = liquid_wake_code(hops[k] - 1u) << next_shift;
+                    imageAtomicOr(LIQUID_WAKE, wrap_coord(p + ivec2(1, 0)), code);
+                    imageAtomicOr(LIQUID_WAKE, wrap_coord(p + ivec2(-1, 0)), code);
+                    imageAtomicOr(LIQUID_WAKE, wrap_coord(p + ivec2(0, 1)), code);
+                    imageAtomicOr(LIQUID_WAKE, wrap_coord(p + ivec2(0, -1)), code);
+                }
+                mark = true;
+            } else if (room >= pc.n) {
+                // Over this tick's budget but not the cap: retry next tick.
+                imageAtomicOr(LIQUID_WAKE, p, liquid_wake_code(hops[k]) << next_shift);
+                atomicAdd(LQ_STATE[LQ_ST_REFUSED], 1u);
+                mark = true;
+            } else {
+                atomicAdd(LQ_STATE[LQ_ST_REFUSED], 1u);
+            }
+            rank++;
+        }
+    }
+    if (mark) s_mark = true;
+    barrier();
+    if (gl_LocalInvocationIndex == 0u && s_mark) mark_tile_and_neighbors(tile);
+}

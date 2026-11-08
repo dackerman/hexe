@@ -17,6 +17,8 @@ const Crop = @import("engine.zig").Crop;
 const scenes = @import("sim/scenes.zig");
 const materials = @import("sim/materials.zig");
 const scenario_runner = @import("scenario_runner.zig");
+const game_explode = @import("game/explode.zig");
+const commands = @import("sim/commands.zig");
 const renderer_mod = @import("render/renderer.zig");
 const overlay = @import("render/overlay.zig");
 const demo = @import("render/demo.zig");
@@ -31,6 +33,7 @@ const world_mode = @import("world_mode.zig");
 const air_test = @import("air_test.zig");
 const bodies_scenes = @import("sim/bodies_scenes.zig");
 const gpu_tests = @import("gpu_tests.zig");
+const liquid_test = @import("liquid_test.zig");
 
 pub const std_options: std.Options = .{
     .log_level = if (builtin.mode == .debug) .info else .info,
@@ -104,6 +107,12 @@ pub const Cli = struct {
     /// Headless view screenshot without the HUD text block (signs stay).
     hud: bool = true,
     scene_set: bool = false,
+    // ---- liquid solver (M6) ----
+    liquid: bool = false,
+    /// --liquid-test [name]: run the liquid scenarios (all when name is "all").
+    liquid_test: ?[]const u8 = null,
+    liquid_params: @import("sim/liquid.zig").Params = .{},
+    // ---- end liquid solver ----
 };
 
 fn usage() void {
@@ -154,6 +163,10 @@ fn usage() void {
         \\  --no-bloom, --no-vignette
         \\  --no-hud                view screenshot without the HUD block (world signs stay)
         \\  --frames N              windowed: quit after N frames and print frame timing
+        \\  --liquid                FLIP liquid solver on (headless; windowed: L toggles)
+        \\  --liquid-overlay        same as --overlay liquid_particles (Tab in the window)
+        \\  --liquid-test [NAME]    liquid scenarios: utube|dam|pool|reaction|determinism|all|residual
+        \\  --liquid-param K=V      set a liquid solver tunable (src/sim/liquid.zig Params)
         \\
     , .{});
 }
@@ -277,6 +290,18 @@ fn parseCli(args: []const [:0]const u8) !Cli {
             cli.scenarios = try next(args, &i);
         } else if (std.mem.eql(u8, a, "--shot-every")) {
             cli.shot_every = try std.fmt.parseInt(u32, try next(args, &i), 10);
+        } else if (std.mem.eql(u8, a, "--liquid")) {
+            cli.liquid = true;
+        } else if (std.mem.eql(u8, a, "--liquid-overlay")) {
+            cli.overlay = .liquid_particles;
+        } else if (std.mem.eql(u8, a, "--liquid-param")) {
+            try @import("sim/liquid.zig").parseParam(&cli.liquid_params, try next(args, &i));
+        } else if (std.mem.eql(u8, a, "--liquid-test")) {
+            cli.liquid_test = "all";
+            if (i + 1 < args.len and args[i + 1].len > 0 and args[i + 1][0] != '-') {
+                i += 1;
+                cli.liquid_test = args[i];
+            }
         } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
             usage();
             std.process.exit(0);
@@ -301,6 +326,7 @@ pub fn main(init: std.process.Init) !u8 {
     if (cli.verify) return verify.run(gpa, io, cli, &lib);
     if (cli.air_test) return air_test.run(gpa, io, cli, &lib);
     if (cli.gpu_tests) return gpu_tests.run(gpa, io, cli, &lib);
+    if (cli.liquid_test) |name| return liquid_test.run(gpa, io, cli, name, &lib);
     if (cli.bench_render) return bench_render.run(gpa, io, cli, &lib);
     if (cli.bench) return bench.run(gpa, io, cli, &lib);
     if (cli.scenario != null or cli.scenarios != null) return scenario_runner.run(gpa, io, cli, &lib);
@@ -339,7 +365,7 @@ fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *const materia
     try engine.init(gpa, .{
         .library = lib,
         .validation = cli.validation orelse (builtin.mode == .debug),
-        .pipeline = .{ .sleep = cli.sleep, .noise = cli.scene == .noise, .air = cli.air and cli.scene != .determinism, .air_sleep = cli.air_sleep, .bodies = bodies_on },
+        .pipeline = .{ .sleep = cli.sleep, .noise = cli.scene == .noise, .air = cli.air and cli.scene != .determinism, .air_sleep = cli.air_sleep, .bodies = bodies_on, .liquid = cli.liquid, .liquid_params = cli.liquid_params },
         .overlap = cli.overlap,
     });
     defer engine.deinit();
@@ -363,8 +389,16 @@ fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *const materia
 
     const start = std.Io.Timestamp.now(io, .awake);
     var peak_particles: u32 = 0;
+    // Gameplay's one reaction to the GPU: gunpowder explodes
+    // (src/game/explode.zig), one tick late through the readback mirror.
+    var explosions: game_explode.Explosions = .{};
+    var extra: commands.CommandList = .{};
+    const blast_opts: game_explode.Options = .{ .air = engine.pipeline.config.air, .liquid = engine.pipeline.config.liquid };
     for (0..cli.ticks) |t| {
-        try engine.frame(1, .{ .scene = cli.scene, .seed = cli.seed }, null);
+        try engine.poll();
+        extra.begin(engine.tick);
+        _ = explosions.drain(engine.mirror(), &extra, blast_opts);
+        try engine.frame(1, .{ .scene = cli.scene, .seed = cli.seed, .extra = extra.slice() }, null);
         peak_particles = @max(peak_particles, engine.mirror().particles.live);
         if (cli.screenshot_every > 0 and (t + 1) % cli.screenshot_every == 0) {
             if (cli.screenshot) |path| {
@@ -386,6 +420,10 @@ fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *const materia
     if (bodies_on) try bodies_scenes.report(engine, gpa);
     const ps = engine.mirror().particles;
     std.debug.print("  particles: {d} live at end (tick {d}), peak {d}; last tick spawned {d} landed {d} refused {d} lost {d} impacts {d}\n", .{ ps.live, engine.mirror().tick, peak_particles, ps.spawned, ps.landed, ps.refused, ps.lost, ps.impacts });
+    if (cli.liquid) {
+        const ls = engine.pipeline.liquid.stats();
+        std.debug.print("  liquid: {d} particles awake ({d} ballistic), last tick: {d} woke, {d} slept, {d} merged, {d} killed, {d} refused\n", .{ ls.alive, ls.ballistic, ls.spawned, ls.slept, ls.merged, ls.killed, ls.refused });
+    }
     if (cli.screenshot) |path| try engine.screenshot(io, path, cli.crop);
     if (cli.view_screenshot) |path| {
         const default_center: [2]i32 = if (cli.scene == .lighting) scenes.lighting_center else .{ cell.world_size / 2, cell.world_size / 2 };
@@ -424,6 +462,7 @@ test {
     _ = @import("sim/air_abi.zig");
     _ = @import("sim/particles.zig");
     _ = @import("sim/readback.zig");
+    _ = @import("sim/liquid.zig");
     _ = @import("render/font.zig");
     _ = @import("render/overlay.zig");
     _ = @import("render/materials.zig");
@@ -436,4 +475,5 @@ test {
     _ = @import("sim/bodies_materials.zig");
     _ = @import("sim/terrain_source.zig");
     _ = @import("sim/events.zig");
+    _ = @import("game/explode.zig");
 }

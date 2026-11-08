@@ -1,0 +1,22 @@
+#version 460
+// Solver switched off (or the window is about to evict this water): every
+// rasterized particle becomes a plain cell in place, so the cellular rules
+// own all liquid again. finalize mode 2 then sets the count to zero.
+#include "sim/liquid/liquid.glsl"
+
+layout(local_size_x = 256) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= LQ_STATE[LQ_ST_COUNT]) return;
+    uint info = LQ_INFO(pc.src)[i];
+    uint b = LQ_BIND(pc.src)[i];
+    if (info_mode(info) == LQ_MODE_DEAD || b == LQ_NONE) return;
+    ivec2 p = unpack_pixel(b);
+    uint c = imageLoad(CELLS, p).x;
+    if (cell_has(c, CELL_FLAG_PARTICLE) && imageLoad(OWNER, p).x == i) {
+        imageStore(CELLS, p, uvec4(c & ~CELL_FLAG_PARTICLE, 0u, 0u, 0u));
+        mark_pixel_tile(p);
+    }
+    LQ_BIND(pc.src)[i] = LQ_NONE;
+}

@@ -34,6 +34,8 @@ pub const debug_overlay_shift = 1;
 pub const overlay_air_pressure: u32 = @backingInt(overlay.Mode.air_pressure);
 pub const overlay_air_velocity: u32 = @backingInt(overlay.Mode.air_velocity);
 pub const overlay_liquid_particles: u32 = @backingInt(overlay.Mode.liquid_particles);
+/// Liquid solver wake mask (src/sim/liquid.zig).
+pub const slot_img_liquid_wake = 14;
 /// First storage image slot handed out by `Descriptors.allocImageSlot`.
 pub const slot_img_dynamic_base = 16;
 
@@ -107,6 +109,7 @@ pub const mirrors = .{
     .{ "SLOT_IMG_CELLS", slot_img_cells },
     .{ "SLOT_IMG_OWNER", slot_img_owner },
     .{ "SLOT_IMG_PARTICLE_OVERLAY", slot_img_particle_overlay },
+    .{ "SLOT_IMG_LIQUID_WAKE", slot_img_liquid_wake },
     .{ "SLOT_IMG_DYNAMIC_BASE", slot_img_dynamic_base },
     .{ "SLOT_IMG_SOLID_COARSE", slot_img_solid_coarse },
     .{ "SLOT_IMG_LIQUID_COARSE", slot_img_liquid_coarse },
@@ -197,6 +200,7 @@ pub const mirrors = .{
     .{ "CMD_ACTION_HEAT", @backingInt(commands.Action.heat) },
     .{ "CMD_ACTION_CHARGE", @backingInt(commands.Action.charge) },
     .{ "CMD_ONLY_SHIFT", commands.only_shift },
+    .{ "CMD_WAKE_LIQUID", @backingInt(commands.Kind.wake_liquid) },
     .{ "CMD_FLAG_ONLY_AIR", commands.flag_only_air },
     .{ "CMD_FLAG_ONLY_MATERIAL", commands.flag_only_material },
     .{ "CMD_FLAG_SET_TEMP", commands.flag_set_temp },

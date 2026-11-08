@@ -192,6 +192,8 @@ pub const Engine = struct {
         errdefer if (self.swapchain) |*sc| sc.deinit(ctx);
         try self.renderer.init(ctx, opts.library, present_format, capture_format);
         errdefer self.renderer.deinit();
+        // The liquid solver writes its debug overlay into the renderer's image.
+        self.pipeline.liquid.overlay_image = self.renderer.overlay_image.image.handle;
         self.hud = try Hud.init(ctx, present_format, capture_format);
     }
 

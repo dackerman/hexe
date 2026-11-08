@@ -1,0 +1,29 @@
+#version 460
+// Right-hand side of the pressure equation at level 0: b = -(weighted
+// divergence) for fluid cells, 0 elsewhere. Also zeroes the warm-start
+// pressure in cells that are not fluid this tick.
+// Density correction: a cell holding more than 4 liquid particles (one per
+// pixel is the rest density) gets a divergence target of
+// pc.density_gain * (count - 4) / 4, so the projection pushes particles out
+// of over-full cells instead of letting them pile up in a pixel.
+#include "sim/liquid/mg.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+void main() {
+    ivec2 cid = ivec2(gl_GlobalInvocationID.xy);
+    uint c = gidx(cid);
+    uint w = MG_TYPE(c);
+    float b = 0.0;
+    if (mg_type(w) == LQ_FLUID) {
+        uint r = gidx(cid + ivec2(1, 0));
+        uint d = gidx(cid + ivec2(0, 1));
+        float div = float(mg_wl(MG_TYPE(r))) * LQ_F32(LQ_BUF_U)[r] - float(mg_wl(w)) * LQ_F32(LQ_BUF_U)[c] +
+            float(mg_wt(MG_TYPE(d))) * LQ_F32(LQ_BUF_V)[d] - float(mg_wt(w)) * LQ_F32(LQ_BUF_V)[c];
+        float excess = max(float(mg_liquid(w)) - 4.0, 0.0) * 0.25;
+        b = -div + pc.density_gain * excess;
+    } else {
+        MG_P(c) = 0.0;
+    }
+    MG_B(c) = b;
+}

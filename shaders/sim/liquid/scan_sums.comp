@@ -1,0 +1,34 @@
+#version 460
+// Scan level 2: one workgroup turns the block totals LQ_U32(dst)[0..n) (n <=
+// 1024) into exclusive prefixes in place and writes the grand total at [n].
+#include "sim/liquid/liquid.glsl"
+
+layout(local_size_x = 256) in;
+
+shared uint s_sum[256];
+
+void main() {
+    uint t = gl_LocalInvocationID.x;
+    uint v[4];
+    uint run = 0u;
+    for (uint k = 0u; k < 4u; k++) {
+        uint i = t * 4u + k;
+        uint x = i < pc.n ? LQ_U32(pc.dst)[i] : 0u;
+        v[k] = run;
+        run += x;
+    }
+    s_sum[t] = run;
+    barrier();
+    for (uint s = 1u; s < 256u; s <<= 1) {
+        uint add = t >= s ? s_sum[t - s] : 0u;
+        barrier();
+        s_sum[t] += add;
+        barrier();
+    }
+    uint prefix = s_sum[t] - run;
+    for (uint k = 0u; k < 4u; k++) {
+        uint i = t * 4u + k;
+        if (i < pc.n) LQ_U32(pc.dst)[i] = prefix + v[k];
+    }
+    if (t == 255u) LQ_U32(pc.dst)[pc.n] = s_sum[255];
+}

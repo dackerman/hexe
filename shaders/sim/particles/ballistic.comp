@@ -14,9 +14,17 @@
 //      the particle is deleted (counted in PCTRL_LOST).
 // Gas particles become a cell at their position as soon as it is air.
 // Every surviving particle is drawn into the overlay image.
+// Integration couplings (docs/decisions/115-integrate-explode.md, 116):
+//   air drag   with the air field on, velocity relaxes toward the air's at
+//              (material drag / 255) * air_drag per second;
+//   liquid     with the liquid solver on, solver liquid (water) that lands
+//              wakes the liquid around it (liquid_wake_at), so it rejoins
+//              the solver instead of resting as plain cells.
 #include "common.glsl"
 #include "sim/events.glsl"
 #include "sim/particles/particles.glsl"
+#include "sim/air/air_api.glsl"
+#include "sim/liquid/wake.glsl"
 
 layout(local_size_x = 256) in;
 
@@ -25,7 +33,14 @@ layout(push_constant) uniform PC {
     float dt; // seconds per tick
     float gravity; // px/s^2, +y down
     float max_step; // px per tick (speed cap)
+    uint flags; // BALLISTIC_*
+    float air_drag; // 1/s at material drag 255
 } pc;
+
+#define BALLISTIC_AIR 1u
+#define BALLISTIC_LIQUID 2u
+// Wake spread of a landing water particle, pixels (wake.glsl hops).
+#define LANDING_WAKE_HOPS 3u
 
 #define MAX_DDA_STEPS 160
 // A buried particle looks this far up for room on top of the pile.
@@ -55,6 +70,8 @@ bool passable(uint c) {
 bool land(ivec2 w, uint observed, uint meta) {
     if (imageAtomicCompSwap(CELLS, w, observed, particle_cell(meta)) != observed) return false;
     mark_tile_and_neighbors(uvec2(w) >> TILE_SHIFT);
+    uint m = pmeta_material(meta);
+    if ((pc.flags & BALLISTIC_LIQUID) != 0u && (MATERIALS[m].flags & MATERIAL_FLAG_SOLVER_FLIP) != 0u) liquid_wake_at(w, LANDING_WAKE_HOPS);
     return true;
 }
 
@@ -166,6 +183,11 @@ void main() {
         v *= 0.9;
     } else {
         v.y += pc.gravity * pc.dt;
+    }
+    if ((pc.flags & BALLISTIC_AIR) != 0u && mt.drag != 0u) {
+        // Air velocity is px per tick; particles fly in px/s.
+        vec2 air = air_velocity(ivec2(floor(p))) / pc.dt;
+        v += (air - v) * min(float(mt.drag) / 255.0 * pc.air_drag * pc.dt, 1.0);
     }
 
     if (!passable(start)) {

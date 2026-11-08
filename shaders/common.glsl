@@ -135,6 +135,12 @@ uint hash_pass(uint x, uint y, uint tick, uint substep, uint salt) {
 // Particles (M4): ballistic particle overlay for rendering, r32ui, cleared
 // each tick (shaders/sim/particles/particles.glsl). 8 keeps clear of 2-7.
 #define SLOT_IMG_PARTICLE_OVERLAY 13u
+// ---- liquid solver (M6) ----
+// Wake requests for sleeping solver liquid, R32_UINT; write only through
+// liquid_wake_at() in shaders/sim/liquid/wake.glsl. (Its debug overlay is
+// the renderer's image, mode OVERLAY_LIQUID_PARTICLES; slot 15 is unused.)
+#define SLOT_IMG_LIQUID_WAKE 14u
+// ---- end liquid solver ----
 #define SLOT_IMG_DYNAMIC_BASE 16u
 
 #define SLOT_BUF_MATERIALS 0u
@@ -438,6 +444,8 @@ void mark_tile_and_neighbors(uvec2 t) {
 #define CMD_ACTION_CHARGE 3u
 #define CMD_ONLY_SHIFT 8u
 #define CMD_LINE_RADIUS_SHIFT 16u
+// Wake sleeping solver liquid in a circle (x0, y0, radius x1); changes no cell.
+#define CMD_WAKE_LIQUID 32u
 #define CMD_FLAG_ONLY_AIR 0x1u
 #define CMD_FLAG_ONLY_MATERIAL 0x2u
 #define CMD_FLAG_SET_TEMP 0x4u

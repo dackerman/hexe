@@ -37,6 +37,7 @@ const demo = @import("render/demo.zig");
 const renderer_mod = @import("render/renderer.zig");
 const max_ticks_per_frame = @import("sim/pipeline.zig").max_ticks_per_frame;
 const Profile = @import("profile.zig").Profile;
+const game_explode = @import("game/explode.zig");
 const world_mode = @import("world_mode.zig");
 
 const tick_ns: i96 = std.time.ns_per_s / 60;
@@ -59,13 +60,15 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *materials.Library
         .vsync = cli.vsync,
         .library = lib,
         .validation = cli.validation orelse (builtin.mode == .debug),
-        .pipeline = .{ .sleep = cli.sleep, .noise = cli.scene == .noise, .air = cli.air, .air_sleep = cli.air_sleep, .bodies = bodies_on },
+        // The sandbox starts with the liquid solver on (L toggles it).
+        .pipeline = .{ .sleep = cli.sleep, .noise = cli.scene == .noise, .air = cli.air, .air_sleep = cli.air_sleep, .bodies = bodies_on, .liquid = true, .liquid_params = cli.liquid_params },
         .overlap = cli.overlap,
     });
     defer engine.deinit();
     var profile: Profile = .{};
     engine.profile = &profile;
     var tools: BodyTools = .{};
+    var explosions: game_explode.Explosions = .{};
     @import("main.zig").applyRenderCli(&engine.renderer.settings, cli);
     const rs = &engine.renderer.settings;
     var torch = true;
@@ -143,6 +146,9 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *materials.Library
         if (input.wasPressed(c.SDL_SCANCODE_F7)) rs.bloom = !rs.bloom;
         if (input.wasPressed(c.SDL_SCANCODE_F8)) rs.vignette = !rs.vignette;
         if (input.wasPressed(c.SDL_SCANCODE_T)) torch = !torch;
+        // ---- liquid solver (M6) ----
+        if (input.wasPressed(c.SDL_SCANCODE_L)) engine.pipeline.config.liquid = !engine.pipeline.config.liquid;
+        // ---- end liquid solver ----
 
         // Material selection: number keys pick from the palette, 0 ignites.
         for (palette, 0..) |name, k| {
@@ -237,8 +243,11 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *materials.Library
             strokeLine(&pending, from, .{ mwx, mwy }, radius, paint, input.left and igniting);
             last_paint = .{ mwx, mwy };
         } else last_paint = null;
-        // Explosion (air field pressure injection) at the cursor, brush radius.
-        if (input.wasPressed(c.SDL_SCANCODE_E)) pending.explosion(mwx, mwy, @max(radius, 4), 1.0);
+        // Explosions: E at the cursor (brush radius), and every gunpowder
+        // ignition the GPU reported (EVENT_EXPLODE, one tick late).
+        const blast_opts: game_explode.Options = .{ .air = engine.pipeline.config.air, .liquid = engine.pipeline.config.liquid };
+        if (input.wasPressed(c.SDL_SCANCODE_E)) game_explode.explode(&pending, mwx, mwy, @max(radius, 4), 1.0, blast_opts);
+        _ = explosions.drain(engine.mirror(), &pending, blast_opts);
 
         // Particle tools (M4): sprays and the interim explosion.
         if (input.isDown(c.SDL_SCANCODE_Q) or input.isDown(c.SDL_SCANCODE_R)) {
@@ -246,6 +255,13 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *materials.Library
             pending.spray(.{ .x = mwx, .y = mwy, .material = mat, .count = 48, .speed = 260, .spread = 90, .direction = 0.75, .cone = 0.08 });
         }
         if (input.wasPressed(c.SDL_SCANCODE_X)) pending.eject(mwx, mwy, @max(radius, 4), 1000);
+        // Pour: water at the cursor every frame the key is held, woken at
+        // once so it falls as particles (not as cellular water).
+        if (input.isDown(c.SDL_SCANCODE_P)) {
+            const r = @max(@divTrunc(radius, 2), 2);
+            pending.fillCircle(mwx, mwy, r, engine.ids.water, .{ .only_air = true });
+            pending.wakeLiquid(mwx, mwy, r + 1, 1);
+        }
 
         if (input.wasPressed(c.SDL_SCANCODE_F12)) {
             var name_buf: [64]u8 = undefined;
@@ -363,6 +379,15 @@ pub fn fillHud(engine: *Engine, profile: *const Profile, info: HudInfo) void {
     hud.print("1-{d} material  0 ignite  LMB paint  RMB erase  wheel size  WASD pan  =/- zoom  space pause  Tab overlay  F2 tiles  F3 air", .{info.material_count});
     hud.print("E explosion  X eject  Q/R spray sand/water  T torch  F4 light  F6 quality  F7 bloom  F8 vignette", .{});
     if (info.message.len > 0) hud.print("{s}", .{info.message});
+    // ---- liquid solver (M6) ----
+    const lq = &engine.pipeline.liquid;
+    if (engine.pipeline.config.liquid) {
+        const ls = lq.statsSettled();
+        hud.print("liquid on ({s})  {d} awake, {d} ballistic  woke {d} slept {d}  P pour  L off  Tab overlay", .{ @tagName(lq.mode), ls.alive, ls.ballistic, ls.spawned, ls.slept });
+    } else {
+        hud.print("liquid off (cellular water)  L on", .{});
+    }
+    // ---- end liquid solver ----
 }
 
 /// Sandbox keys for bodies: crates, slabs, two-click beams.

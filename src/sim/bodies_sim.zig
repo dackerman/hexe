@@ -39,6 +39,11 @@ const BodyHandle = bodies.BodyHandle;
 const BeamHandle = bodies.BeamHandle;
 const Region = ts.Region;
 const none = bm.none;
+/// Explosion impulse on bodies: radius multiplier of the charge radius and
+/// impulse per body pixel per unit overpressure (standard explosion 1.5:
+/// a concrete crate gets about 170 px/s, wood about 800).
+const blast_reach: f32 = 4;
+const blast_impulse: f32 = 40;
 
 const log = std.log.scoped(.bodies);
 
@@ -420,16 +425,26 @@ pub const BodySim = struct {
 
         // 1. Destruction events.
         for (list.slice()) |c| {
-            if (c.material != materials.air) continue;
-            switch (@as(commands.Kind, @fromBackingInt(@intCast(c.kind)))) {
-                .fill_circle => self.notifyEvent(.{ .x = c.x0, .y = c.y0, .radius = c.x1 }),
-                .fill_rect => {
+            const shape = std.enums.fromInt(commands.Kind, c.kind & commands.shape_mask) orelse continue;
+            const erase = c.kind >> commands.action_shift == @backingInt(commands.Action.fill) and c.material & 0xff == materials.air;
+            switch (shape) {
+                .fill_circle => if (erase) self.notifyEvent(.{ .x = c.x0, .y = c.y0, .radius = c.x1 }),
+                .fill_rect => if (erase) {
                     const hw = @divTrunc(c.x1 - c.x0, 2);
                     const hh = @divTrunc(c.y1 - c.y0, 2);
                     self.notifyEvent(.{ .x = c.x0 + hw, .y = c.y0 + hh, .radius = @intFromFloat(@sqrt(@as(f32, @floatFromInt(hw * hw + hh * hh)))), .rect = .{ c.x0, c.y0, c.x1, c.y1 } });
                 },
-                // Air-field injections (M5) edit no cells; blast impulses on
-                // bodies from explosions are wired at integration.
+                // Cells fly: cut bodies there, then connectivity.
+                .eject => self.notifyEvent(.{ .x = c.x0, .y = c.y0, .radius = c.x1 }),
+                // An explosion (game/explode.zig): impulse on the bodies
+                // around it, scaled by its overpressure, and a destruction
+                // event at the charge (docs/decisions/115-integrate-explode.md).
+                .inject_pressure => {
+                    const density: f32 = @bitCast(c.material);
+                    if (density <= 0) continue;
+                    self.world.applyBlast(@floatFromInt(c.x0), @floatFromInt(c.y0), @as(f32, @floatFromInt(c.x1)) * blast_reach, density * blast_impulse);
+                    self.notifyEvent(.{ .x = c.x0, .y = c.y0, .radius = c.x1 });
+                },
                 else => {},
             }
         }

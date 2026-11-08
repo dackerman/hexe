@@ -7,6 +7,7 @@ const commands = @import("commands.zig");
 const materials = @import("materials.zig");
 const Ids = materials.Ids;
 const bodies_scenes = @import("bodies_scenes.zig");
+const liquid_scenes = @import("liquid_scenes.zig");
 
 pub const Scene = enum {
     /// Nothing; paint with the mouse.
@@ -59,6 +60,14 @@ pub const Scene = enum {
     /// pillars, a glass tank of water, a smoke vent, a brazier flame and a
     /// skylight shaft with a glass pane.
     lighting,
+    // ---- liquid solver (M6), src/sim/liquid_scenes.zig ----
+    liquid_utube,
+    liquid_dam,
+    liquid_pool,
+    liquid_slosh,
+    liquid_slosh_1m,
+    liquid_basin,
+    // ---- end liquid solver ----
 };
 
 /// `m` holds the material ids, looked up by name from the loaded set.
@@ -75,6 +84,12 @@ pub fn emit(scene: Scene, tick: u32, seed: u32, m: *const Ids, list: *commands.C
         .bench_fire => benchFire(tick, m, list),
         .fire_demo => fireDemo(tick, m, list),
         .lighting => lighting(tick, seed, m, list),
+        .liquid_utube => liquid_scenes.emit(.utube, tick, seed, m, list),
+        .liquid_dam => liquid_scenes.emit(.dam, tick, seed, m, list),
+        .liquid_pool => liquid_scenes.emit(.pool, tick, seed, m, list),
+        .liquid_slosh => liquid_scenes.emit(.slosh, tick, seed, m, list),
+        .liquid_slosh_1m => liquid_scenes.emit(.slosh_1m, tick, seed, m, list),
+        .liquid_basin => liquid_scenes.emit(.basin, tick, seed, m, list),
         .bench_mixed => if (tick == 0) {
             list.fillRect(0, 0, W, W, m.water, .{ .coverage = 80 });
             list.fillRect(0, 0, W, W, m.sand, .{ .coverage = 80, .only_air = true });

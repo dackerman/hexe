@@ -124,11 +124,19 @@ pub const dt: f32 = 1.0 / 60.0;
 pub const gravity: f32 = 196.0;
 /// Speed cap, px per tick (3600 px/s); the DDA visits at most 2x this.
 pub const max_step: f32 = 60.0;
+/// Ballistic air drag (1/s) at material drag 255: smoke-like particles
+/// follow the air within a few ticks, sand (drag 60) keeps most of its
+/// momentum over a blast's lifetime.
+pub const air_drag: f32 = 6.0;
 /// CPU spawns accepted per frame (`spawn`).
 pub const cpu_spawn_capacity = 4096;
 
 pub const Particles = struct {
     ctx: *gpu.Context,
+    /// Set by the pipeline each tick: the air field / liquid solver runs
+    /// (air drag; landing solver liquid wakes the liquid).
+    air_on: bool = false,
+    liquid_on: bool = false,
     capacity: u32,
     queue_capacity: u32,
     pos: gpu.Buffer,
@@ -353,7 +361,14 @@ pub const Particles = struct {
         frame.barrier();
 
         frame.bindCompute(self.ballistic_pipeline);
-        frame.push(extern struct { tick: u32, dt: f32, gravity: f32, max_step: f32 }{ .tick = frame.tick, .dt = dt, .gravity = gravity, .max_step = max_step });
+        frame.push(extern struct { tick: u32, dt: f32, gravity: f32, max_step: f32, flags: u32, air_drag: f32 }{
+            .tick = frame.tick,
+            .dt = dt,
+            .gravity = gravity,
+            .max_step = max_step,
+            .flags = @as(u32, @intFromBool(self.air_on)) | (@as(u32, @intFromBool(self.liquid_on)) << 1),
+            .air_drag = air_drag,
+        });
         ctx.vkd.cmdDispatchIndirect(cmd, indirect, ctrl_dispatch * 4);
         indirectBarrier(frame);
 

@@ -1,0 +1,19 @@
+#version 460
+// Sort, step 1: each live particle counts itself into the bin of the grid
+// cell it is in (atomic integer add: the counts, not their order, matter).
+// Dead particles get no bin and are dropped by the reorder (compaction).
+#include "sim/liquid/liquid.glsl"
+
+layout(local_size_x = 256) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= LQ_STATE[LQ_ST_COUNT]) return;
+    uint bin = LQ_NONE;
+    if (info_mode(LQ_INFO(pc.src)[i]) != LQ_MODE_DEAD) {
+        ivec2 c = ivec2(floor(LQ_POS(pc.src)[i] * 0.5));
+        bin = gidx(c);
+        atomicAdd(LQ_U32(LQ_BUF_BIN_COUNT)[bin], 1u);
+    }
+    LQ_U32(LQ_BUF_BIN_OF)[i] = bin;
+}

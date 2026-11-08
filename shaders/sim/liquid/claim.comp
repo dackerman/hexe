@@ -1,0 +1,116 @@
+#version 460
+// Rasterize: every live particle claims one pixel and writes a
+// particle-backed cell there with its index in the owner image. One pixel
+// holds one particle; the lowest index wins (atomic min on the owner image,
+// so the winner does not depend on scheduling). Two rounds of three steps:
+//   mode 0 init     target pixel = round 0: the particle's own pixel;
+//                   round 1 (losers only): the nearest free pixel within
+//                   radius 2, same row or below before above at each
+//                   radius (hashed start): lifting particles by choice
+//                   pumps energy into the liquid, lifting them because the
+//                   liquid is compressed conserves its volume. Failing that,
+//                   the first free pixel straight up through liquid (within
+//                   32: the surface). If the target is free, reset its owner
+//                   word to ~0 and remember it.
+//   mode 1 min      atomicMin(owner[target], index)
+//   mode 2 resolve  the winner writes the cell (round 1 winners move to the
+//                   new pixel's center: the separation push); round 1 losers
+//                   count an overlap tick and are merged (deleted) after
+//                   LQ_MERGE_TICKS.
+// pc.level is the round.
+#include "sim/liquid/liquid.glsl"
+
+layout(local_size_x = 256) in;
+
+void main() {
+    uint k = gl_GlobalInvocationID.x;
+    if (k >= LQ_STATE[LQ_ST_COUNT]) return;
+    uint info = LQ_INFO(pc.dst)[k];
+    if (info_mode(info) == LQ_MODE_DEAD) return;
+    uint b = LQ_BIND(pc.dst)[k];
+    uint round_ = pc.level;
+
+    if (pc.mode == 0u) {
+        if (round_ == 1u && b != LQ_NONE) return; // won round 0
+        ivec2 p = pixel_of(LQ_POS(pc.dst)[k]);
+        ivec2 target = ivec2(-1);
+        if (round_ == 0u) {
+            if (cell_free(imageLoad(CELLS, p).x)) target = p;
+        } else {
+            // Nearest free pixel within radius 2: ring 1 then ring 2, each
+            // ring same row or below first, then above; hashed start.
+            uint h = hash_salt(uint(p.x), uint(p.y), pc.tick, k);
+            for (int r = 1; r <= 2 && target.x < 0; r++) {
+                int ring = 8 * r;
+                for (int pass = 0; pass < 2 && target.x < 0; pass++) {
+                    for (int n = 0; n < ring && target.x < 0; n++) {
+                        int i = (n + int(h % uint(ring))) % ring;
+                        // Walk the ring of Chebyshev radius r.
+                        int side = i / (2 * r);
+                        int t = i % (2 * r);
+                        ivec2 o = side == 0 ? ivec2(-r + t, -r) : side == 1 ? ivec2(r, -r + t) : side == 2 ? ivec2(r - t, r) : ivec2(-r, r - t);
+                        if ((pass == 0) != (o.y >= 0)) continue;
+                        ivec2 q = wrap_coord(p + o);
+                        if (cell_free(imageLoad(CELLS, q).x) && clear_path(p, o)) target = q;
+                    }
+                }
+            }
+            // Packed in (often by neighbors that just fell asleep): the
+            // first free pixel straight up, within 32 (the surface).
+            for (int dy = 3; dy <= 32 && target.x < 0; dy++) {
+                ivec2 q = wrap_coord(p - ivec2(0, dy));
+                uint c = imageLoad(CELLS, q).x;
+                if (cell_free(c)) target = q;
+                else if (!cell_flip_plain(c) && !cell_has(c, CELL_FLAG_PARTICLE)) break; // not through solids
+            }
+        }
+        if (target.x >= 0) {
+            imageStore(OWNER, target, uvec4(0xffffffffu, 0u, 0u, 0u));
+            LQ_BIND(pc.dst)[k] = pack_pixel(target) | LQ_BIND_PENDING;
+        } else {
+            LQ_BIND(pc.dst)[k] = LQ_NONE;
+        }
+        return;
+    }
+    if (b == LQ_NONE || (b & LQ_BIND_PENDING) == 0u) {
+        if (pc.mode == 2u && round_ == 1u && b == LQ_NONE) {
+            // Lost both rounds (or no free neighbor): overlap, then merge.
+            uint o = info_overlap(info) + 1u;
+            if (o >= LQ_MERGE_TICKS) {
+                LQ_INFO(pc.dst)[k] = info_with_mode(info, LQ_MODE_DEAD);
+                atomicAdd(LQ_STATE[LQ_ST_MERGED], 1u);
+                atomicAdd(LQ_STATE[LQ_ST_TOTAL_MERGED], 1u);
+                atomicAdd(LQ_STATE[LQ_ST_ALIVE], 0xffffffffu);
+            } else {
+                LQ_INFO(pc.dst)[k] = info_with_overlap(info, o);
+            }
+        }
+        return;
+    }
+    ivec2 target = unpack_pixel(b & ~LQ_BIND_PENDING);
+    if (pc.mode == 1u) {
+        imageAtomicMin(OWNER, target, k);
+        return;
+    }
+    // resolve
+    if (imageLoad(OWNER, target).x == k) {
+        MaterialGpu m = MATERIALS[info_material(info)];
+        imageStore(CELLS, target, uvec4(cell_make(info_material(info), info_temp(info), mat_initial_state(m), CELL_FLAG_PARTICLE, info_variant(info)), 0u, 0u, 0u));
+        LQ_BIND(pc.dst)[k] = pack_pixel(target);
+        if (round_ == 1u) LQ_POS(pc.dst)[k] = vec2(target) + 0.5;
+        LQ_INFO(pc.dst)[k] = info_with_overlap(info, 0u);
+    } else if (round_ == 0u) {
+        LQ_BIND(pc.dst)[k] = LQ_NONE;
+    } else {
+        LQ_BIND(pc.dst)[k] = LQ_NONE;
+        uint o = info_overlap(info) + 1u;
+        if (o >= LQ_MERGE_TICKS) {
+            LQ_INFO(pc.dst)[k] = info_with_mode(info, LQ_MODE_DEAD);
+            atomicAdd(LQ_STATE[LQ_ST_MERGED], 1u);
+                atomicAdd(LQ_STATE[LQ_ST_TOTAL_MERGED], 1u);
+            atomicAdd(LQ_STATE[LQ_ST_ALIVE], 0xffffffffu);
+        } else {
+            LQ_INFO(pc.dst)[k] = info_with_overlap(info, o);
+        }
+    }
+}

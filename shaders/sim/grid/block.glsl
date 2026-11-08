@@ -26,6 +26,11 @@ void block_cache(inout Block b, int i) {
     uint m = cell_material(b.cell[i]);
     b.move[i] = MATERIALS[m].move;
     b.key[i] = MATERIALS[m].sort_key;
+    // Particle-backed cells belong to the liquid solver: static here.
+    if (cell_has(b.cell[i], CELL_FLAG_PARTICLE)) {
+        b.move[i] = PHASE_STATIC;
+        b.key[i] = SORT_KEY_STATIC;
+    }
     b.moved[i] = false;
 }
 

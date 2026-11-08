@@ -16,6 +16,7 @@ const Engine = @import("engine.zig").Engine;
 const cell = @import("sim/cell.zig");
 const commands = @import("sim/commands.zig");
 const materials = @import("sim/materials.zig");
+const game_explode = @import("game/explode.zig");
 
 const scen = data.scenario;
 const Scenario = scen.Scenario;
@@ -23,9 +24,16 @@ const Scenario = scen.Scenario;
 /// World cell of scenario cell (0, 0).
 pub const origin: i32 = 16;
 
-/// Systems this build has. Everything else in `Requirement` makes a
-/// scenario SKIP.
-const implemented = [_]scen.Requirement{};
+/// Systems a scenario may require here; a scenario turns on the ones it
+/// requires. The air field and explosions exist since the integration and
+/// the runner can drive them (explode commands, pressure samples), but the
+/// files' exact assertions do not hold: blast debris flies as ballistic
+/// particles and lands back on the plugs, the real lava + water reaction
+/// is a steam explosion that opens the wall before the pressure assertion,
+/// and ballistic landing order is not deterministic. Those scenarios SKIP;
+/// `zig build air-test` measures them with its own metrics
+/// (docs/decisions/118-integrate-harnesses.md).
+const implemented = [_]scen.Requirement{ .flip, .particles, .bodies };
 
 const Outcome = enum { pass, fail, skip };
 
@@ -96,8 +104,8 @@ fn needs(def: *const scen.Def, r: scen.Requirement) bool {
 fn requirementReason(r: scen.Requirement) []const u8 {
     return switch (r) {
         .flip => "needs the FLIP liquid solver (M6)",
-        .air_field => "needs the air field and pressure (M5)",
-        .explosions => "needs the explosion command (M4/M5)",
+        .air_field => "air field assertions are measured by `zig build air-test` (decision 118)",
+        .explosions => "explosions throw ballistic particles: debris relands and landing order is not deterministic; see `zig build air-test` (decision 118)",
         .particles => "needs the particle buffer (M4)",
         .bodies => "needs rigid bodies (M7)",
     };
@@ -115,9 +123,10 @@ fn runOne(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *const materials.Li
         std.debug.print("{f}\nFAIL {s}: unknown materials\n", .{ diag, def.name });
         return .fail;
     }
-    for (def.commands) |c| if (c.action() == .explode) {
-        std.debug.print("SKIP {s}: explode command without `.requires = .{{ .explosions }}`; {s}\n", .{ def.name, requirementReason(.explosions) });
-        return .skip;
+    const systems: Systems = .{
+        .air = needs(def, .air_field) or needs(def, .explosions),
+        .liquid = needs(def, .flip),
+        .bodies = needs(def, .bodies),
     };
 
     std.debug.print("scenario {s}: {d} ticks, {d}x{d}\n", .{ def.name, def.ticks, def.size.w, def.size.h });
@@ -150,7 +159,7 @@ fn runOne(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *const materials.Li
         try engine.init(gpa, .{
             .library = lib,
             .validation = cli.validation orelse false,
-            .pipeline = .{ .sleep = cli.sleep, .air = needs(def, .air_field) },
+            .pipeline = .{ .sleep = cli.sleep, .air = systems.air, .liquid = systems.liquid, .bodies = systems.bodies },
         });
         defer engine.deinit();
         engine.tick = @truncate(def.seed);
@@ -164,7 +173,11 @@ fn runOne(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *const materials.Li
                 frame(lib, def, &list);
                 for (def.fills) |f| fill(lib, def, &list, f.region().shape(), f);
             }
-            for (def.commands) |c| if (c.firesAt(t)) command(lib, def, &list, c);
+            for (def.commands) |c| if (c.firesAt(t)) command(lib, def, &list, c, systems);
+            // Pressure assertions read an air sample taken during their tick.
+            for (def.assertions) |a| if (a.pressure) |pa| if (s.assertionTick(a) == t) {
+                _ = engine.pipeline.air.requestSample(origin + pa.x, origin + pa.y);
+            };
             if (list.dropped > 0) std.debug.print("  warning: tick {d}: {d} commands dropped\n", .{ t, list.dropped });
             try engine.frame(1, .{ .scene = .empty, .extra = list.slice() }, null);
 
@@ -185,9 +198,9 @@ fn runOne(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *const materials.Li
                     continue;
                 }
                 if (run_index > 0) continue;
-                results[i] = evaluate(lib, def, a, cells);
+                results[i] = evaluate(lib, def, a, cells, engine);
                 var buf: [160]u8 = undefined;
-                details[i] = try arena.allocator().dupe(u8, describe(&buf, lib, def, a, cells));
+                details[i] = try arena.allocator().dupe(u8, describe(&buf, lib, def, a, cells, engine));
             }
         }
     }
@@ -283,13 +296,18 @@ fn fill(lib: *const materials.Library, def: *const scen.Def, list: *commands.Com
     pushShape(def, list, shape, lib.id(f.material).?, opts);
 }
 
-fn command(lib: *const materials.Library, def: *const scen.Def, list: *commands.CommandList, c: scen.Command) void {
+const Systems = struct { air: bool, liquid: bool, bodies: bool };
+
+fn command(lib: *const materials.Library, def: *const scen.Def, list: *commands.CommandList, c: scen.Command, systems: Systems) void {
     switch (c.action()) {
         .fill => fill(lib, def, list, c.fill.?.region().shape(), c.fill.?),
         .remove => pushShape(def, list, c.remove.?.shape(), materials.air, .{}),
         .ignite => pushShape(def, list, c.ignite.?.shape(), 0, .{ .action = .ignite }),
         .heat => pushShape(def, list, c.heat.?.region().shape(), 0, .{ .action = .heat, .temperature = data.temperature.toByte(c.heat.?.temperature) }),
-        .explode => {}, // filtered out before the run
+        .explode => {
+            const e = c.explode.?;
+            game_explode.explode(list, origin + e.x, origin + e.y, e.radius, e.strength, .{ .air = systems.air, .liquid = systems.liquid });
+        },
     }
 }
 
@@ -316,7 +334,15 @@ fn countIn(def: *const scen.Def, cells: []const u32, rect: ?scen.Rect, material:
 }
 
 /// null = not evaluable in this build (reported as SKIP).
-fn evaluate(lib: *const materials.Library, def: *const scen.Def, a: scen.Assertion, cells: []const u32) ?bool {
+/// Air density sampled at scenario cell (x, y) during the assertion's tick.
+fn pressureAt(engine: *Engine, x: i32, y: i32) ?f32 {
+    for (engine.pipeline.air.samples()) |sm| {
+        if (sm.x == origin + x and sm.y == origin + y) return sm.sample.density;
+    }
+    return null;
+}
+
+fn evaluate(lib: *const materials.Library, def: *const scen.Def, a: scen.Assertion, cells: []const u32, engine: *Engine) ?bool {
     switch (a.kind()) {
         .count => {
             const c = a.count.?;
@@ -336,12 +362,16 @@ fn evaluate(lib: *const materials.Library, def: *const scen.Def, a: scen.Asserti
             const n = countIn(def, cells, p.rect, null, true);
             return n >= p.min and (p.max == null or n <= p.max.?);
         },
-        .pressure => return null,
+        .pressure => {
+            const p = a.pressure.?;
+            const d = pressureAt(engine, p.x, p.y) orelse return null;
+            return (p.min == null or d >= p.min.?) and (p.max == null or d <= p.max.?);
+        },
         .deterministic => return null,
     }
 }
 
-fn describe(buf: []u8, lib: *const materials.Library, def: *const scen.Def, a: scen.Assertion, cells: []const u32) []const u8 {
+fn describe(buf: []u8, lib: *const materials.Library, def: *const scen.Def, a: scen.Assertion, cells: []const u32, engine: *Engine) []const u8 {
     return switch (a.kind()) {
         .count => blk: {
             const c = a.count.?;
@@ -360,9 +390,13 @@ fn describe(buf: []u8, lib: *const materials.Library, def: *const scen.Def, a: s
         .particles => blk: {
             const p = a.particles.?;
             const n = countIn(def, cells, p.rect, null, true);
-            break :blk std.fmt.bufPrint(buf, "particle-backed cells = {d} (no liquid solver yet: always 0)", .{n}) catch "";
+            break :blk std.fmt.bufPrint(buf, "particle-backed cells = {d}", .{n}) catch "";
         },
-        .pressure => "no air field yet (M5)",
+        .pressure => blk: {
+            const p = a.pressure.?;
+            const d = pressureAt(engine, p.x, p.y) orelse break :blk "no air sample (air field off?)";
+            break :blk std.fmt.bufPrint(buf, "air density {d:.4} at ({d},{d})", .{ d, p.x, p.y }) catch "";
+        },
         .deterministic => "",
     };
 }

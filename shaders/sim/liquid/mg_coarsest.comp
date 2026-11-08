@@ -1,0 +1,47 @@
+#version 460
+// Coarsest level (32 x 32, level LQ_LEVELS - 1): one workgroup, one thread
+// per cell, pc.n red-black Gauss-Seidel iterations in shared memory.
+#include "sim/liquid/mg.glsl"
+
+#define N 32
+
+layout(local_size_x = N, local_size_y = N) in;
+
+shared float s_p[N * N];
+shared float s_b[N * N];
+shared uint s_w[N * N];
+
+uint sidx(ivec2 c) { return uint((c.y & (N - 1)) * N + (c.x & (N - 1))); }
+
+void main() {
+    uint l = LQ_LEVELS - 1u;
+    ivec2 c = ivec2(gl_LocalInvocationID.xy);
+    uint i = lidx(l, c);
+    uint me = sidx(c);
+    s_p[me] = MG_P(i);
+    s_b[me] = MG_B(i);
+    s_w[me] = MG_TYPE(i);
+    barrier();
+    uint w = s_w[me];
+    uint wl = mg_wl(w), wt = mg_wt(w);
+    uint wr = mg_wl(s_w[sidx(c + ivec2(1, 0))]);
+    uint wb = mg_wt(s_w[sidx(c + ivec2(0, 1))]);
+    float diag = float(wl + wr + wt + wb);
+    bool fluid = mg_type(w) == LQ_FLUID && diag > 0.0;
+    float fl = mg_type(s_w[sidx(c + ivec2(-1, 0))]) == LQ_FLUID ? float(wl) : 0.0;
+    float fr = mg_type(s_w[sidx(c + ivec2(1, 0))]) == LQ_FLUID ? float(wr) : 0.0;
+    float ft = mg_type(s_w[sidx(c + ivec2(0, -1))]) == LQ_FLUID ? float(wt) : 0.0;
+    float fb = mg_type(s_w[sidx(c + ivec2(0, 1))]) == LQ_FLUID ? float(wb) : 0.0;
+    uint color = uint(c.x + c.y) & 1u;
+    for (uint it = 0u; it < pc.n; it++) {
+        for (uint pass = 0u; pass < 2u; pass++) {
+            if (fluid && color == pass) {
+                float off = fl * s_p[sidx(c + ivec2(-1, 0))] + fr * s_p[sidx(c + ivec2(1, 0))] +
+                    ft * s_p[sidx(c + ivec2(0, -1))] + fb * s_p[sidx(c + ivec2(0, 1))];
+                s_p[me] = (s_b[me] + off) / diag;
+            }
+            barrier();
+        }
+    }
+    if (mg_type(w) == LQ_FLUID) MG_P(i) = fluid ? s_p[me] : 0.0;
+}

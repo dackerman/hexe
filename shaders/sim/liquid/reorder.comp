@@ -1,0 +1,18 @@
+#version 460
+// Sort, step 5: gather the particles into the other set in sorted order.
+// Particle k of the new set is the k-th live particle in (cell, index)
+// order, so each bin's particles are contiguous and dead ones are gone.
+#include "sim/liquid/liquid.glsl"
+
+layout(local_size_x = 256) in;
+
+void main() {
+    uint k = gl_GlobalInvocationID.x;
+    if (k >= LQ_STATE[LQ_ST_COUNT]) return;
+    uint j = LQ_U32(LQ_BUF_SORTED)[k];
+    LQ_POS(pc.dst)[k] = LQ_POS(pc.src)[j];
+    LQ_VEL(pc.dst)[k] = LQ_VEL(pc.src)[j];
+    LQ_AFF(pc.dst)[k] = LQ_AFF(pc.src)[j];
+    LQ_INFO(pc.dst)[k] = LQ_INFO(pc.src)[j];
+    LQ_BIND(pc.dst)[k] = LQ_NONE;
+}

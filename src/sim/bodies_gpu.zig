@@ -314,8 +314,10 @@ pub const Stats = struct {
 pub const Config = struct {
     /// Bytes of the bitmap atlas; must equal `bodies.Config.max_body_pixels`.
     atlas_bytes: u32 = 1 << 22,
-    /// Reinsert ejected cells above their position until the particles
-    /// layer consumes the eject queue.
+    /// Reinsert queued ejected cells above their position. Since the
+    /// integration displaced cells fly as particles first; only spawns the
+    /// particle budget refused reach the queue, so this stays on to keep
+    /// displaced fluid from vanishing.
     eject_fallback: bool = true,
 };
 

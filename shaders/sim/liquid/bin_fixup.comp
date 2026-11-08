@@ -1,0 +1,25 @@
+#version 460
+// Sort, step 4: one thread per bin sorts its particle indices ascending
+// (insertion sort; bins hold about four particles). After this, the sorted
+// order is (cell, old index): a pure function of the particles, so the
+// particle-to-grid gather sums in a fixed order and the solver is
+// deterministic without float atomics (docs/01-architecture.md
+// "Determinism").
+#include "sim/liquid/liquid.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+void main() {
+    uint bin = gidx(ivec2(gl_GlobalInvocationID.xy));
+    uint start = scan_prefix(LQ_BUF_BIN_SCAN, LQ_BUF_BIN_SUMS, bin);
+    uint end = bin + 1u < LQ_GRID * LQ_GRID ? scan_prefix(LQ_BUF_BIN_SCAN, LQ_BUF_BIN_SUMS, bin + 1u) : LQ_STATE[LQ_ST_COUNT];
+    for (uint a = start + 1u; a < end; a++) {
+        uint key = LQ_U32(LQ_BUF_SORTED)[a];
+        uint b = a;
+        while (b > start && LQ_U32(LQ_BUF_SORTED)[b - 1u] > key) {
+            LQ_U32(LQ_BUF_SORTED)[b] = LQ_U32(LQ_BUF_SORTED)[b - 1u];
+            b--;
+        }
+        LQ_U32(LQ_BUF_SORTED)[b] = key;
+    }
+}

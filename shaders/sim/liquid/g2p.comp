@@ -1,0 +1,239 @@
+#version 460
+// Grid to particle, advection and mode switches, one thread per particle.
+//   liquid:    v = flip * (v + (u_new - u_old)) + (1 - flip) * u_new at the
+//              particle (FLIP/PIC blend), affine C = grad u_new (APIC);
+//              advected with RK2 through the grid velocity (midpoint sampled
+//              from faces that have liquid weight, else the particle's own);
+//              drag: linear pc.damping plus speed-banded settling (docs/decisions/83).
+//   ballistic: gravity only, C = 0.
+// Motion is marched pixel by pixel through the full-resolution cell image,
+// x then y each step, so particles stop at (and slide along) any obstacle
+// and never tunnel through a 1-pixel wall; the blocked velocity component is
+// zeroed. A particle that finds itself inside an obstacle (something was
+// painted over it) moves to the nearest free pixel within 2, or dies.
+// Positions wrap on the torus.
+// Mode: a liquid particle with no other liquid particle in the 3x3 cells
+// around it becomes ballistic; a ballistic one becomes liquid when it is
+// near liquid particles again or hits sleeping liquid. Fast particles wake
+// sleeping solver liquid they touch (liquid_wake_at). The rest counter
+// (sleep) counts ticks below pc.sleep_speed, halving on faster ticks.
+#include "sim/liquid/liquid.glsl"
+#include "sim/liquid/wake.glsl"
+#include "sim/events.glsl"
+#include "sim/particles/particles.glsl"
+
+layout(local_size_x = 256) in;
+
+#define U_ LQ_F32(LQ_BUF_U)
+#define V_ LQ_F32(LQ_BUF_V)
+#define U_OLD LQ_F32(LQ_BUF_U_OLD)
+#define V_OLD LQ_F32(LQ_BUF_V_OLD)
+#define UW LQ_F32(LQ_BUF_UW)
+#define VW LQ_F32(LQ_BUF_VW)
+
+// Bilinear interpolation of face values at g (face (i, j) at integer g).
+void interp(uint which, vec2 g, out float val, out float old, out vec2 grad) {
+    ivec2 i0 = ivec2(floor(g));
+    vec2 f = g - vec2(i0);
+    uint i00 = gidx(i0), i10 = gidx(i0 + ivec2(1, 0)), i01 = gidx(i0 + ivec2(0, 1)), i11 = gidx(i0 + ivec2(1, 1));
+    float a, b, c, d, oa, ob, oc, od;
+    if (which == 0u) {
+        a = U_[i00]; b = U_[i10]; c = U_[i01]; d = U_[i11];
+        oa = U_OLD[i00]; ob = U_OLD[i10]; oc = U_OLD[i01]; od = U_OLD[i11];
+    } else {
+        a = V_[i00]; b = V_[i10]; c = V_[i01]; d = V_[i11];
+        oa = V_OLD[i00]; ob = V_OLD[i10]; oc = V_OLD[i01]; od = V_OLD[i11];
+    }
+    val = mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+    old = mix(mix(oa, ob, f.x), mix(oc, od, f.x), f.y);
+    grad = vec2(mix(b - a, d - c, f.y), mix(c - a, d - b, f.x));
+}
+
+// Interpolation over faces with liquid weight only; `fallback` if none.
+float interp_valid(uint which, vec2 g, float fallback) {
+    ivec2 i0 = ivec2(floor(g));
+    vec2 f = g - vec2(i0);
+    float sw = 0.0, sv = 0.0;
+    for (int k = 0; k < 4; k++) {
+        ivec2 o = ivec2(k & 1, k >> 1);
+        uint i = gidx(i0 + o);
+        float w = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y);
+        float m = which == 0u ? UW[i] : VW[i];
+        if (m > 1e-6 && w > 0.0) {
+            sw += w;
+            sv += w * (which == 0u ? U_[i] : V_[i]);
+        }
+    }
+    return sw > 1e-6 ? sv / sw : fallback;
+}
+
+vec2 grid_velocity(vec2 pos, vec2 fallback) {
+    vec2 x = pos * 0.5;
+    return vec2(interp_valid(0u, x - vec2(0.0, 0.5), fallback.x), interp_valid(1u, x - vec2(0.5, 0.0), fallback.y));
+}
+
+bool pixel_free(ivec2 p) { return cell_free(load_cell(p)); }
+
+uint liquid_near(vec2 pos) {
+    ivec2 c = ivec2(floor(pos * 0.5));
+    uint n = 0u;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) n += mg_liquid(LQ_U32(LQ_BUF_MG_TYPE)[gidx(c + ivec2(dx, dy))]);
+    }
+    return n;
+}
+
+void kill(uint k, uint info) {
+    LQ_INFO(pc.dst)[k] = info_with_mode(info, LQ_MODE_DEAD);
+    atomicAdd(LQ_STATE[LQ_ST_KILLED], 1u);
+    atomicAdd(LQ_STATE[LQ_ST_TOTAL_KILLED], 1u);
+    atomicAdd(LQ_STATE[LQ_ST_ALIVE], 0xffffffffu);
+}
+
+void main() {
+    uint k = gl_GlobalInvocationID.x;
+    if (k >= LQ_STATE[LQ_ST_COUNT]) return;
+    uint info = LQ_INFO(pc.dst)[k];
+    uint mode = info_mode(info);
+    if (mode == LQ_MODE_DEAD) return;
+    vec2 pos = LQ_POS(pc.dst)[k];
+    vec2 vel = LQ_VEL(pc.dst)[k];
+    vec4 aff = vec4(0.0);
+    uint near = liquid_near(pos) - (mode == LQ_MODE_LIQUID ? 1u : 0u);
+
+    vec2 vnew;
+    if (mode == LQ_MODE_LIQUID) {
+        vec2 x = pos * 0.5;
+        float u, uo, v, vo;
+        vec2 gu, gv;
+        interp(0u, x - vec2(0.0, 0.5), u, uo, gu);
+        interp(1u, x - vec2(0.5, 0.0), v, vo, gv);
+        vec2 pic = vec2(u, v);
+        vec2 flip = vel + pic - vec2(uo, vo);
+        vnew = mix(pic, flip, pc.flip);
+        // Drag: linear (pc.damping) plus settling, which is strong for slow
+        // residual motion and gone above pc.settle_speed, so sloshing dies
+        // out and pools sleep, while fast flows keep their energy. Water
+        // that falls asleep out of balance is woken again by the
+        // imbalance trigger (wake.comp).
+        // The soft band (docs/04-fluids.md "Hybrid pools"): resting on
+        // sleeping liquid or a solid, the settling drag is stronger, so the
+        // last layers on top of a sleeping pool calm down and join it.
+        uint below = load_cell(pixel_of(pos) + ivec2(0, 1));
+        bool on_rest = !cell_free(below) && !cell_has(below, CELL_FLAG_PARTICLE);
+        float settle = pc.settle_rate * (on_rest ? pc.band_factor : 1.0);
+        float k = pc.damping + settle * clamp(1.0 - length(vnew) / pc.settle_speed, 0.0, 1.0);
+        vnew *= max(1.0 - k * pc.dt, 0.0);
+        aff = vec4(gu, gv);
+    } else {
+        vnew = vel + vec2(0.0, pc.gravity * pc.dt);
+    }
+    float speed = length(vnew);
+    if (speed > pc.max_speed) vnew *= pc.max_speed / speed;
+
+    vec2 disp;
+    if (mode == LQ_MODE_LIQUID) {
+        vec2 mid = pos + 0.5 * pc.dt * vnew;
+        disp = pc.dt * grid_velocity(mid, vnew);
+    } else {
+        disp = pc.dt * vnew;
+    }
+    float dl = length(disp);
+    if (dl > pc.max_speed * pc.dt) disp *= pc.max_speed * pc.dt / dl;
+
+    // Inside an obstacle: nearest free pixel within 2 (fixed scan order).
+    ivec2 start = pixel_of(pos);
+    if (!pixel_free(start)) {
+        bool found = false;
+        for (int r = 1; r <= 2 && !found; r++) {
+            for (int dy = -r; dy <= r && !found; dy++) {
+                for (int dx = -r; dx <= r && !found; dx++) {
+                    if (max(abs(dx), abs(dy)) != r) continue;
+                    if (pixel_free(start + ivec2(dx, dy)) && clear_path(start, ivec2(dx, dy))) {
+                        pos = vec2(wrap_coord(start + ivec2(dx, dy))) + 0.5;
+                        found = true;
+                    }
+                }
+            }
+        }
+        if (!found) {
+            kill(k, info);
+            return;
+        }
+        vnew = vec2(0.0);
+        disp = vec2(0.0);
+    }
+
+    // March.
+    int steps = clamp(int(ceil(max(abs(disp.x), abs(disp.y)))), 1, 16);
+    vec2 step = disp / float(steps);
+    vec2 cur = pos;
+    bool hit_flip = false;
+    ivec2 hit = ivec2(0);
+    float push = 0.0; // speed into the sleeping pixel that stopped us
+    for (int s = 0; s < steps; s++) {
+        if (step.x != 0.0) {
+            vec2 nx = cur + vec2(step.x, 0.0);
+            ivec2 q = pixel_of(nx);
+            if (all(equal(q, pixel_of(cur))) || pixel_free(q)) {
+                cur = nx;
+            } else {
+                if (cell_flip_plain(load_cell(q))) { hit_flip = true; hit = q; push = max(push, abs(vnew.x)); }
+                step.x = 0.0;
+                vnew.x = 0.0;
+            }
+        }
+        if (step.y != 0.0) {
+            vec2 ny = cur + vec2(0.0, step.y);
+            ivec2 q = pixel_of(ny);
+            if (all(equal(q, pixel_of(cur))) || pixel_free(q)) {
+                cur = ny;
+            } else {
+                if (cell_flip_plain(load_cell(q))) { hit_flip = true; hit = q; push = max(push, abs(vnew.y)); }
+                step.y = 0.0;
+                vnew.y = 0.0;
+            }
+        }
+    }
+    pos = wrap_pos(cur);
+    speed = length(vnew);
+
+    // Wake sleeping liquid that a particle lands in (ballistic), runs into
+    // fast, or is pushed into by the pressure (the solve moves this liquid
+    // into it: it is in the way).
+    if (hit_flip && (mode == LQ_MODE_BALLISTIC || length(vel) > pc.wake_speed || push > pc.push_speed)) {
+        liquid_wake_at(hit, push > pc.push_speed && mode == LQ_MODE_LIQUID ? 1u : LQ_WAKE_HOPS_PARTICLE);
+    }
+    if (mode == LQ_MODE_LIQUID && speed > pc.wake_speed) {
+        ivec2 p = pixel_of(pos);
+        for (int n = 0; n < 4; n++) {
+            ivec2 q = p + (n == 0 ? ivec2(1, 0) : n == 1 ? ivec2(-1, 0) : n == 2 ? ivec2(0, 1) : ivec2(0, -1));
+            if (cell_flip_plain(load_cell(q))) liquid_wake_at(q, LQ_WAKE_HOPS_PARTICLE);
+        }
+    }
+
+    if (mode == LQ_MODE_LIQUID && near == 0u) {
+        // Leaves the liquid: the shared ballistic pass takes it over.
+        if ((pc.flags & LQ_PC_HANDOFF) != 0u &&
+            spawn_particle(pos, vnew, pmeta_make(info_material(info), PARTICLE_MODE_BALLISTIC, info_temp(info), info_variant(info)), PARTICLE_UNBOUND)) {
+            LQ_INFO(pc.dst)[k] = info_with_mode(info, LQ_MODE_DEAD);
+            atomicAdd(LQ_STATE[LQ_ST_ALIVE], 0xffffffffu);
+            return;
+        }
+        mode = LQ_MODE_BALLISTIC;
+        aff = vec4(0.0);
+    } else if (mode == LQ_MODE_BALLISTIC && (near > 0u || hit_flip)) {
+        mode = LQ_MODE_LIQUID;
+    }
+    if (mode == LQ_MODE_BALLISTIC) atomicAdd(LQ_STATE[LQ_ST_BALLISTIC], 1u);
+    // Halved, not reset, by a fast tick: a neighbor falling asleep below
+    // changes the grid and kicks its neighbors a little, which must not
+    // restart the whole count every time.
+    uint rest = speed < pc.sleep_speed ? info_rest(info) + 1u : info_rest(info) / 2u;
+    info = info_with_rest(info_with_mode(info, mode), rest);
+
+    LQ_POS(pc.dst)[k] = pos;
+    LQ_VEL(pc.dst)[k] = vnew;
+    LQ_AFF(pc.dst)[k] = aff;
+    LQ_INFO(pc.dst)[k] = info;
+}

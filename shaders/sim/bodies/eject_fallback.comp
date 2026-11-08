@@ -1,6 +1,7 @@
 #version 460
-// Stand-in consumer of the eject queue until the particles layer drains it
-// into ballistic particles: each non-static ejected cell (displaced water,
+// Consumer of the eject queue: the displaced cells whose ballistic particle
+// the particle budget refused (bodies_eject_cell spawns particles first).
+// Each non-static ejected cell (displaced water,
 // sand, smoke) is reinserted at the first air cell straight above it,
 // walking through liquids, powders, gases and body cells, stopping at static
 // terrain. Static ejections (sparks) are dropped and counted. Mass is
