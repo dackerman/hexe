@@ -220,6 +220,12 @@ pub fn build(b: *std.Build) void {
     bench_run.addPassthruArgs();
     bench_run.has_side_effects = true;
     b.step("bench", "Run fixed benchmark scenes headless (ReleaseFast) and print per-pass GPU ms").dependOn(&bench_run.step);
+    // ---- render bench (M8): per-pass render GPU ms at 1920x1080, overlap ----
+    const bench_render_run = b.addRunArtifact(bench_exe.compile);
+    bench_render_run.addArgs(&.{ "--headless", "--bench-render" });
+    bench_render_run.addPassthruArgs();
+    bench_render_run.has_side_effects = true;
+    b.step("bench-render", "Render passes at a 1920x1080 view and sim/render overlap (ReleaseFast)").dependOn(&bench_render_run.step);
 }
 
 const HexeOptions = struct {
