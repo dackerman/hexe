@@ -47,13 +47,24 @@ Number keys select, left mouse uses, right mouse is the secondary.
 
 | key | action |
 |---|---|
-| A, D | move; Space jump; S drop through platforms |
-| mouse | aim; wheel brush size or material cycle |
-| Tab | cycle debug overlays: none, activity tiles, air pressure, air velocity, liquid particles, bodies, temperature |
-| F1 | help overlay with this table |
+| A, D (or arrows) | move; Space (or W, Up) jump, higher while held; in water W/Space swim up, S dive |
+| S (or Down) | drop through a thin (at most 3 px) platform |
+| mouse | aim (world space); LMB primary, RMB secondary; wheel brush size, or material for the painter |
+| 1-9, 0 | select a tool (table above) |
+| Tab, Shift+Tab | cycle debug overlays: none, activity tiles, air pressure, air velocity, liquid particles, bodies, temperature, particle cells, light |
+| F1 | help overlay with the tool table and these keys |
 | F3 | HUD timings on and off |
-| R | reset level; P pause; period single step |
+| R | reset level; P pause; period single step while paused |
+| = / - | zoom in / out (integer) |
+| E, X | explosion / eject at the cursor (sandbox keys kept) |
+| C, Z, V | concrete crate / wood crate / stone slab at the cursor (sandbox keys kept) |
+| L | liquid solver on and off |
+| F2, F4, F6, F7, F8, F12 | tiles overlay, light mode, light quality, bloom, vignette, screenshot |
 | Escape | quit |
+
+The sandbox (paint, pan, palette on 1-9) is `--sandbox`, and the streamed
+world `--world`; their keys are in docs/decisions/114-integrate-keys.md.
+The final key map and why: docs/decisions/127-gameplay-key-map.md.
 
 ## Enemies
 

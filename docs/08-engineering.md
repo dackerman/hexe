@@ -20,7 +20,8 @@ Dev machine: RTX 4090, Ryzen 7950X, 61 GB RAM, Linux, Wayland desktop.
 
 | command | purpose |
 |---|---|
-| `zig build run -Doptimize=ReleaseFast` | play (windowed sandbox; `-- --world` for the streamed world) |
+| `zig build run -Doptimize=ReleaseFast` | play the witch (windowed; `-- --sandbox` for the paint sandbox, `-- --world` for the streamed world) |
+| `zig build run -- --script playtests/NAME.hexe --view-screenshot PREFIX` | headless scripted play: drives the witch, writes PREFIX-SHOT.png view screenshots with sprites and HUD (docs/decisions/128) |
 | `zig build run -- --headless --ticks N --screenshot path.png [--scene NAME]` | drive the sim without a window; dump the world as PNG (`--view-screenshot` renders the lit view with HUD) |
 | `zig build test` | unit tests, CPU only, Debug (`-Dgpu-tests` adds verify-determinism and gpu-test) |
 | `zig build verify-determinism` | GPU grid vs the CPU reference, bit for bit, cells and event sets (ReleaseSafe) |
