@@ -1,0 +1,20 @@
+#version 460
+// M0 bring-up / stress scene: animated value noise written straight into the
+// cell image as random builtin materials. `--scene noise`.
+#include "common.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PC {
+    uint tick;
+    uint material_count;
+} pc;
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    uint frame = pc.tick / 4u;
+    uint h = hash(p.x >> 4, (p.y + frame) >> 4, frame >> 3, 0u);
+    uint fine = hash(p.x, p.y, pc.tick, 1u);
+    uint m = h % max(pc.material_count, 1u);
+    imageStore(CELLS, ivec2(p), uvec4(cell_make(m, 0u, 0u, 0u, fine >> 28), 0u, 0u, 0u));
+}

@@ -1,0 +1,36 @@
+#version 460
+// GPU half of the cell-format mirror test (src/sim/cell.zig): for each sample
+// word, unpack every field with the common.glsl accessors and run the hash, so
+// the CPU can compare against its own mirrors. Run by --verify-determinism.
+#include "common.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PC {
+    uint in_slot;
+    uint out_slot;
+    uint count;
+} pc;
+
+HEXE_BUFFER(Words, , uint words[];, g_words);
+
+#define OUT_STRIDE 12u
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) return;
+    uint c = g_words[pc.in_slot].words[i];
+    uint o = i * OUT_STRIDE;
+    g_words[pc.out_slot].words[o + 0u] = cell_material(c);
+    g_words[pc.out_slot].words[o + 1u] = cell_temperature(c);
+    g_words[pc.out_slot].words[o + 2u] = cell_state(c);
+    g_words[pc.out_slot].words[o + 3u] = cell_flags(c);
+    g_words[pc.out_slot].words[o + 4u] = cell_variant(c);
+    g_words[pc.out_slot].words[o + 5u] = cell_make(cell_material(c), cell_temperature(c), cell_state(c), cell_flags(c), cell_variant(c));
+    g_words[pc.out_slot].words[o + 6u] = hash(c & WORLD_MASK, (c >> 11) & WORLD_MASK, c, i & 7u);
+    g_words[pc.out_slot].words[o + 7u] = hash_u32(c);
+    g_words[pc.out_slot].words[o + 8u] = uint(temp_to_celsius(cell_temperature(c)));
+    g_words[pc.out_slot].words[o + 9u] = celsius_to_temp(int(c % 2400u) - 100);
+    g_words[pc.out_slot].words[o + 10u] = cell_with_flag(cell_with_state(c, i & 0xffu), CELL_FLAG_MOVED, (i & 1u) != 0u);
+    g_words[pc.out_slot].words[o + 11u] = hash_salt(i, c & 0xffffu, c >> 7, c >> 3);
+}

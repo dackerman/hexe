@@ -1,0 +1,26 @@
+#version 460
+// Activity compaction: one thread per tile. Every tile with a nonzero wake
+// countdown goes on this tick's list, which all grid passes dispatch over
+// indirectly; the countdown is decremented. The CPU zeroes the
+// dispatch count before this pass. List order is not deterministic, results
+// are: blocks are independent within a pass.
+#include "common.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PC {
+    uint all_active; // nonzero: ignore marks, every tile is active (sleep disabled)
+} pc;
+
+void main() {
+    uvec2 t = gl_GlobalInvocationID.xy;
+    uint i = tile_index(t);
+    uint wake = uint(TILE_MARKS[i]);
+    bool is_active = pc.all_active != 0u || wake != 0u;
+    TILE_MARKS[i] = uint8_t(wake > 0u ? wake - 1u : 0u);
+    TILE_MARKS[TILE_ACTIVE_OFFSET + i] = uint8_t(is_active ? 1 : 0);
+    if (is_active) {
+        uint slot = atomicAdd(TILE_LIST.dispatch_x, 1u);
+        TILE_LIST.tiles[slot] = t.x | (t.y << 16);
+    }
+}
