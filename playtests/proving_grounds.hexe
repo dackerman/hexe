@@ -1,0 +1,21 @@
+# The Proving Grounds hub: the witch spawns at the tool rack, looks around,
+# walks to the powder yard, throws a blast charge at the dunes, then walks
+# back to the village and fires a bolt at the first hut.
+scene proving_grounds
+spawn 700 398
+ticks 700
+zoom 2
+at 30 shot hub
+at 40 hold left
+at 160 release left
+at 170 tool 2
+at 175 aimrel -120 -20
+at 180 tap primary
+at 290 shot blast_dunes
+at 300 hold right
+at 520 release right
+at 530 tool 1
+at 535 aimrel 140 -30
+at 540 tap primary
+at 545 tap primary
+at 660 shot village_fire
