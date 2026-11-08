@@ -1,0 +1,24 @@
+#version 460
+// Air field reset: both distribution buffers to ambient air at rest,
+// the field image to (1, 0, 0, 0), the source image to zero. Run at init
+// and by Air.reset.
+#include "common.glsl"
+#include "sim/air/air_api.glsl"
+#include "sim/air/lbm.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PC {
+    uint dist0_slot;
+    uint dist1_slot;
+} pc;
+
+void main() {
+    ivec2 c = ivec2(gl_GlobalInvocationID.xy);
+    for (int i = 0; i < 9; i++) {
+        g_air_dist[pc.dist0_slot].f[lbm_index(i, c)] = LBM_W[i];
+        g_air_dist[pc.dist1_slot].f[lbm_index(i, c)] = LBM_W[i];
+    }
+    imageStore(AIR_FIELD, c, vec4(1.0, 0.0, 0.0, 0.0));
+    imageStore(AIR_SOURCE, c, uvec4(0u));
+}

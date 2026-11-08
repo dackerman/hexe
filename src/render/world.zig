@@ -14,6 +14,8 @@ pub const View = struct {
     scale: u32 = 1,
     /// Tint tiles on this tick's active list.
     show_tiles: bool = false,
+    /// Add the debug overlay image (air field, M5) to the world colors.
+    show_overlay: bool = false,
 };
 
 pub const WorldPass = struct {
@@ -44,7 +46,7 @@ pub const WorldPass = struct {
             .ox = 0,
             .oy = 0,
             .scale = @max(view.scale, 1),
-            .flags = @intFromBool(view.show_tiles),
+            .flags = @as(u32, @intFromBool(view.show_tiles)) | (@as(u32, @intFromBool(view.show_overlay)) << 1),
         });
         ctx.vkd.cmdDraw(cmd, 3, 1, 0, 0);
     }

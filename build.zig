@@ -13,6 +13,20 @@ const shader_sources = [_][]const u8{
     "sim/grid/commands.comp",
     "sim/grid/activity.comp",
     "sim/grid/movement.comp",
+    // ---- air field (M5) ----
+    "sim/coarsen.comp",
+    "sim/air/init.comp",
+    "sim/air/prep.comp",
+    "sim/air/inject_count.comp",
+    "sim/air/inject_apply.comp",
+    "sim/air/compact.comp",
+    "sim/air/lbm.comp",
+    "sim/air/effects.comp",
+    "sim/air/gas_advect.comp",
+    "sim/air/overlay.comp",
+    "sim/air/sample.comp",
+    "sim/air/downsample.comp",
+    // ---- end air field ----
     // ---- render ----
     "render/fullscreen.vert",
     "render/world.frag",
@@ -207,6 +221,13 @@ pub fn build(b: *std.Build) void {
     bench_run.addPassthruArgs();
     bench_run.has_side_effects = true;
     b.step("bench", "Run fixed benchmark scenes headless (ReleaseFast) and print per-pass GPU ms").dependOn(&bench_run.step);
+
+    // ---- air field scenarios (M5): sealed room, corridor blast ----
+    const air_test_run = b.addRunArtifact(bench_exe.compile);
+    air_test_run.addArgs(&.{ "--headless", "--air-test" });
+    air_test_run.addPassthruArgs();
+    air_test_run.has_side_effects = true;
+    b.step("air-test", "Air field scenarios 3 and 4 (docs/04-fluids.md) headless on the GPU").dependOn(&air_test_run.step);
 }
 
 const HexeOptions = struct {

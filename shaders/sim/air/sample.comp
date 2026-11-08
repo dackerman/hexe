@@ -1,0 +1,34 @@
+#version 460
+// Point samples for gameplay and bodies (Air.requestSample): up to 64
+// pixels, each gets the air at its lattice cell (src/sim/air_abi.zig
+// `Sample`): density, velocity (px/tick), density gradient per pixel, wall.
+#include "common.glsl"
+#include "sim/air/air_api.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PC {
+    uint request_slot;
+    uint result_slot;
+    uint count;
+} pc;
+
+HEXE_BUFFER(SampleRequests, readonly, ivec2 points[];, g_sample_requests);
+HEXE_BUFFER(SampleResults, , vec4 values[];, g_sample_results);
+
+float rho_at(ivec2 c, float fallback) {
+    vec4 a = imageLoad(AIR_FIELD, ivec2(uvec2(c) & uvec2(AIR_MASK)));
+    return a.w != 0.0 ? fallback : a.x;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) return;
+    ivec2 c = air_cell_of(g_sample_requests[pc.request_slot].points[i]);
+    vec4 a = imageLoad(AIR_FIELD, c);
+    // Gradient per pixel: central differences over 2 lattice cells = 4 px.
+    float gx = (rho_at(c + ivec2(1, 0), a.x) - rho_at(c - ivec2(1, 0), a.x)) * 0.25;
+    float gy = (rho_at(c + ivec2(0, 1), a.x) - rho_at(c - ivec2(0, 1), a.x)) * 0.25;
+    g_sample_results[pc.result_slot].values[i * 2u] = vec4(a.x, a.y, a.z, gx);
+    g_sample_results[pc.result_slot].values[i * 2u + 1u] = vec4(gy, a.w, 0.0, 0.0);
+}

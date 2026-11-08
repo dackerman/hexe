@@ -1,0 +1,256 @@
+#version 460
+// Air field effects on the grid, once per tick after the LBM steps, one
+// thread per lattice cell (its 2x2 pixels) over the active air tiles
+// (docs/04-fluids.md "Effects back onto the world").
+//
+// Loads, in blast units (density difference per lattice cell times
+// blast_scale for gradient loads and wall_scale for wall loads; with a
+// scale of 1000 one unit is 0.001 ambient density per 2 px):
+// - gradient load: |central-difference density gradient| at a fluid cell;
+//   in a wall cell, the largest gradient load of its fluid 4-neighbors.
+//   Used by loose material (fly): a pool surface under uniform pressure
+//   feels nothing, a passing front throws it.
+// - wall load (wall cells): per axis, the density difference between the
+//   nearest fluid cells on either side within `search` cells over their
+//   distance; a side with no fluid counts as ambient one cell behind the
+//   wall (overpressure on a face). Used by solids (chip, break) in wall
+//   cells; solid pixels in fluid cells use the gradient load.
+// Per pixel with blast_threshold > 0 and its load above it:
+// - fly (powders, liquids): becomes air, appended to BLAST_EJECTS with the
+//   air velocity scaled plus a push down the pressure gradient;
+// - chip / break (solids with health in the state byte): lose
+//   max(1, excess * damage_scale) health; at zero they become the rubble
+//   material if there is one, else air plus a BREAK eject; chip materials
+//   also emit CHIP ejects (one in four damage events) while they wear.
+// Pressure events: materials with pressure_event > 0 whose local
+// overpressure (0.001 ambient) exceeds it append to AIR_EVENTS, at most one
+// per lattice cell per tick.
+// Changed pixels mark their grid tile; damage keeps the air tile awake.
+// Particle-backed and body-owned pixels are left to their owners.
+#include "common.glsl"
+#include "sim/air/air_api.glsl"
+#include "sim/air/lbm.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PC {
+    ivec2 seam;
+    uint node_slot;
+    uint tick;
+    uint flags; // EFFECTS_*
+    int search; // wall search distance, lattice cells
+    float blast_scale;
+    float damage_scale;
+    float eject_scale; // air velocity multiplier for ejected pixels
+    float eject_push; // pixels per tick per blast unit of excess
+    float eject_max; // pixels per tick
+    float wall_scale; // blast units per density difference per cell, wall load
+} pc;
+
+#define EFFECTS_ALL_TILES 1u
+#define EFFECTS_MARK 2u
+#define EFFECTS_BLAST 4u
+#define EFFECTS_EVENTS 8u
+
+HEXE_BUFFER(EjectBlock, , uint count; uint capacity; uint dropped; uint tick; uint words[];, g_ejects);
+HEXE_BUFFER(EventBlock, , uint count; uint capacity; uint dropped; uint tick; uint words[];, g_events);
+#define EJECTS g_ejects[SLOT_BUF_BLAST_EJECTS]
+#define EVENTS g_events[SLOT_BUF_AIR_EVENTS]
+
+shared bool s_changed;
+shared bool s_damaged;
+
+bool fluid_at(ivec2 c) {
+    if (!air_inside(air_local(c, pc.seam))) return false;
+    return (imageLoad(g_uimages[pc.node_slot], air_wrap(c)).x & NODE_WALL) == 0u;
+}
+
+float rho_or(ivec2 c, float fallback) {
+    return fluid_at(c) ? imageLoad(AIR_FIELD, air_wrap(c)).x : fallback;
+}
+
+bool liquid_wall_at(ivec2 c) {
+    ivec2 w = air_wrap(c);
+    return air_inside(air_local(c, pc.seam)) && imageLoad(SOLID_COARSE, w).x < 2u && !fluid_at(c);
+}
+
+// Nearest fluid cell from c along dir within `search`: density and distance.
+// Liquid transmits pressure: a liquid cell on the way stands for the gas
+// above its column (up to 64 cells up; hydrostatics ignored).
+bool find_fluid(ivec2 c, ivec2 dir, out float rho, out float dist) {
+    for (int k = 1; k <= pc.search; k++) {
+        ivec2 n = c + dir * k;
+        if (fluid_at(n)) {
+            rho = imageLoad(AIR_FIELD, air_wrap(n)).x;
+            dist = float(k);
+            return true;
+        }
+        if (liquid_wall_at(n)) {
+            for (int u = 1; u <= 64; u++) {
+                ivec2 m = n - ivec2(0, u);
+                if (fluid_at(m)) {
+                    rho = imageLoad(AIR_FIELD, air_wrap(m)).x;
+                    dist = float(k);
+                    return true;
+                }
+                if (!liquid_wall_at(m)) break;
+            }
+            break;
+        }
+    }
+    rho = 1.0;
+    dist = 1.0;
+    return false;
+}
+
+vec2 fluid_gradient(ivec2 c, float rho) {
+    return 0.5 * vec2(rho_or(c + ivec2(1, 0), rho) - rho_or(c - ivec2(1, 0), rho),
+        rho_or(c + ivec2(0, 1), rho) - rho_or(c - ivec2(0, 1), rho));
+}
+
+float wall_axis(ivec2 c, ivec2 dir, inout float peak) {
+    float rp, dp, rn, dn;
+    bool hp = find_fluid(c, dir, rp, dp);
+    bool hn = find_fluid(c, -dir, rn, dn);
+    if (!hp && !hn) return 0.0;
+    if (hp) peak = max(peak, rp);
+    if (hn) peak = max(peak, rn);
+    return (rp - rn) / (dp + dn);
+}
+
+void append_eject(ivec2 p, vec2 v, uint cl, uint kind) {
+    uint i = atomicAdd(EJECTS.count, 1u);
+    if (i >= BLAST_EJECT_CAPACITY) {
+        atomicAdd(EJECTS.dropped, 1u);
+        return;
+    }
+    uint b = i * BLAST_EJECT_WORDS;
+    EJECTS.words[b + 0u] = uint(p.x);
+    EJECTS.words[b + 1u] = uint(p.y);
+    EJECTS.words[b + 2u] = floatBitsToUint(v.x);
+    EJECTS.words[b + 3u] = floatBitsToUint(v.y);
+    EJECTS.words[b + 4u] = cl;
+    EJECTS.words[b + 5u] = kind;
+}
+
+void append_event(ivec2 p, uint kind, uint value) {
+    uint i = atomicAdd(EVENTS.count, 1u);
+    if (i >= AIR_EVENT_CAPACITY) {
+        atomicAdd(EVENTS.dropped, 1u);
+        return;
+    }
+    uint b = i * AIR_EVENT_WORDS;
+    EVENTS.words[b + 0u] = uint(p.x);
+    EVENTS.words[b + 1u] = uint(p.y);
+    EVENTS.words[b + 2u] = kind;
+    EVENTS.words[b + 3u] = value;
+}
+
+void main() {
+    if (gl_LocalInvocationIndex == 0u) {
+        s_changed = false;
+        s_damaged = false;
+    }
+    barrier();
+
+    uvec2 tile;
+    if ((pc.flags & EFFECTS_ALL_TILES) != 0u) {
+        tile = gl_WorkGroupID.xy;
+    } else {
+        uint packed = AIR_TILE_LIST.tiles[gl_WorkGroupID.x];
+        tile = uvec2(packed & 0xffffu, packed >> 16);
+    }
+    ivec2 c = ivec2(tile * AIR_TILE + gl_LocalInvocationID.xy);
+    vec4 a = imageLoad(AIR_FIELD, c);
+    bool wall = !fluid_at(c);
+
+    vec2 gf; // gradient load
+    vec2 gw; // wall load (wall cells)
+    float peak = a.x;
+    vec2 vel = a.yz;
+    if (!wall) {
+        gf = fluid_gradient(c, a.x);
+        gw = gf;
+    } else {
+        gf = vec2(0.0);
+        vel = vec2(0.0);
+        const ivec2 n4[4] = ivec2[4](ivec2(1, 0), ivec2(0, 1), ivec2(-1, 0), ivec2(0, -1));
+        for (int j = 0; j < 4; j++) {
+            ivec2 n = c + n4[j];
+            if (!fluid_at(n)) continue;
+            vec4 an = imageLoad(AIR_FIELD, air_wrap(n));
+            vec2 g = fluid_gradient(n, an.x);
+            if (dot(g, g) > dot(gf, gf)) {
+                gf = g;
+                vel = an.yz;
+            }
+        }
+        peak = 0.0;
+        gw.x = wall_axis(c, ivec2(1, 0), peak);
+        gw.y = wall_axis(c, ivec2(0, 1), peak);
+    }
+    float units_f = length(gf) * pc.blast_scale;
+    float units_w = length(gw) * pc.wall_scale;
+    float over = (peak - 1.0) * 1000.0;
+
+    bool event_done = (pc.flags & EFFECTS_EVENTS) == 0u;
+    bool blast = (pc.flags & EFFECTS_BLAST) != 0u;
+    if (max(units_f, units_w) > 0.5 || over > 0.5) {
+        for (int k = 0; k < 4; k++) {
+            ivec2 p = c * 2 + ivec2(k & 1, k >> 1);
+            uint cl = imageLoad(CELLS, p).x;
+            uint m = cell_material(cl);
+            if (m == MATERIAL_AIR || (cl & (CELL_FLAG_PARTICLE | CELL_FLAG_BODY)) != 0u) continue;
+            MaterialGpu mt = MATERIALS[m];
+            uint pe = mat_pressure_event(mt);
+            if (!event_done && pe != 0u && over > float(pe)) {
+                append_event(p, AIR_EVENT_PRESSURE, uint(over));
+                event_done = true;
+            }
+            uint thr = mat_blast_threshold(mt);
+            uint resp = mat_blast_response(mt);
+            bool fly = resp == BLAST_FLY;
+            float units = fly ? units_f : units_w;
+            if (!blast || thr == 0u || resp == BLAST_NONE || units <= float(thr)) continue;
+            float excess = units - float(thr);
+            vec2 g = fly ? gf : gw;
+            vec2 gdir = dot(g, g) > 0.0 ? normalize(g) : vec2(0.0);
+            uint h = hash_salt(uint(p.x), uint(p.y), pc.tick, 0xb1a57u);
+            vec2 jitter = vec2(float(h & 0xffu), float((h >> 8) & 0xffu)) / 255.0 - 0.5;
+            vec2 v = vel * pc.eject_scale - gdir * min(excess * pc.eject_push, pc.eject_max) + jitter * 0.5;
+            float sp = length(v);
+            if (sp > pc.eject_max) v *= pc.eject_max / sp;
+            uint rubble = mat_rubble(mt);
+            if (rubble == MATERIAL_NONE) rubble = m;
+            uint next;
+            if (fly) {
+                next = spawn_cell(MATERIAL_AIR, cell_variant(cl));
+                append_eject(p, v, cl, BLAST_KIND_FLY);
+            } else {
+                uint health = cell_state(cl);
+                uint dmg = max(1u, uint(excess * pc.damage_scale));
+                s_damaged = true;
+                if (health <= dmg) {
+                    if (rubble != m) {
+                        next = spawn_cell(rubble, cell_variant(cl));
+                    } else {
+                        next = spawn_cell(MATERIAL_AIR, cell_variant(cl));
+                        append_eject(p, v, cl, BLAST_KIND_BREAK);
+                    }
+                } else {
+                    next = cell_with_state(cl, health - dmg);
+                    if (resp == BLAST_CHIP && (h >> 30) == 0u) append_eject(p, v, cell_with_material(cl, rubble), BLAST_KIND_CHIP);
+                }
+            }
+            imageStore(CELLS, p, uvec4(next, 0u, 0u, 0u));
+            s_changed = true;
+            if (wall) imageAtomicOr(g_uimages[pc.node_slot], c, NODE_BLASTED);
+        }
+    }
+
+    barrier();
+    if (gl_LocalInvocationIndex == 0u) {
+        if (s_changed && (pc.flags & EFFECTS_MARK) != 0u) mark_tile_and_neighbors(tile);
+        if (s_damaged) air_mark_tile(tile);
+    }
+}

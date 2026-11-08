@@ -17,6 +17,7 @@ const cell = @import("sim/cell.zig");
 const View = @import("render/world.zig").View;
 const bench = @import("bench.zig");
 const verify = @import("verify.zig");
+const air_test = @import("air_test.zig");
 
 pub const std_options: std.Options = .{
     .log_level = if (builtin.mode == .debug) .info else .info,
@@ -42,6 +43,16 @@ pub const Cli = struct {
     zoom: u32 = 2,
     /// World pixel at the center of the view (default: world center).
     center: ?[2]i32 = null,
+    /// Air field (M5) on; always off for the determinism scene.
+    air: bool = true,
+    air_sleep: bool = true,
+    /// `--overlay air`: show the air field debug overlay (window and
+    /// headless screenshots).
+    overlay: bool = false,
+    /// `--air-test`: the air field scenario harness (src/air_test.zig).
+    air_test: bool = false,
+    /// Headless: also write a screenshot every N ticks (`<path>-<tick>.png`).
+    screenshot_every: u32 = 0,
 };
 
 fn usage() void {
@@ -63,6 +74,11 @@ fn usage() void {
         \\  --size WxH              window size (default 1600x900)
         \\  --bench                 run the benchmark scenes (with --headless)
         \\  --verify-determinism    CPU reference vs GPU, bit for bit
+        \\  --no-air                disable the air field
+        \\  --air-all-active        air field without active-tile masking
+        \\  --overlay air           air field debug overlay (F3 in the window)
+        \\  --screenshot-every N    headless: also write PATH-<tick>.png every N ticks
+        \\  --air-test              air field scenarios (sealed room, corridor blast)
         \\
     , .{});
 }
@@ -122,6 +138,18 @@ fn parseCli(args: []const [:0]const u8) !Cli {
             cli.bench = true;
         } else if (std.mem.eql(u8, a, "--verify-determinism")) {
             cli.verify = true;
+        } else if (std.mem.eql(u8, a, "--no-air")) {
+            cli.air = false;
+        } else if (std.mem.eql(u8, a, "--air-all-active")) {
+            cli.air_sleep = false;
+        } else if (std.mem.eql(u8, a, "--overlay")) {
+            const what = try next(args, &i);
+            if (!std.mem.eql(u8, what, "air")) return error.UnknownOverlay;
+            cli.overlay = true;
+        } else if (std.mem.eql(u8, a, "--screenshot-every")) {
+            cli.screenshot_every = try std.fmt.parseInt(u32, try next(args, &i), 10);
+        } else if (std.mem.eql(u8, a, "--air-test")) {
+            cli.air_test = true;
         } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
             usage();
             std.process.exit(0);
@@ -141,6 +169,7 @@ pub fn main(init: std.process.Init) !u8 {
     const cli = parseCli(args) catch return 2;
 
     if (cli.verify) return verify.run(gpa, io, cli);
+    if (cli.air_test) return air_test.run(gpa, io, cli);
     if (cli.bench) return bench.run(gpa, io, cli);
     if (!cli.headless) return app.run(gpa, io, cli);
     return runHeadless(gpa, io, cli);
@@ -153,9 +182,11 @@ fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
     try engine.init(gpa, .{
         .table = &table,
         .validation = cli.validation orelse (builtin.mode == .debug),
-        .pipeline = .{ .sleep = cli.sleep, .noise = cli.scene == .noise },
+        .pipeline = .{ .sleep = cli.sleep, .noise = cli.scene == .noise, .air = cli.air and cli.scene != .determinism, .air_sleep = cli.air_sleep },
     });
     defer engine.deinit();
+    engine.pipeline.air.overlay = cli.overlay;
+    engine.capture_overlay = cli.overlay;
 
     var profile: Profile = .{};
     var file_buf: [64 * 1024]u8 = undefined;
@@ -174,7 +205,17 @@ fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
     engine.profile = &profile;
 
     const start = std.Io.Timestamp.now(io, .awake);
-    for (0..cli.ticks) |_| try engine.frame(1, .{ .scene = cli.scene, .seed = cli.seed }, null);
+    for (0..cli.ticks) |t| {
+        try engine.frame(1, .{ .scene = cli.scene, .seed = cli.seed }, null);
+        if (cli.screenshot_every > 0 and (t + 1) % cli.screenshot_every == 0) {
+            if (cli.screenshot) |path| {
+                var name_buf: [256]u8 = undefined;
+                const stem = if (std.mem.endsWith(u8, path, ".png")) path[0 .. path.len - 4] else path;
+                const name = try std.fmt.bufPrint(&name_buf, "{s}-{d:0>4}.png", .{ stem, t + 1 });
+                try engine.screenshot(io, name, cli.crop);
+            }
+        }
+    }
     try engine.finish();
     const elapsed_ms = @as(f64, @floatFromInt(start.untilNow(io, .awake).nanoseconds)) / 1e6;
 
@@ -213,6 +254,7 @@ test {
     _ = @import("sim/commands.zig");
     _ = @import("sim/scenes.zig");
     _ = @import("sim/reference/grid.zig");
+    _ = @import("sim/air_abi.zig");
     _ = @import("render/font.zig");
     _ = @import("util/png.zig");
 }

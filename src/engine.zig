@@ -97,6 +97,8 @@ pub const Engine = struct {
     last: FrameStats = .{},
     /// Receives every completed frame's stats (HUD smoothing, --profile, bench).
     profile: ?*Profile = null,
+    /// Headless captures (`captureWorld`) add the debug overlay (air field).
+    capture_overlay: bool = false,
 
     pub const capture_format: vk.Format = .r8g8b8a8_unorm;
 
@@ -227,6 +229,9 @@ pub const Engine = struct {
         slot.pending = false;
         var stats: FrameStats = .{ .ticks = slot.ticks, .first_tick = slot.first_tick, .commands = slot.commands, .dropped_commands = slot.dropped };
         try slot.recorder.collect(&self.ctx, &stats.timings);
+        for (&self.slots, 0..) |*s, i| {
+            if (s == slot) self.pipeline.air.collect(@intCast(i));
+        }
         if (slot.ticks > 0) stats.active_tiles = slot.stats.typed(u32)[slot.ticks - 1];
         self.last = stats;
         if (self.profile) |p| p.record(&self.last, &self.names);
@@ -376,7 +381,7 @@ pub const Engine = struct {
     /// Render the whole world 1:1 through world.frag into the capture image
     /// and return its RGBA8 pixels (valid until the next capture/readback).
     pub fn captureWorld(self: *Engine) ![]const u8 {
-        return self.captureView(.{}, .{ .width = cell.world_size, .height = cell.world_size }, false);
+        return self.captureView(.{ .show_overlay = self.capture_overlay }, .{ .width = cell.world_size, .height = cell.world_size }, false);
     }
 
     /// Render `view` (and the HUD) as the window would show it, into the

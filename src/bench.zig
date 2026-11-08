@@ -9,14 +9,32 @@ const materials_builtin = @import("sim/materials_builtin.zig");
 const Profile = @import("profile.zig").Profile;
 const cell = @import("sim/cell.zig");
 
-const Case = struct { name: []const u8, scene: scenes.Scene, sleep: bool, budget_ms: f64 };
+const Case = struct {
+    name: []const u8,
+    scene: scenes.Scene,
+    sleep: bool,
+    budget_ms: f64,
+    /// Air field cases (M5): budget applies to air time, not grid time.
+    air: bool = false,
+    air_sleep: bool = true,
+};
 
 const cases = [_]Case{
     .{ .name = "static world (sleep)", .scene = .bench_static, .sleep = true, .budget_ms = 0.2 },
     .{ .name = "falling sand, fully active (sleep)", .scene = .bench_active, .sleep = true, .budget_ms = 2.5 },
     .{ .name = "falling sand, sleep disabled", .scene = .bench_active, .sleep = false, .budget_ms = 2.5 },
     .{ .name = "sand + water + smoke mixing, fully active", .scene = .bench_mixed, .sleep = true, .budget_ms = 2.5 },
+    // ---- air field (M5) ----
+    .{ .name = "air field, every air tile every step, explosion every 20 ticks", .scene = .bench_air, .sleep = true, .budget_ms = 1.5, .air = true, .air_sleep = false },
+    .{ .name = "air field, active air tiles, explosion every 20 ticks", .scene = .bench_air, .sleep = true, .budget_ms = 1.5, .air = true },
+    .{ .name = "air field, active air tiles, static world", .scene = .bench_static, .sleep = true, .budget_ms = 0.2, .air = true },
 };
+
+/// Passes that make up "air time" (the M5 budget): coarsening and every
+/// air.* pass, gas advection included.
+fn isAirPass(name: []const u8) bool {
+    return std.mem.eql(u8, name, "coarsen") or std.mem.startsWith(u8, name, "air.");
+}
 
 pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
     const table = materials_builtin.table();
@@ -43,7 +61,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         try engine.init(gpa, .{
             .table = &table,
             .validation = cli.validation orelse false,
-            .pipeline = .{ .sleep = case.sleep },
+            .pipeline = .{ .sleep = case.sleep, .air = case.air, .air_sleep = case.air_sleep },
         });
         defer engine.deinit();
         var profile: Profile = .{ .skip_frames = 10 };
@@ -59,7 +77,11 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         const wall = @as(f64, @floatFromInt(start.untilNow(io, .awake).nanoseconds)) / 1e6;
 
         const grid = profile.gridMean();
-        const ok = grid < case.budget_ms;
+        var air_ms: f64 = 0;
+        for (0..engine.names.count) |i| {
+            if (isAirPass(engine.names.get(i))) air_ms += profile.mean(i);
+        }
+        const ok = if (case.air) air_ms < case.budget_ms else grid < case.budget_ms;
         if (!ok) failed = true;
         std.debug.print("\n== {s}  ({s}, {d} ticks, wall {d:.1} ms)\n", .{ case.name, @tagName(case.scene), ticks, wall });
         std.debug.print("  {s:<10} {s:>9} {s:>9} {s:>9}\n", .{ "pass", "mean ms", "min", "max" });
@@ -68,7 +90,13 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
             std.debug.print("  {s:<10} {d:9.4} {d:9.4} {d:9.4}\n", .{ engine.names.get(i), profile.mean(i), profile.min[i], profile.max[i] });
         }
         const mean_tiles = @as(f64, @floatFromInt(profile.active_tiles_sum)) / @as(f64, @floatFromInt(@max(profile.frames, 1)));
-        std.debug.print("  {s:<10} {d:9.4} {d:9.4} {d:9.4}   budget {d:.1} ms: {s}\n", .{ "grid", grid, profile.grid_min, profile.grid_max, case.budget_ms, if (ok) "PASS" else "FAIL" });
+        if (case.air) {
+            std.debug.print("  {s:<10} {d:9.4}\n", .{ "grid", grid });
+            std.debug.print("  {s:<10} {d:9.4}   budget {d:.1} ms: {s}\n", .{ "air", air_ms, case.budget_ms, if (ok) "PASS" else "FAIL" });
+            std.debug.print("  air tiles active at end: {d} of {d}\n", .{ engine.pipeline.air.stats.active_tiles, cell.tile_count });
+        } else {
+            std.debug.print("  {s:<10} {d:9.4} {d:9.4} {d:9.4}   budget {d:.1} ms: {s}\n", .{ "grid", grid, profile.grid_min, profile.grid_max, case.budget_ms, if (ok) "PASS" else "FAIL" });
+        }
         std.debug.print("  active tiles: mean {d:.0} of {d}, last {d}\n", .{ mean_tiles, cell.tile_count, engine.last.active_tiles });
     }
     return if (failed) 1 else 0;

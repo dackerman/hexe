@@ -15,6 +15,11 @@ layout(push_constant) uniform PC {
 } pc;
 
 #define WORLD_VIEW_FLAG_TILES 1u
+// Add the debug overlay image (SLOT_IMG_DEBUG_OVERLAY, one texel per 2x2
+// pixels; the air field writes it, src/sim/air.zig) to the world colors.
+#define WORLD_VIEW_FLAG_OVERLAY 2u
+
+layout(set = 0, binding = BINDING_STORAGE_IMAGES, rgba8) uniform readonly image2D g_overlay_images[];
 
 vec4 cell_color(uint c) {
     uint m = cell_material(c);
@@ -35,6 +40,9 @@ void main() {
         bool is_active = uint(TILE_MARKS[TILE_COUNT + tile_index(t)]) != 0u;
         bool edge = any(equal(uvec2(w) & (TILE_SIZE - 1u), uvec2(0u)));
         if (is_active) color.rgb = mix(color.rgb, vec3(1.0, 0.25, 0.1), edge ? 0.6 : 0.12);
+    }
+    if ((pc.flags & WORLD_VIEW_FLAG_OVERLAY) != 0u) {
+        color.rgb = min(color.rgb * 0.6 + imageLoad(g_overlay_images[SLOT_IMG_DEBUG_OVERLAY], w >> 1).rgb, vec3(1.0));
     }
     o_color = vec4(color.rgb, 1.0);
 }
