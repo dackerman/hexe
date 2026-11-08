@@ -6,7 +6,7 @@
     .density = 120,
     .slide = 150,
     .conductivity = 20,
-    .flammable = .{ .ignite_at = 200, .burn_ticks = 1, .to = "smoke", .smoke = "smoke", .event = .explode },
+    .flammable = .{ .ignite_at = 200, .burn_ticks = 1, .to = "smoke", .event = .explode },
     .impact = .spray,
     .blast_threshold = 15,
     .blast_response = .fly,
