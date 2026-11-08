@@ -1,0 +1,26 @@
+# Contact effects along a walk: acid corrodes, oil makes her oily, lava sets
+# her alight (burning longer while oily), water puts her out, smoke blinds.
+scene empty
+spawn 760 1100
+ticks 360
+zoom 3
+liquid off
+at 0 fill stone 600 1100 1500 1160
+at 0 fill air 800 1100 830 1103
+at 0 fill acid 800 1100 830 1103
+at 0 fill air 860 1100 890 1103
+at 0 fill oil 860 1100 890 1103
+at 0 fill air 920 1100 950 1103
+at 0 fill lava 920 1100 950 1103
+at 0 fill air 1000 1100 1040 1103
+at 0 fill water 1000 1100 1040 1103
+at 10 aimrel 60 -10
+at 20 hold right
+at 38 shot acid
+at 68 shot oil
+at 98 shot lava
+at 125 shot burning
+at 145 shot water
+at 200 release right
+at 230 fill smoke 1050 1040 1150 1100
+at 236 shot smoke

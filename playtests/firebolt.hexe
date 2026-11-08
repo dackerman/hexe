@@ -1,0 +1,16 @@
+# A fire bolt sets a wooden hut alight.
+scene empty
+spawn 880 1100
+ticks 260
+zoom 3
+at 0 fill stone 600 1100 1500 1160
+at 0 fill wood 990 1040 1080 1046
+at 0 fill wood 990 1046 996 1100
+at 0 fill wood 1074 1046 1080 1100
+at 0 fill wood 1010 1080 1060 1100
+at 10 tool 1
+at 10 aim 1030 1060
+at 30 tap primary
+at 34 shot bolt_flying
+at 60 shot impact
+at 250 shot burning

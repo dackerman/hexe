@@ -1,0 +1,23 @@
+# The witch stands on terrain, walks right over 2 and 3 px steps and a sand
+# dune (powder is walkable through the readback region), then jumps.
+scene empty
+spawn 860 1100
+ticks 250
+zoom 4
+at 0 fill stone 600 1100 1500 1160
+at 0 fill stone 600 960 620 1100
+at 0 fill stone 1480 960 1500 1100
+at 0 fill stone 930 1098 1500 1100
+at 0 fill stone 980 1095 1500 1098
+at 0 fill sand 1040 1085 1080 1095
+at 0 fill sand 1048 1080 1072 1085
+at 0 fill sand 1054 1076 1066 1080
+at 30 shot stand
+at 30 aim 1000 1060
+at 40 hold right
+at 96 shot on_dune
+at 150 release right
+at 160 hold jump
+at 175 shot jump_apex
+at 190 release jump
+at 220 shot landed

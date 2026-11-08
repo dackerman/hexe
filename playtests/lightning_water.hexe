@@ -1,0 +1,22 @@
+# A walker stands in a pool; lightning into the water electrocutes it.
+scene empty
+spawn 932 1030
+ticks 300
+zoom 3
+liquid off
+at 0 fill stone 600 1100 1500 1160
+at 0 fill stone 840 1030 940 1100
+at 0 fill stone 940 1060 950 1140
+at 0 fill stone 1190 1060 1200 1140
+at 0 fill air 950 1060 1190 1130
+at 0 fill water 950 1080 1190 1130
+at 0 fill stone 940 1130 1200 1160
+at 2 enemy walker 1120 1130
+at 10 tool 7
+at 10 aim 1000 1084
+at 80 shot walker_in_pool
+at 90 tap primary
+at 92 shot zap
+at 110 tap primary
+at 140 shot after
+at 290 shot corpse

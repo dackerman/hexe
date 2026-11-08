@@ -1,6 +1,7 @@
 //! hexe entry point: argument parsing and mode dispatch.
 //!
-//!   hexe                                   windowed sandbox
+//!   hexe                                   windowed playable demo (--sandbox: the sandbox)
+//!   hexe --script FILE [--view-screenshot PREFIX]   headless scripted playtest
 //!   hexe --headless --ticks N [--screenshot out.png] [--crop x,y,w,h]
 //!        [--scene name] [--seed n] [--profile out.csv] [--no-sleep]
 //!   hexe --headless --bench                (zig build bench)
@@ -113,6 +114,19 @@ pub const Cli = struct {
     liquid_test: ?[]const u8 = null,
     liquid_params: @import("sim/liquid.zig").Params = .{},
     // ---- end liquid solver ----
+    // ---- gameplay (M9) ----
+    /// Windowed: the paint-and-pan sandbox instead of the playable witch.
+    sandbox: bool = false,
+    /// Headless scripted playtest (src/game/playtest.zig).
+    script: ?[]const u8 = null,
+    /// Drop this many enemies near the witch once the world is read back.
+    spawn_enemies: u32 = 0,
+    /// Witch start (feet), overriding the scene's spawn.
+    spawn: ?[2]f32 = null,
+    /// Windowed play: reset the level at this frame (testing R).
+    reset_at: u64 = 0,
+    zoom_set: bool = false,
+    // ---- end gameplay ----
 };
 
 fn usage() void {
@@ -167,6 +181,12 @@ fn usage() void {
         \\  --liquid-overlay        same as --overlay liquid_particles (Tab in the window)
         \\  --liquid-test [NAME]    liquid scenarios: utube|dam|pool|reaction|determinism|all|residual
         \\  --liquid-param K=V      set a liquid solver tunable (src/sim/liquid.zig Params)
+        \\  --sandbox               windowed sandbox (paint, pan) instead of the playable witch
+        \\  --script FILE           headless scripted playtest (src/game/playtest.zig); shots go
+        \\                          to <--view-screenshot PREFIX>-NAME.png
+        \\  --spawn-enemies [N]     drop N (default 3) enemies near the witch
+        \\  --spawn X,Y             witch start position (feet)
+        \\  --reset-at N            windowed play: reset the level at frame N (test)
         \\
     , .{});
 }
@@ -198,6 +218,7 @@ fn parseCli(args: []const [:0]const u8) !Cli {
             cli.view_screenshot = try next(args, &i);
         } else if (std.mem.eql(u8, a, "--zoom")) {
             cli.zoom = std.math.clamp(try std.fmt.parseInt(u32, try next(args, &i), 10), 1, 16);
+            cli.zoom_set = true;
         } else if (std.mem.eql(u8, a, "--center")) {
             var it = std.mem.splitScalar(u8, try next(args, &i), ',');
             const x = try std.fmt.parseInt(i32, it.next() orelse return error.BadCenter, 10);
@@ -302,6 +323,24 @@ fn parseCli(args: []const [:0]const u8) !Cli {
                 i += 1;
                 cli.liquid_test = args[i];
             }
+        } else if (std.mem.eql(u8, a, "--sandbox")) {
+            cli.sandbox = true;
+        } else if (std.mem.eql(u8, a, "--script")) {
+            cli.script = try next(args, &i);
+            cli.headless = true;
+        } else if (std.mem.eql(u8, a, "--spawn-enemies")) {
+            cli.spawn_enemies = 3;
+            if (i + 1 < args.len and args[i + 1].len > 0 and args[i + 1][0] != '-') {
+                i += 1;
+                cli.spawn_enemies = try std.fmt.parseInt(u32, args[i], 10);
+            }
+        } else if (std.mem.eql(u8, a, "--spawn")) {
+            var it = std.mem.splitScalar(u8, try next(args, &i), ',');
+            const x = try std.fmt.parseFloat(f32, it.next() orelse return error.BadSpawn);
+            const y = try std.fmt.parseFloat(f32, it.next() orelse return error.BadSpawn);
+            cli.spawn = .{ x, y };
+        } else if (std.mem.eql(u8, a, "--reset-at")) {
+            cli.reset_at = try std.fmt.parseInt(u64, try next(args, &i), 10);
         } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
             usage();
             std.process.exit(0);
@@ -330,6 +369,7 @@ pub fn main(init: std.process.Init) !u8 {
     if (cli.bench_render) return bench_render.run(gpa, io, cli, &lib);
     if (cli.bench) return bench.run(gpa, io, cli, &lib);
     if (cli.scenario != null or cli.scenarios != null) return scenario_runner.run(gpa, io, cli, &lib);
+    if (cli.script) |path| return @import("game/playtest.zig").run(gpa, io, cli, &lib, path);
     if (cli.world and cli.headless) return world_mode.runHeadless(gpa, io, cli, &lib);
     if (!cli.headless) return app.run(gpa, io, cli, &lib);
     return runHeadless(gpa, io, cli, &lib);
@@ -476,4 +516,5 @@ test {
     _ = @import("sim/terrain_source.zig");
     _ = @import("sim/events.zig");
     _ = @import("game/explode.zig");
+    _ = @import("game/game.zig");
 }
