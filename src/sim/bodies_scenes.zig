@@ -9,7 +9,8 @@
 //!               the slab comes loose, falls and shatters
 //! bodies_beam   a steel beam spans a gap between two cliffs with a crate on
 //!               it; a torch (eject circles) cuts it from below from tick 120;
-//!               it sags, then snaps
+//!               it sags, then snaps; at tick 900 the right weld's rock is
+//!               ejected and that half falls
 //! bodies_water  a concrete and a wood crate dropped into a cellular pool
 //! bodies_bench  200 crates (wood and steel, 20-40 px, some spinning) falling
 //!               onto a floor (performance)
@@ -37,6 +38,8 @@ pub fn terrain(scene: Scene, tick: u32, list: *commands.CommandList) void {
     switch (scene) {
         .bodies_crate => {
             list.fillRect(700, 1200, 1350, 1260, m.stone, .{});
+            // A floor across the torus seam x = 2047 | 0.
+            list.fillRect(1950, 1200, 2150, 1260, m.stone, .{});
         },
         .bodies_slab => {
             list.fillRect(600, 1200, 1450, 1300, m.stone, .{});
@@ -69,8 +72,13 @@ pub fn script(scene: Scene, tick: u32, sim: *BodySim, list: *commands.CommandLis
     if (!isBodiesScene(scene)) return;
     const r = sim.mats.roles;
     switch (scene) {
-        .bodies_crate => if (tick == 5) {
-            _ = sim.spawnCrate(1024, 1000, 40, r.concrete) catch {};
+        .bodies_crate => {
+            if (tick == 5) {
+                _ = sim.spawnCrate(1024, 1000, 40, r.concrete) catch {};
+                // Lands straddling the seam (unwrapped x 2028..2068).
+                _ = sim.spawnCrate(2048, 1000, 40, r.concrete) catch {};
+            }
+            if (tick % 50 == 0 and tick > 0) poseReport(sim, tick);
         },
         .bodies_slab => if (tick == 40) {
             var y: i32 = 1114;
@@ -87,6 +95,9 @@ pub fn script(scene: Scene, tick: u32, sim: *BodySim, list: *commands.CommandLis
                 const bottom = beamBottomAt(sim, 1025) orelse continue;
                 list.fillRect(1023, bottom - c.depth, 1028, bottom + 3, materials.air, .{});
             }
+            // Then blow away the right cliff's edge where the beam is welded:
+            // the anchor lets go and the right half falls.
+            if (tick == 900) list.fillCircle(1152, 1010, 12, materials.air, .{});
             if (tick % 40 == 0 and tick > 0) beamReport(sim, tick);
         },
         .bodies_water => if (tick == 10) {
@@ -108,6 +119,16 @@ pub fn script(scene: Scene, tick: u32, sim: *BodySim, list: *commands.CommandLis
         },
         else => {},
     }
+}
+
+/// Pose of every body and what the GPU rewrote in the last completed tick.
+fn poseReport(sim: *BodySim, tick: u32) void {
+    var it = sim.world.rasterIterator();
+    std.debug.print("tick {d}:", .{tick});
+    while (it.next()) |rb| {
+        std.debug.print(" body {d} at ({d:.3}, {d:.3}) angle {d:.4} {s};", .{ rb.handle.index + 1, rb.transform.x, rb.transform.y, rb.transform.angle, if (rb.awake) "awake" else "asleep" });
+    }
+    std.debug.print(" cpu rastered {d}, cleared {d}\n", .{ sim.stats.rastered, sim.stats.cleared });
 }
 
 /// World row just below the beam's bottom edge at column x (the first beam's

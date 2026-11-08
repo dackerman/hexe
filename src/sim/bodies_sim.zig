@@ -102,8 +102,11 @@ pub const Config = struct {
     },
     /// Side of the square read around a destruction event for connectivity.
     connectivity_region: u32 = 256,
-    /// Events whose regions overlap are analyzed together up to this side.
-    max_connectivity_region: u32 = 512,
+    /// Events whose regions overlap are analyzed together up to this side
+    /// (448^2: about 0.8 ms in ReleaseFast on the dev machine).
+    max_connectivity_region: u32 = 448,
+    /// Connectivity time per tick; clusters past it wait for the next tick.
+    connectivity_budget_ms: f64 = 1.0,
     /// Loose components smaller than this become rubble, not bodies.
     min_body_pixels: u32 = 4,
     /// Collision region around each body beyond its bounding circle, px.
@@ -697,21 +700,33 @@ pub const BodySim = struct {
     /// Connectivity over the clusters of ready events; events the readback
     /// has not caught up with stay queued.
     fn processEvents(self: *BodySim, read_tick: u32) void {
+        const t0 = nowNs();
+        var done: usize = 0;
+        while (done < self.cluster_len) {
+            if (done > 0 and msSince(t0) >= self.cfg.connectivity_budget_ms) break;
+            self.connectivity(self.clusters[done]);
+            done += 1;
+        }
+        const left = self.clusters[done..self.cluster_len];
         var n: usize = 0;
         for (self.events[0..self.event_len]) |e| {
-            if (e.tick >= read_tick) {
+            var keep = e.tick >= read_tick;
+            for (left) |c| keep = keep or c.overlaps(e.bounds());
+            if (keep) {
                 self.events[n] = e;
                 n += 1;
             }
         }
-        for (self.clusters[0..self.cluster_len]) |r| self.connectivity(r);
         self.cluster_len = 0;
         self.event_len = n;
     }
 
     /// Islands of static solid in region `r` that touch neither the region
     /// border nor an anchor material (bedrock) come loose: bodies, or rubble
-    /// when tiny.
+    /// when tiny. One flood fill from the border and anchor pixels marks
+    /// everything anchored; only the bounding box of what is left is split
+    /// into components, so the large anchored terrain is never labelled or
+    /// copied (docs/decisions/93-bodies-gpu-connectivity.md).
     pub fn connectivity(self: *BodySim, r: Region) void {
         const t0 = nowNs();
         defer {
@@ -721,29 +736,75 @@ pub const BodySim = struct {
             self.totals.connectivity_runs += 1;
         }
         const area = r.area();
+        const w: usize = r.w;
+        const h: usize = r.h;
         const mats = self.region_mats[0..area];
         self.terrain.materials(r, mats);
         self.maskPending(r, mats);
+        // conn: static material id, 0 = not static; anchored pixels are
+        // zeroed by the flood below.
         const conn = self.conn[0..area];
         for (mats, conn) |m, *c| {
             c.* = if (m != materials.air and m != ts.body_owned and self.mats.info[m].static) m else 0;
         }
-        const comps = bodies.splitByConnectivity(conn, @intCast(r.w), @intCast(r.h), &self.split) catch |err| {
+        const stack = self.split.stack;
+        var sp: usize = 0;
+        const seed = struct {
+            fn f(cn: []u8, st: []u32, n: *usize, i: usize) void {
+                if (cn[i] == 0) return;
+                cn[i] = 0;
+                st[n.*] = @intCast(i);
+                n.* += 1;
+            }
+        }.f;
+        for (0..w) |x| {
+            seed(conn, stack, &sp, x);
+            seed(conn, stack, &sp, (h - 1) * w + x);
+        }
+        for (0..h) |y| {
+            seed(conn, stack, &sp, y * w);
+            seed(conn, stack, &sp, y * w + w - 1);
+        }
+        for (conn, 0..) |m, i| {
+            if (m != 0 and self.mats.info[m].breakup.anchor) seed(conn, stack, &sp, i);
+        }
+        while (sp > 0) {
+            sp -= 1;
+            const i = stack[sp];
+            const x = i % w;
+            if (x > 0) seed(conn, stack, &sp, i - 1);
+            if (x + 1 < w) seed(conn, stack, &sp, i + 1);
+            if (i >= w) seed(conn, stack, &sp, i - w);
+            if (i + w < area) seed(conn, stack, &sp, i + w);
+        }
+        // What is left is loose.
+        var x0: usize = w;
+        var y0: usize = h;
+        var x1: usize = 0;
+        var y1: usize = 0;
+        for (0..h) |y| {
+            const row = conn[y * w ..][0..w];
+            for (row, 0..) |m, x| {
+                if (m == 0) continue;
+                x0 = @min(x0, x);
+                x1 = @max(x1, x);
+                y0 = @min(y0, y);
+                y1 = @max(y1, y);
+            }
+        }
+        if (x0 > x1) return;
+        const bw = x1 - x0 + 1;
+        const bh = y1 - y0 + 1;
+        // Compact the loose box in place at the start of `conn` (rows move
+        // forward only, so this never overwrites unread data).
+        for (0..bh) |j| std.mem.copyForwards(u8, conn[j * bw ..][0..bw], conn[(y0 + j) * w + x0 ..][0..bw]);
+        const comps = bodies.splitByConnectivity(conn[0 .. bw * bh], @intCast(bw), @intCast(bh), &self.split) catch |err| {
             log.warn("connectivity {d}x{d} at {d},{d}: {s}", .{ r.w, r.h, r.x, r.y, @errorName(err) });
             return;
         };
         for (comps) |c| {
-            if (c.x == 0 or c.y == 0 or c.x + c.w == r.w or c.y + c.h == r.h) continue;
-            var anchored = false;
-            for (c.pixels) |m| {
-                if (m != 0 and self.mats.info[m].breakup.anchor) {
-                    anchored = true;
-                    break;
-                }
-            }
-            if (anchored) continue;
-            const wx = r.x + @as(i32, c.x);
-            const wy = r.y + @as(i32, c.y);
+            const wx = r.x + @as(i32, @intCast(x0)) + @as(i32, c.x);
+            const wy = r.y + @as(i32, @intCast(y0)) + @as(i32, c.y);
             if (c.pixel_count < self.cfg.min_body_pixels) {
                 self.componentToRubble(c, wx, wy);
             } else if (@as(u32, c.w) * c.h <= self.cfg.world.max_bitmap_pixels) {
