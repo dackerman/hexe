@@ -15,6 +15,7 @@ const shader_sources = [_][]const u8{
     "sim/grid/movement.comp",
     // ---- particles, readback (M4) ----
     "sim/particles/ballistic.comp",
+    "sim/particles/erase.comp",
     "sim/particles/spawn.comp",
     "sim/particles/control.comp",
     "sim/particles/rebuild.comp",

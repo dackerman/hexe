@@ -146,6 +146,7 @@ pub const Particles = struct {
     /// Host-visible: frames_in_flight regions of `cpu_spawn_capacity`.
     cpu_ring: gpu.Buffer,
     ballistic_pipeline: vk.Pipeline,
+    erase_pipeline: vk.Pipeline,
     spawn_pipeline: vk.Pipeline,
     control_pipeline: vk.Pipeline,
     rebuild_pipeline: vk.Pipeline,
@@ -177,6 +178,7 @@ pub const Particles = struct {
             .overlay = .{},
             .cpu_ring = .{},
             .ballistic_pipeline = .null,
+            .erase_pipeline = .null,
             .spawn_pipeline = .null,
             .control_pipeline = .null,
             .rebuild_pipeline = .null,
@@ -219,6 +221,7 @@ pub const Particles = struct {
         try self.upload();
 
         self.ballistic_pipeline = try gpu.pipelines.createCompute(ctx, &shaders.sim_particles_ballistic_comp);
+        self.erase_pipeline = try gpu.pipelines.createCompute(ctx, &shaders.sim_particles_erase_comp);
         self.spawn_pipeline = try gpu.pipelines.createCompute(ctx, &shaders.sim_particles_spawn_comp);
         self.control_pipeline = try gpu.pipelines.createCompute(ctx, &shaders.sim_particles_control_comp);
         self.rebuild_pipeline = try gpu.pipelines.createCompute(ctx, &shaders.sim_particles_rebuild_comp);
@@ -259,7 +262,7 @@ pub const Particles = struct {
 
     pub fn deinit(self: *Particles) void {
         const ctx = self.ctx;
-        for ([_]vk.Pipeline{ self.cpu_spawn_pipeline, self.spray_pipeline, self.rebuild_pipeline, self.control_pipeline, self.spawn_pipeline, self.ballistic_pipeline }) |p| {
+        for ([_]vk.Pipeline{ self.cpu_spawn_pipeline, self.spray_pipeline, self.rebuild_pipeline, self.control_pipeline, self.spawn_pipeline, self.erase_pipeline, self.ballistic_pipeline }) |p| {
             if (p != .null) gpu.pipelines.destroy(ctx, p);
         }
         self.overlay.deinit(ctx);
@@ -346,11 +349,11 @@ pub const Particles = struct {
         const ctx = frame.ctx;
         const cmd = frame.cmd;
         const indirect = self.ctrl.handle;
-        // Overlay: cleared, then redrawn by the ballistic and spawn passes.
-        gpu.memory.memoryBarrier(ctx, cmd, .{ .compute_shader = true }, .{ .shader_storage_write = true }, .{ .all_transfer = true }, .{ .transfer_write = true });
-        const zero = vk.ClearColorValue{ .uint_32 = .{ 0, 0, 0, 0 } };
-        ctx.vkd.cmdClearColorImage(cmd, self.overlay.handle, .general, &zero, &.{gpu.memory.color_range});
-        gpu.memory.memoryBarrier(ctx, cmd, .{ .all_transfer = true }, .{ .transfer_write = true }, .{ .compute_shader = true }, .{ .shader_storage_read = true, .shader_storage_write = true });
+        // Overlay: erase every particle's pixel; ballistic and spawn redraw.
+        frame.barrier();
+        frame.bindCompute(self.erase_pipeline);
+        ctx.vkd.cmdDispatchIndirect(cmd, indirect, ctrl_dispatch * 4);
+        frame.barrier();
 
         frame.bindCompute(self.ballistic_pipeline);
         frame.push(extern struct { tick: u32, dt: f32, gravity: f32, max_step: f32 }{ .tick = frame.tick, .dt = dt, .gravity = gravity, .max_step = max_step });

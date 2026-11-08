@@ -5,8 +5,9 @@
 //   1. integrate gravity, clamp the speed to max_step px per tick;
 //   2. march the cell image (DDA) from the old to the new position;
 //   3. on the first non-passable cell: the target's impact response
-//      (splash / spray / chip / dent), then ricochet (reflect, keep flying)
-//      or land: claim the last air cell on the path with an atomic
+//      (splash / spray / chip / dent), then ricochet (reflect, keep flying),
+//      glance off (no support under the free cell: ceilings, wall sides) or
+//      land: claim the last air cell on the path with an atomic
 //      compare-exchange (air -> particle's material at full state);
 //   4. no free cell, or another particle won it: bounce with the target's
 //      restitution and retry next tick; after PMETA_STUCK_MAX failed ticks
@@ -39,6 +40,8 @@ layout(push_constant) uniform PC {
 // Bounce kept when a landing fails and the target has no restitution.
 #define DEFAULT_RESTITUTION 0.3
 #define RICOCHET_RESTITUTION 0.5
+// Normal velocity kept when glancing off a ceiling or wall with no support.
+#define GLANCE_RESTITUTION 0.2
 #define SALT_BALLISTIC 0xba11u
 
 bool is_free(uint c) { return cell_material(c) == MATERIAL_AIR && (c & (CELL_FLAG_BODY | CELL_FLAG_PARTICLE)) == 0u; }
@@ -267,11 +270,20 @@ void main() {
         }
         uint rest = mat_restitution(tt);
         bool ricochet = (tt.flags & MATERIAL_FLAG_RICOCHET) != 0u && !body;
+        // A particle only comes to rest on something: hitting a ceiling or
+        // the side of a wall with air under the free cell, it glances off
+        // and keeps falling as a particle (no cells stuck to walls and
+        // ceilings that then crawl down at grid speed).
+        bool supported = have_free && !passable(imageLoad(CELLS, wrap_coord(free_c + ivec2(0, 1))).x);
         if (ricochet && sp > RICOCHET_MIN_SPEED) {
             float e = rest != 0u ? float(rest) / 255.0 : RICOCHET_RESTITUTION;
             if (normal.x != 0) v.x = -v.x; else v.y = -v.y;
             v *= e;
             p = have_free ? vec2(free_c) + 0.5 : p;
+        } else if (have_free && !supported) {
+            float e = rest != 0u ? float(rest) / 255.0 : GLANCE_RESTITUTION;
+            if (normal.x != 0) v.x = -v.x * e; else v.y = -v.y * e;
+            p = vec2(free_c) + 0.5;
         } else if (have_free && land(wrap_coord(free_c), free_v, meta)) {
             release_particle(i);
             atomicAdd(PCTRL[PCTRL_LANDED], 1u);
