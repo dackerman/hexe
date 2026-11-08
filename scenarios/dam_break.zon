@@ -1,0 +1,25 @@
+// docs/04-fluids.md scenario 2: a 1-px wood dam between two basins is
+// removed; a wave crosses and the levels settle.
+.{
+    .name = "dam_break",
+    .description = "Left basin full, right basin empty, separated by a 1-px wood dam. The dam is removed at tick 60; a wave reaches the far wall and the water settles level across both halves.",
+    .ticks = 900,
+    .fills = .{
+        .{ .rect = .{ .x = 16, .y = 232, .w = 224, .h = 8 }, .material = "bedrock" },
+        .{ .rect = .{ .x = 16, .y = 120, .w = 4, .h = 112 }, .material = "bedrock" },
+        .{ .rect = .{ .x = 236, .y = 120, .w = 4, .h = 112 }, .material = "bedrock" },
+        .{ .rect = .{ .x = 128, .y = 120, .w = 1, .h = 112 }, .material = "wood" },
+        // 108 x 82 = 8856 cells; settled across 216 columns: 41 rows (y 191..231).
+        .{ .rect = .{ .x = 20, .y = 150, .w = 108, .h = 82 }, .material = "water" },
+    },
+    .commands = .{
+        .{ .tick = 60, .remove = .{ .rect = .{ .x = 128, .y = 120, .w = 1, .h = 112 } } },
+    },
+    .assertions = .{
+        .{ .tick = 59, .none = .{ .material = "water", .rect = .{ .x = 129, .y = 0, .w = 107, .h = 232 } }, .label = "dam holds until removed" },
+        .{ .tick = 61, .none = .{ .material = "wood" }, .label = "dam removed" },
+        .{ .tick = 150, .count = .{ .material = "water", .rect = .{ .x = 200, .y = 150, .w = 36, .h = 82 }, .min = 1 }, .label = "wave reached the far side" },
+        .{ .count = .{ .material = "water", .rect = .{ .x = 129, .y = 120, .w = 107, .h = 112 }, .min = 3900, .max = 4950 }, .label = "about half the water is on the right" },
+        .{ .none = .{ .material = "water", .rect = .{ .x = 20, .y = 0, .w = 216, .h = 184 } }, .label = "levels settled" },
+    },
+}

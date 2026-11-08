@@ -1,0 +1,14 @@
+// Turns to mud with water (reaction lives in water.zon).
+.{
+    .name = "dirt",
+    .id = 10,
+    .phase = .powder,
+    .density = 140,
+    .slide = 60,
+    .conductivity = 20,
+    .impact = .spray,
+    .blast_threshold = 25,
+    .blast_response = .fly,
+    .drag = 70,
+    .ramp = .{ 0x5b3a1e, 0x6b4526, 0x7a5230, 0x4e321a, 0x86603a },
+}

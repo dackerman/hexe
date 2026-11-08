@@ -1,0 +1,25 @@
+// From boiling water; condenses on cold solids; adds mass to the air field.
+.{
+    .name = "steam",
+    .id = 26,
+    .phase = .gas,
+    .density = 5,
+    .dispersion = 6,
+    .lifetime = 600,
+    .decays_to = "air",
+    .temperature = 110,
+    .conductivity = 20,
+    .feeds_air = true,
+    .drag = 255,
+    .translucent = true,
+    .on_contact = .{ .burn = 5 },
+    .ramp = .{ 0xc8d0d8, 0xd8dee4, 0xb8c2cc, 0xe6eaee },
+    .reactions = .{
+        .{ .with = "stone", .self = "water", .other = null, .chance = 6, .max_temp = 60 },
+        .{ .with = "bedrock", .self = "water", .other = null, .chance = 6, .max_temp = 60 },
+        .{ .with = "concrete", .self = "water", .other = null, .chance = 6, .max_temp = 60 },
+        .{ .with = "steel", .self = "water", .other = null, .chance = 6, .max_temp = 60 },
+        .{ .with = "glass", .self = "water", .other = null, .chance = 6, .max_temp = 60 },
+        .{ .with = "ice", .self = "water", .other = null, .chance = 6, .max_temp = 60 },
+    },
+}

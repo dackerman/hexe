@@ -1,0 +1,16 @@
+// Corpse material. Burns to ash with smoke; dissolved by acid.
+.{
+    .name = "flesh",
+    .id = 12,
+    .phase = .static,
+    .density = 110,
+    .health = 60,
+    .temperature = 37,
+    .conductivity = 20,
+    .flammable = .{ .ignite_at = 350, .burn_ticks = 300, .to = "ash", .smoke = "smoke", .heat = 16 },
+    .impact = .chip,
+    .blast_threshold = 40,
+    .blast_response = .@"break",
+    .drag = 50,
+    .ramp = .{ 0xb85a52, 0xc96a60, 0xa24a44, 0xd88078 },
+}

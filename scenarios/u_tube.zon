@@ -1,0 +1,24 @@
+// docs/04-fluids.md scenario 1: water poured into a U-tube equalizes
+// within 2 seconds (120 ticks at 60 Hz) of the pour ending.
+.{
+    .name = "u_tube",
+    .description = "Water poured into the left arm of a stone U-tube for 60 ticks; 120 ticks after the pour stops both arms hold the same level.",
+    .ticks = 180,
+    .fills = .{
+        .{ .rect = .{ .x = 40, .y = 40, .w = 176, .h = 200 }, .material = "stone" },
+        .{ .rect = .{ .x = 60, .y = 40, .w = 20, .h = 180 }, .material = "air" },
+        .{ .rect = .{ .x = 176, .y = 40, .w = 20, .h = 180 }, .material = "air" },
+        .{ .rect = .{ .x = 60, .y = 200, .w = 136, .h = 20 }, .material = "air" },
+    },
+    .commands = .{
+        // ~80 cells per tick for 61 ticks: 2720 fill the channel, the rest
+        // (~2160) splits into ~54 rows per arm (y 146..199).
+        .{ .tick = 0, .every = 1, .until = 60, .fill = .{ .rect = .{ .x = 60, .y = 42, .w = 20, .h = 4 }, .material = "water", .only = "air" } },
+    },
+    .assertions = .{
+        .{ .count = .{ .material = "water", .rect = .{ .x = 60, .y = 40, .w = 20, .h = 160 }, .min = 960, .max = 1200 }, .label = "left arm level" },
+        .{ .count = .{ .material = "water", .rect = .{ .x = 176, .y = 40, .w = 20, .h = 160 }, .min = 960, .max = 1200 }, .label = "right arm level" },
+        .{ .none = .{ .material = "water", .rect = .{ .x = 60, .y = 40, .w = 20, .h = 96 } }, .label = "left arm not overfull" },
+        .{ .none = .{ .material = "water", .rect = .{ .x = 176, .y = 40, .w = 20, .h = 96 } }, .label = "right arm not overfull" },
+    },
+}

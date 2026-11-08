@@ -1,0 +1,18 @@
+// Transient energetic gas spawned above burning cells. Emits heat and light.
+.{
+    .name = "flame",
+    .id = 11,
+    .phase = .gas,
+    .density = 3,
+    .dispersion = 2,
+    .lifetime = 20,
+    .decays_to = "air",
+    .temperature = 900,
+    .conductivity = 80,
+    .emits_heat = 60,
+    .drag = 255,
+    .emissive = 255,
+    .translucent = true,
+    .on_contact = .{ .ignite = true },
+    .ramp = .{ 0xffd23f, 0xffa52a, 0xff7a1a, 0xff4f12, 0xfff08a },
+}

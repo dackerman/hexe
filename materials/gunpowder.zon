@@ -1,0 +1,18 @@
+// Ignites at 200 C; on ignition appends an explode event and becomes smoke.
+.{
+    .name = "gunpowder",
+    .id = 15,
+    .phase = .powder,
+    .density = 120,
+    .slide = 150,
+    .conductivity = 20,
+    .flammable = .{ .ignite_at = 200, .burn_ticks = 1, .to = "smoke", .event = .explode },
+    .impact = .spray,
+    .blast_threshold = 15,
+    .blast_response = .fly,
+    .drag = 80,
+    .ramp = .{ 0x2c2c30, 0x3a3a40, 0x48484e, 0x232327, 0x55555c },
+    .reactions = .{
+        .{ .with = "flame", .self = "smoke", .other = null, .chance = 255, .event = .explode },
+    },
+}

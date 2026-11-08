@@ -1,0 +1,25 @@
+// docs/04-fluids.md scenario 6: the same seed and input log produce
+// identical cell images after 600 ticks.
+.{
+    .name = "determinism",
+    .description = "A busy scene (powders, both liquid solvers, fire, steam, an explosion) run twice from the same seed must produce bit-identical cell images at tick 600.",
+    .seed = 0x5eed,
+    .ticks = 600,
+    .fills = .{
+        .{ .rect = .{ .x = 0, .y = 240, .w = 256, .h = 16 }, .material = "bedrock" },
+        .{ .rect = .{ .x = 20, .y = 120, .w = 40, .h = 40 }, .material = "sand" },
+        .{ .rect = .{ .x = 80, .y = 140, .w = 50, .h = 60 }, .material = "water" },
+        .{ .rect = .{ .x = 150, .y = 200, .w = 40, .h = 40 }, .material = "wood" },
+        .{ .rect = .{ .x = 200, .y = 160, .w = 30, .h = 30 }, .material = "lava" },
+        .{ .rect = .{ .x = 140, .y = 120, .w = 10, .h = 10 }, .material = "gunpowder" },
+        .{ .rect = .{ .x = 60, .y = 100, .w = 20, .h = 20 }, .material = "oil" },
+    },
+    .commands = .{
+        .{ .tick = 30, .ignite = .{ .rect = .{ .x = 150, .y = 200, .w = 40, .h = 4 } } },
+        .{ .tick = 100, .explode = .{ .x = 100, .y = 200, .radius = 8 } },
+        .{ .tick = 0, .every = 4, .until = 200, .fill = .{ .circle = .{ .x = 128, .y = 20, .r = 2 }, .material = "water", .only = "air" } },
+    },
+    .assertions = .{
+        .{ .deterministic = .{ .runs = 2 }, .label = "bit-identical after 600 ticks" },
+    },
+}

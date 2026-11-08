@@ -1,0 +1,17 @@
+// Dirt plus water. Slow; dries back to dirt.
+.{
+    .name = "mud",
+    .id = 21,
+    .phase = .liquid,
+    .density = 130,
+    .dispersion = 1,
+    .lifetime = 3600,
+    .decays_to = "dirt",
+    .conductivity = 30,
+    .impact = .splash,
+    .blast_threshold = 30,
+    .blast_response = .fly,
+    .drag = 60,
+    .on_contact = .{ .slow = 0.7 },
+    .ramp = .{ 0x3e2a18, 0x4a3320, 0x553b26, 0x34230f },
+}

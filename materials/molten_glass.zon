@@ -1,0 +1,19 @@
+// Cools to glass below 800 C. Emissive.
+.{
+    .name = "molten_glass",
+    .id = 18,
+    .phase = .liquid,
+    .density = 240,
+    .dispersion = 1,
+    .temperature = 1200,
+    .conductivity = 50,
+    .freeze = .{ .at = 800, .to = "glass" },
+    .impact = .splash,
+    .blast_threshold = 40,
+    .blast_response = .fly,
+    .drag = 60,
+    .emissive = 160,
+    .glow = .{ .from = 800, .to = 1200 },
+    .on_contact = .{ .burn = 30, .ignite = true },
+    .ramp = .{ 0xff9a3a, 0xffb855, 0xffd27a, 0xe8782a },
+}

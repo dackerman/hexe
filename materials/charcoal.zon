@@ -1,0 +1,15 @@
+// Hotter, longer fire than wood; burns to ash.
+.{
+    .name = "charcoal",
+    .id = 8,
+    .phase = .static,
+    .density = 50,
+    .health = 60,
+    .conductivity = 15,
+    .flammable = .{ .ignite_at = 400, .burn_ticks = 900, .to = "ash", .smoke = "smoke", .heat = 40 },
+    .impact = .chip,
+    .blast_threshold = 60,
+    .blast_response = .@"break",
+    .drag = 90,
+    .ramp = .{ 0x1e1a18, 0x2a2420, 0x352d27, 0x24201c, 0x40362e },
+}

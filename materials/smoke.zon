@@ -1,0 +1,16 @@
+// From burning. Blocks light; follows the air field.
+.{
+    .name = "smoke",
+    .id = 25,
+    .phase = .gas,
+    .density = 8,
+    .dispersion = 4,
+    .lifetime = 1200,
+    .decays_to = "air",
+    .conductivity = 10,
+    .blocks_light = true,
+    .drag = 255,
+    .translucent = true,
+    .on_contact = .{ .blind = true },
+    .ramp = .{ 0x3a3a3c, 0x4a4a4d, 0x58585c, 0x2e2e30 },
+}

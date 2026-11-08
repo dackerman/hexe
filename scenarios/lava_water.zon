@@ -1,0 +1,18 @@
+// Lava and water meet in a bedrock basin and make stone and steam.
+.{
+    .name = "lava_water",
+    .description = "Lava (left) and water (right) released side by side: where they touch, stone forms and steam rises. The basin is bedrock so every stone cell is produced.",
+    .ticks = 600,
+    .fills = .{
+        .{ .rect = .{ .x = 32, .y = 232, .w = 192, .h = 8 }, .material = "bedrock" },
+        .{ .rect = .{ .x = 32, .y = 160, .w = 8, .h = 72 }, .material = "bedrock" },
+        .{ .rect = .{ .x = 216, .y = 160, .w = 8, .h = 72 }, .material = "bedrock" },
+        .{ .rect = .{ .x = 40, .y = 192, .w = 60, .h = 40 }, .material = "lava" },
+        .{ .rect = .{ .x = 156, .y = 192, .w = 60, .h = 40 }, .material = "water" },
+    },
+    .assertions = .{
+        .{ .tick = 120, .count = .{ .material = "steam", .min = 1 }, .label = "steam rises at the contact" },
+        .{ .count = .{ .material = "stone", .min = 20 }, .label = "stone crust formed" },
+        .{ .count = .{ .material = "stone", .rect = .{ .x = 40, .y = 160, .w = 176, .h = 72 }, .min = 20 }, .label = "stone is in the basin" },
+    },
+}

@@ -1,0 +1,15 @@
+// From acid reactions. Corrodes entities.
+.{
+    .name = "acid_gas",
+    .id = 2,
+    .phase = .gas,
+    .density = 9,
+    .dispersion = 5,
+    .lifetime = 300,
+    .decays_to = "air",
+    .conductivity = 10,
+    .drag = 255,
+    .translucent = true,
+    .on_contact = .{ .corrode = 15, .strip_armor = true },
+    .ramp = .{ 0x6b8f3a, 0x85a84a, 0x9fc25e, 0x7a9e44 },
+}

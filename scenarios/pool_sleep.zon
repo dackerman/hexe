@@ -1,0 +1,27 @@
+// docs/04-fluids.md scenario 5: a pool sleeps fully within 5 seconds of
+// being poured, then wakes locally when a stone drops in, and the far edge
+// stays asleep.
+//
+// The scenario format has no rigid bodies, so "a stone" is a gravel blob:
+// a falling powder chunk disturbs the surface the same way.
+.{
+    .name = "pool_sleep",
+    .description = "Water poured into a wide bedrock basin for 60 ticks is fully asleep 300 ticks later. A gravel blob dropped near the left edge at tick 400 wakes water there; the right edge stays asleep.",
+    .ticks = 440,
+    .fills = .{
+        .{ .rect = .{ .x = 16, .y = 240, .w = 224, .h = 8 }, .material = "bedrock" },
+        .{ .rect = .{ .x = 16, .y = 180, .w = 4, .h = 60 }, .material = "bedrock" },
+        .{ .rect = .{ .x = 236, .y = 180, .w = 4, .h = 60 }, .material = "bedrock" },
+    },
+    .commands = .{
+        // ~56 cells per tick for 61 ticks: ~3400 cells, ~16 rows deep.
+        .{ .tick = 0, .every = 1, .until = 60, .fill = .{ .rect = .{ .x = 100, .y = 120, .w = 56, .h = 1 }, .material = "water", .only = "air" } },
+        .{ .tick = 400, .fill = .{ .circle = .{ .x = 40, .y = 200, .r = 3 }, .material = "gravel" } },
+    },
+    .assertions = .{
+        .{ .tick = 360, .particles = .{ .max = 0 }, .label = "pool fully asleep 5 s after the pour" },
+        .{ .tick = 360, .count = .{ .material = "water", .min = 3000 }, .label = "the pool exists" },
+        .{ .tick = 420, .particles = .{ .rect = .{ .x = 20, .y = 190, .w = 60, .h = 50 }, .min = 1 }, .label = "impact woke the water" },
+        .{ .tick = 420, .particles = .{ .rect = .{ .x = 196, .y = 190, .w = 40, .h = 50 }, .max = 0 }, .label = "far edge still asleep" },
+    },
+}
