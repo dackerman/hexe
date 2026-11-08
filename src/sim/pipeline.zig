@@ -25,6 +25,7 @@ const commands = @import("commands.zig");
 const Grid = @import("grid.zig").Grid;
 const Noise = @import("noise.zig").Noise;
 const materials = @import("materials.zig");
+const Stream = @import("stream.zig").Stream;
 
 pub const frames_in_flight = 2;
 /// Most ticks recorded into one frame (catch-up after a slow frame).
@@ -126,6 +127,8 @@ pub const Pipeline = struct {
     grid: Grid,
     applier: commands.Applier,
     noise: Noise,
+    /// World streaming uploads and dirty bits (M4); inert until enabled.
+    stream: Stream,
     // ---- end subsystems ----
 
     /// In place: `shared` points into `self`.
@@ -139,12 +142,16 @@ pub const Pipeline = struct {
         errdefer self.applier.deinit();
         self.noise = try Noise.init(ctx, config, alloc);
         errdefer self.noise.deinit();
+        self.stream = try Stream.init(ctx, config, alloc);
+        errdefer self.stream.deinit();
+        self.stream.cells = &self.grid.cells;
         // ---- end subsystem init ----
         self.shared = self.grid.shared();
     }
 
     pub fn deinit(self: *Pipeline) void {
         // ---- subsystem deinit (reverse order) ----
+        self.stream.deinit();
         self.noise.deinit();
         self.applier.deinit();
         self.grid.deinit();
@@ -158,8 +165,12 @@ pub const Pipeline = struct {
             return;
         }
         // ---- tick order ----
+        // 1'. streamed chunk uploads (CPU streaming ran before this frame)
+        self.stream.recordUploads(frame);
         // 2. apply edits
         self.applier.record(frame);
+        //    world streaming: dirty bits from this tick's marks
+        self.stream.recordDirty(frame);
         //    rasterize bodies (M7)
         // 7'. activity compaction: tiles marked last tick and by this tick's
         //     edits form this tick's active list (docs/decisions/10-activity-tiles.md)

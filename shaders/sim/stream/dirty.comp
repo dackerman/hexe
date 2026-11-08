@@ -1,0 +1,34 @@
+#version 460
+// Dirty bits from activity marks (docs/decisions/61-stream-dirty-bits.md).
+// Runs after commands, before compaction: a tile whose wake countdown is
+// exactly TILE_WAKE_TICKS was marked by a change since the last compaction
+// (any pass that changes cells calls mark_tile_and_neighbors), so its
+// chunk slot is dirty. One thread per tile.
+//
+// Window seams (docs/decisions/64-stream-window-seams.md): the window is a
+// torus, but its far edges are not neighbours in the world. A Margolus block
+// reaches one cell right/down out of its tile, so keeping the tile column
+// (row) just before a seam asleep stops material crossing it. Those marks
+// are zeroed here, right before compaction builds the active list.
+#include "common.glsl"
+#include "sim/stream/stream.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PC {
+    uint dirty_buffer;
+    uint pad;
+    uvec2 freeze_cols; // tile columns kept asleep (window seams), 0xffffffff = none
+    uvec2 freeze_rows; // tile rows kept asleep
+} pc;
+
+void main() {
+    uvec2 t = gl_GlobalInvocationID.xy;
+    if (uint(TILE_MARKS[tile_index(t)]) == TILE_WAKE_TICKS) {
+        uvec2 s = t / STREAM_TILES_PER_CHUNK;
+        g_stream_dirty[pc.dirty_buffer].bits[s.y * STREAM_CHUNKS_PER_SIDE + s.x] = 1u;
+    }
+    if (any(equal(uvec2(t.x), pc.freeze_cols)) || any(equal(uvec2(t.y), pc.freeze_rows))) {
+        TILE_MARKS[tile_index(t)] = uint8_t(0);
+    }
+}

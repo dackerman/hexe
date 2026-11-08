@@ -1,0 +1,41 @@
+#version 460
+// After a chunk's cells were copied into its window slot: clear the slot's
+// owner image region, clear its dirty bit, and wake its tiles so the new
+// material settles. The slot's own tiles get TILE_WAKE_TICKS - 1, not
+// TILE_WAKE_TICKS, so the dirty pass (dirty.comp) does not mistake the
+// upload for a change; the ring of tiles around the chunk is raised to at
+// least that so neighbours react to the new edge. One dispatch per chunk,
+// 16 x 16 workgroups of 16 x 16.
+#include "common.glsl"
+#include "sim/stream/stream.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PC {
+    uvec2 slot; // window chunk slot, 0..7 each
+    uint dirty_buffer; // bindless slot of the dirty bits
+} pc;
+
+void main() {
+    uvec2 base = pc.slot * STREAM_CHUNK_SIZE;
+    imageStore(OWNER, ivec2(base + gl_GlobalInvocationID.xy), uvec4(0u));
+    if (gl_LocalInvocationIndex != 0u) return;
+    uvec2 wg = gl_WorkGroupID.xy;
+    uvec2 t0 = base >> TILE_SHIFT;
+    const uint wake = TILE_WAKE_TICKS - 1u;
+    // 2 x 2 workgroups per 32-cell tile: the top-left one writes it.
+    if ((wg.x & 1u) == 0u && (wg.y & 1u) == 0u) {
+        TILE_MARKS[tile_index(t0 + (wg >> 1u))] = uint8_t(wake);
+    }
+    if (wg.x == 0u && wg.y == 0u) {
+        int n = int(STREAM_TILES_PER_CHUNK);
+        for (int dy = -1; dy <= n; dy++) {
+            for (int dx = -1; dx <= n; dx++) {
+                if (dx >= 0 && dx < n && dy >= 0 && dy < n) continue;
+                uint i = tile_index(uvec2(ivec2(t0) + ivec2(dx, dy)));
+                TILE_MARKS[i] = uint8_t(max(uint(TILE_MARKS[i]), wake));
+            }
+        }
+        g_stream_dirty[pc.dirty_buffer].bits[pc.slot.y * STREAM_CHUNKS_PER_SIDE + pc.slot.x] = 0u;
+    }
+}
