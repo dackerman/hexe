@@ -1,0 +1,48 @@
+#version 460
+// Skyline: for each column of the light region, the first row from the top
+// of the world (y = 0) whose cell blocks light. Rays of the radiance
+// cascades that leave the scene upward above the skyline see the sky, and
+// ambient fades with depth below it. One 64-thread workgroup per column;
+// each thread scans a stripe, then a shared-memory min.
+#include "common.glsl"
+#include "render/render.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PC {
+    uint frame_slot;
+} pc;
+
+#define FR g_render_frames[pc.frame_slot].f
+
+shared int s_min[64];
+
+bool opaque(uint c) {
+    RenderMaterial m = g_render_materials[FR.materials_slot].m[cell_material(c)];
+    return rm_absorb(m) >= 0.5 || cell_has(c, CELL_FLAG_BODY);
+}
+
+void main() {
+    uint col = gl_WorkGroupID.x;
+    uint lid = gl_LocalInvocationID.x;
+    int x = FR.region_origin.x + int(col);
+    int bottom = clamp(FR.region_origin.y + int(FR.region_size.y), 0, int(WORLD_SIZE));
+    int rows = (bottom + 63) / 64;
+    int y0 = int(lid) * rows;
+    int found = int(WORLD_SIZE);
+    for (int i = 0; i < rows; i++) {
+        int y = y0 + i;
+        if (y >= bottom) break;
+        if (opaque(imageLoad(g_uimages[FR.cells_slot], wrap_coord(ivec2(x, y))).x)) {
+            found = y;
+            break;
+        }
+    }
+    s_min[lid] = found;
+    barrier();
+    for (uint s = 32u; s > 0u; s >>= 1) {
+        if (lid < s) s_min[lid] = min(s_min[lid], s_min[lid + s]);
+        barrier();
+    }
+    if (lid == 0u) g_ints[FR.skyline_slot].v[col] = (FR.flags & RFRAME_SKY) != 0u ? s_min[0] : -(1 << 20);
+}

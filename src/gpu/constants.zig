@@ -7,6 +7,7 @@ const std = @import("std");
 const cell = @import("../sim/cell.zig");
 const materials = @import("../sim/materials.zig");
 const commands = @import("../sim/commands.zig");
+const overlay = @import("../render/overlay.zig");
 
 // ---- descriptor set 0 (src/gpu/descriptors.zig) ----
 pub const binding_storage_images = 0;
@@ -17,6 +18,10 @@ pub const binding_samplers = 3;
 /// Fixed storage image slots (shared world images).
 pub const slot_img_cells = 0;
 pub const slot_img_owner = 1;
+/// RGBA8 debug overlay written by sim passes, composited by the renderer.
+pub const slot_img_debug_overlay = 2;
+pub const debug_overlay_size = 1024;
+pub const debug_overlay_shift = 1;
 /// First storage image slot handed out by `Descriptors.allocImageSlot`.
 pub const slot_img_dynamic_base = 16;
 
@@ -70,6 +75,19 @@ pub const mirrors = .{
     .{ "SLOT_IMG_CELLS", slot_img_cells },
     .{ "SLOT_IMG_OWNER", slot_img_owner },
     .{ "SLOT_IMG_DYNAMIC_BASE", slot_img_dynamic_base },
+    .{ "SLOT_IMG_DEBUG_OVERLAY", slot_img_debug_overlay },
+    .{ "DEBUG_OVERLAY_SIZE", debug_overlay_size },
+    .{ "DEBUG_OVERLAY_SHIFT", debug_overlay_shift },
+    .{ "OVERLAY_NONE", @backingInt(overlay.Mode.none) },
+    .{ "OVERLAY_TILES", @backingInt(overlay.Mode.tiles) },
+    .{ "OVERLAY_AIR_PRESSURE", @backingInt(overlay.Mode.air_pressure) },
+    .{ "OVERLAY_AIR_VELOCITY", @backingInt(overlay.Mode.air_velocity) },
+    .{ "OVERLAY_LIQUID_PARTICLES", @backingInt(overlay.Mode.liquid_particles) },
+    .{ "OVERLAY_BODIES", @backingInt(overlay.Mode.bodies) },
+    .{ "OVERLAY_TEMPERATURE", @backingInt(overlay.Mode.temperature) },
+    .{ "OVERLAY_PARTICLE_CELLS", @backingInt(overlay.Mode.particle_cells) },
+    .{ "OVERLAY_LIGHT", @backingInt(overlay.Mode.light) },
+    .{ "OVERLAY_COUNT", overlay.count },
     .{ "SLOT_BUF_MATERIALS", slot_buf_materials },
     .{ "SLOT_BUF_TILE_MARKS", slot_buf_tile_marks },
     .{ "SLOT_BUF_TILE_LIST", slot_buf_tile_list },

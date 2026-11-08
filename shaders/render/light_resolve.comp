@@ -1,0 +1,62 @@
+#version 460
+// Irradiance per cascade-0 probe, before wall dilation.
+//   cascades: the mean of the probe's 4 merged cascade-0 directions
+//   simple:   point lights only, each raymarched through scene mip 1 for
+//             shadows, smooth (1 - d/r)^2 falloff (fallback mode)
+//   off:      white (lighting disabled)
+// a = 1 when the probe's footprint is solid (light_dilate.comp fills it).
+#include "common.glsl"
+#include "render/render.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PC {
+    uint frame_slot;
+    uint cascade0; // r32ui RGB9E5: merged cascade 0
+    uint dst;      // rgba16f: raw irradiance
+} pc;
+
+#define FR g_render_frames[pc.frame_slot].f
+
+vec3 simple_lights(vec2 origin) {
+    vec3 sum = vec3(0.0);
+    uint img = FR.scene_img[1];
+    vec2 region = vec2(FR.region_size);
+    for (uint i = 0u; i < FR.light_count; i++) {
+        LightGpu L = g_lights[FR.lights_slot].l[i];
+        vec2 lp = L.pos - vec2(FR.region_origin);
+        vec2 v = lp - origin;
+        v -= round(v / float(WORLD_SIZE)) * float(WORLD_SIZE);
+        float dist = length(v);
+        if (dist >= L.radius) continue;
+        vec2 dir = v / max(dist, 1e-4);
+        float T = 1.0;
+        for (float t = 2.0; t < dist - 2.0; t += 2.0) {
+            vec2 pos = origin + dir * t;
+            if (any(lessThan(pos, vec2(0.0))) || any(greaterThanEqual(pos, region))) break;
+            T *= 1.0 - imageLoad(g_img_rgba16f[img], ivec2(pos) >> 1).a;
+            if (T < 0.01) break;
+        }
+        float f = 1.0 - dist / L.radius;
+        sum += L.color.rgb * T * f * f;
+    }
+    return sum;
+}
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(p, FR.probes))) return;
+    uint mode = FR.flags & RFRAME_LIGHT_MODE_MASK;
+    vec3 irr;
+    if (mode == LIGHT_MODE_CASCADES) {
+        ivec2 q = ivec2(p) * 2;
+        irr = (unpack_rgb9e5(imageLoad(g_uimages[pc.cascade0], q).x) + unpack_rgb9e5(imageLoad(g_uimages[pc.cascade0], q + ivec2(1, 0)).x) +
+               unpack_rgb9e5(imageLoad(g_uimages[pc.cascade0], q + ivec2(0, 1)).x) + unpack_rgb9e5(imageLoad(g_uimages[pc.cascade0], q + ivec2(1, 1)).x)) * 0.25;
+    } else if (mode == LIGHT_MODE_SIMPLE) {
+        irr = simple_lights((vec2(p) + 0.5) * float(FR.probe_spacing));
+    } else {
+        irr = vec3(1.0);
+    }
+    float solid = imageLoad(g_img_rgba16f[FR.scene_img[FR.probe_shift]], ivec2(p)).a >= 0.999 ? 1.0 : 0.0;
+    imageStore(g_img_rgba16f[pc.dst], ivec2(p), vec4(irr, solid));
+}

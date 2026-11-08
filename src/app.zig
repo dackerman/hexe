@@ -7,7 +7,11 @@
 //!   = / -          zoom in / out (integer)         space         pause
 //!   .              single tick while paused        F1            toggle HUD
 //!   F2             activity tile overlay           F12           screenshot
+//!   Tab / shift    cycle debug overlays            T             cursor torch
+//!   F5             lighting mode (cascades, simple, off)
+//!   F6             probe spacing 1/2/4 (quality)   F7 bloom      F8 vignette
 //!   Esc            quit
+//! (render keys: docs/decisions/103-render-overlays.md)
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("sdl");
@@ -19,7 +23,11 @@ const View = @import("render/world.zig").View;
 const cell = @import("sim/cell.zig");
 const commands = @import("sim/commands.zig");
 const materials_builtin = @import("sim/materials_builtin.zig");
+const materials_extra = @import("sim/materials_extra.zig");
 const materials = @import("sim/materials.zig");
+const overlay = @import("render/overlay.zig");
+const demo = @import("render/demo.zig");
+const renderer_mod = @import("render/renderer.zig");
 const max_ticks_per_frame = @import("sim/pipeline.zig").max_ticks_per_frame;
 const Profile = @import("profile.zig").Profile;
 
@@ -28,7 +36,7 @@ const tick_ns: i96 = std.time.ns_per_s / 60;
 pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
     var window = try Window.init("hexe", cli.width, cli.height);
     defer window.deinit();
-    const table = materials_builtin.table();
+    const table = materials_extra.table();
     const engine = try gpa.create(Engine);
     defer gpa.destroy(engine);
     try engine.init(gpa, .{
@@ -37,15 +45,22 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         .table = &table,
         .validation = cli.validation orelse (builtin.mode == .debug),
         .pipeline = .{ .sleep = cli.sleep, .noise = cli.scene == .noise },
+        .overlap = cli.overlap,
     });
     defer engine.deinit();
     var profile: Profile = .{};
     engine.profile = &profile;
+    @import("main.zig").applyRenderCli(&engine.renderer.settings, cli);
+    const rs = &engine.renderer.settings;
+    var torch = true;
 
     const win_w, const win_h = window.pixelSize();
-    var view: View = .{ .scale = 2 };
-    view.camera_x = @as(i32, cell.world_size / 2) - @as(i32, @intCast(win_w / 2 / view.scale));
-    view.camera_y = @as(i32, cell.world_size / 2) - @as(i32, @intCast(win_h / 2 / view.scale));
+    var view: View = .{ .scale = cli.zoom };
+    const start_center: [2]i32 = cli.center orelse if (cli.scene == .lighting) @import("sim/scenes.zig").lighting_center else .{ cell.world_size / 2, cell.world_size / 2 };
+    view.camera_x = start_center[0] - @as(i32, @intCast(win_w / 2 / view.scale));
+    view.camera_y = start_center[1] - @as(i32, @intCast(win_h / 2 / view.scale));
+    var frame_ms_sum: f64 = 0;
+    var frame_ms_count: u64 = 0;
 
     var material: u8 = materials_builtin.sand;
     var radius: i32 = 8;
@@ -76,7 +91,16 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         if (input.wasPressed(c.SDL_SCANCODE_SPACE)) paused = !paused;
         if (paused and input.wasPressed(c.SDL_SCANCODE_PERIOD)) ticks = 1;
         if (input.wasPressed(c.SDL_SCANCODE_F1)) show_hud = !show_hud;
-        if (input.wasPressed(c.SDL_SCANCODE_F2)) view.show_tiles = !view.show_tiles;
+        if (input.wasPressed(c.SDL_SCANCODE_F2)) rs.overlay = if (rs.overlay == .tiles) .none else .tiles;
+        if (input.wasPressed(c.SDL_SCANCODE_TAB)) {
+            const back = input.isDown(c.SDL_SCANCODE_LSHIFT) or input.isDown(c.SDL_SCANCODE_RSHIFT);
+            rs.overlay = if (back) overlay.prev(rs.overlay) else overlay.next(rs.overlay);
+        }
+        if (input.wasPressed(c.SDL_SCANCODE_F5)) rs.light_mode = @fromBackingInt(@intCast((@backingInt(rs.light_mode) + 1) % 3));
+        if (input.wasPressed(c.SDL_SCANCODE_F6)) rs.probe_spacing = if (rs.probe_spacing >= 4) 1 else rs.probe_spacing * 2;
+        if (input.wasPressed(c.SDL_SCANCODE_F7)) rs.bloom = !rs.bloom;
+        if (input.wasPressed(c.SDL_SCANCODE_F8)) rs.vignette = !rs.vignette;
+        if (input.wasPressed(c.SDL_SCANCODE_T)) torch = !torch;
 
         // Material selection: number keys pick ids 1-9.
         for (0..9) |k| {
@@ -138,8 +162,11 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
             engine.screenshot(io, name, null) catch |err| std.log.err("screenshot: {s}", .{@errorName(err)});
         }
 
-        // HUD.
+        // Render decorations: scene lights/sprites/signs and the cursor torch.
         engine.hud.clear();
+        demo.decorate(cli.scene, engine.tick, &engine.renderer, &engine.hud);
+        if (torch) engine.renderer.addLight(@as(f32, @floatFromInt(mwx)) + 0.5, @as(f32, @floatFromInt(mwy)) + 0.5, 70, .{ 1.0, 0.8, 0.55 });
+
         if (show_hud) fillHud(engine, &profile, .{
             .frame_ms = frame_ms,
             .paused = paused,
@@ -148,6 +175,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
             .view = view,
             .cursor = .{ @mod(mwx, cell.world_size), @mod(mwy, cell.world_size) },
             .material_count = table.len,
+            .extent = .{ win_w, win_h },
         });
 
         const src: @import("engine.zig").TickSource = .{
@@ -158,11 +186,17 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
         try engine.frame(ticks, src, view);
         if (ticks > 0) pending.begin(engine.tick);
         frames += 1;
+        if (frames > 60) {
+            frame_ms_sum += @as(f64, @floatFromInt(dt)) / 1e6;
+            frame_ms_count += 1;
+        }
+        if (cli.frames > 0 and frames >= cli.frames) break;
     }
     try engine.finish();
     const secs = @as(f64, @floatFromInt(run_start.untilNow(io, .awake).nanoseconds)) / 1e9;
-    std.log.info("{d} frames in {d:.2} s ({d:.1} fps), {d} ticks ({d:.1}/s), grid {d:.3} ms", .{
-        frames, secs, @as(f64, @floatFromInt(frames)) / secs, engine.tick, @as(f64, @floatFromInt(engine.tick)) / secs, profile.gridSmooth(&engine.names),
+    std.log.info("{d} frames in {d:.2} s ({d:.1} fps), {d} ticks ({d:.1}/s), grid {d:.3} ms, mean frame {d:.3} ms after warm-up, overlap {s}", .{
+        frames,                                                          secs,                             @as(f64, @floatFromInt(frames)) / secs, engine.tick, @as(f64, @floatFromInt(engine.tick)) / secs, profile.gridSmooth(&engine.names),
+        frame_ms_sum / @as(f64, @floatFromInt(@max(frame_ms_count, 1))), if (cli.overlap) "on" else "off",
     });
     return 0;
 }
@@ -175,6 +209,8 @@ pub const HudInfo = struct {
     view: View = .{},
     cursor: [2]i32 = .{ 0, 0 },
     material_count: u32 = 0,
+    /// Window size in pixels (for the light plan shown in the HUD).
+    extent: [2]u32 = .{ 1920, 1080 },
 };
 
 /// The HUD text: frame time, grid time, per-pass GPU ms, tool state.
@@ -188,9 +224,32 @@ pub fn fillHud(engine: *Engine, profile: *const Profile, info: HudInfo) void {
     w.writeAll("gpu ms") catch {};
     for (0..names.count) |i| w.print("  {s} {d:.3}", .{ names.get(i), profile.smooth[i] }) catch {};
     hud.print("{s}", .{w.buffered()});
+    // Render timings (also in the line above) and lighting state.
+    const r = &engine.renderer;
+    const plan = r.plan(info.view, .{ .width = info.extent[0], .height = info.extent[1] });
+    var rl: [160]u8 = undefined;
+    var rw: std.Io.Writer = .fixed(&rl);
+    var total: f64 = 0;
+    for (render_passes) |rp| {
+        for (0..names.count) |i| {
+            if (std.mem.eql(u8, names.get(i), rp)) {
+                rw.print(" {s} {d:.3}", .{ rp, profile.smooth[i] }) catch {};
+                total += profile.smooth[i];
+            }
+        }
+    }
+    hud.print("render {d:.3} ms:{s}", .{ total, rw.buffered() });
+    hud.print("light {s}  spacing {d}px  cascades {d}  region {d}x{d}  lights {d}  bloom {s}  vignette {s}", .{
+        @tagName(r.settings.light_mode), plan.spacing, plan.count, plan.size[0], plan.size[1], r.light_count, if (r.settings.bloom) "on" else "off", if (r.settings.vignette) "on" else "off",
+    });
+    const ov = overlay.info(r.settings.overlay);
+    hud.print("overlay [Tab] {s}{s}{s}", .{ ov.name, if (ov.legend.len > 0) ": " else "", ov.legend });
     hud.print("brush {s} r{d}  zoom {d}x  cam {d},{d}  cursor {d},{d}", .{ info.material, info.radius, info.view.scale, info.view.camera_x, info.view.camera_y, info.cursor[0], info.cursor[1] });
-    hud.print("1-{d} material  LMB paint  RMB erase  wheel size  WASD pan  =/- zoom  space pause  F2 tiles", .{info.material_count -| 1});
+    hud.print("1-{d} material  LMB paint  RMB erase  wheel size  WASD pan  =/- zoom  space pause  T torch  F5 light  F6 quality", .{@min(info.material_count -| 1, 9)});
 }
+
+/// Passes summed into the HUD's render line.
+const render_passes = [_][]const u8{ "light_build", "cascades", "merge", "world", "sprites", "post", "hud" };
 
 /// Circles every radius/2 pixels from `a` to `b` (at least one).
 fn strokeLine(list: *commands.CommandList, a: [2]i32, b: [2]i32, radius: i32, material: u8) void {

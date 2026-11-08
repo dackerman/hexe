@@ -5,6 +5,7 @@ const std = @import("std");
 const cell = @import("cell.zig");
 const commands = @import("commands.zig");
 const m = @import("materials_builtin.zig");
+const mx = @import("materials_extra.zig");
 
 pub const Scene = enum {
     /// Nothing; paint with the mouse.
@@ -22,6 +23,10 @@ pub const Scene = enum {
     bench_mixed,
     /// Debug noise (pipeline Config.noise); emits nothing.
     noise,
+    /// Render test (M8): a cave around (1024, 1040) with a lava pool, stone
+    /// pillars, a glass tank of water, a smoke vent, a brazier flame and a
+    /// skylight shaft with a glass pane. Needs `materials_extra`.
+    lighting,
 };
 
 pub fn emit(scene: Scene, tick: u32, seed: u32, list: *commands.CommandList) void {
@@ -31,6 +36,7 @@ pub fn emit(scene: Scene, tick: u32, seed: u32, list: *commands.CommandList) voi
         .determinism => determinism(tick, seed, list),
         .bench_static => if (tick == 0) benchStatic(list),
         .bench_active => if (tick == 0) list.fillRect(0, 0, cell.world_size, cell.world_size, m.sand, .{ .coverage = 128 }),
+        .lighting => lighting(tick, seed, list),
         .bench_mixed => if (tick == 0) {
             list.fillRect(0, 0, W, W, m.water, .{ .coverage = 80 });
             list.fillRect(0, 0, W, W, m.sand, .{ .coverage = 80, .only_air = true });
@@ -129,6 +135,63 @@ fn determinism(tick: u32, seed: u32, list: *commands.CommandList) void {
         if (tick % 7 == 0) list.fillCircle(ox + 250, oy + 420, 5, m.smoke, .{ .only_air = true });
         if (tick % 50 == 25) list.fillCircle(ox + 140, oy + 245, 10, m.air, .{});
     }
+}
+
+pub const lighting_center = [2]i32{ 1024, 1040 };
+
+fn lighting(tick: u32, seed: u32, list: *commands.CommandList) void {
+    if (tick == 0) {
+        var prng = std.Random.DefaultPrng.init(seed);
+        const r = prng.random();
+        // Rock mass with the cave carved out of it; open sky above y = 700.
+        list.fillRect(560, 700, 1490, 1340, m.stone, .{});
+        list.fillRect(700, 880, 1350, 1180, m.air, .{});
+        // Rough ceiling and walls.
+        var i: i32 = 0;
+        while (i < 22) : (i += 1) {
+            const cx = 700 + @mod(i * 31, 650);
+            list.fillCircle(cx, 880 + r.intRangeAtMost(i32, -10, 6), r.intRangeAtMost(i32, 12, 30), m.air, .{});
+        }
+        list.fillCircle(705, 1000, 50, m.air, .{});
+        list.fillCircle(1345, 1040, 45, m.air, .{});
+        // Stalactites.
+        i = 0;
+        while (i < 9) : (i += 1) {
+            const sx = 760 + i * 67 + r.intRangeAtMost(i32, -10, 10);
+            list.fillCircle(sx, 880, r.intRangeAtMost(i32, 5, 9), m.stone, .{});
+            list.fillCircle(sx, 892, 3, m.stone, .{});
+        }
+        // Skylight shaft to the surface with a glass pane.
+        list.fillRect(1230, 700, 1270, 900, m.air, .{});
+        list.fillRect(1230, 770, 1270, 776, mx.glass, .{});
+        // Lava pool sunk into the floor on the left.
+        list.fillRect(740, 1180, 880, 1206, m.air, .{});
+        list.fillRect(740, 1186, 880, 1206, mx.lava, .{});
+        // Stone pillars between the lava and the rest of the cave.
+        list.fillRect(925, 930, 941, 1180, m.stone, .{});
+        list.fillRect(1000, 1060, 1012, 1180, m.stone, .{});
+        list.fillRect(988, 1052, 1024, 1062, m.stone, .{});
+        // Glass tank of water.
+        list.fillRect(1100, 1174, 1220, 1180, mx.glass, .{});
+        list.fillRect(1100, 1090, 1104, 1180, mx.glass, .{});
+        list.fillRect(1216, 1090, 1220, 1180, mx.glass, .{});
+        list.fillRect(1104, 1110, 1216, 1174, m.water, .{});
+        // Freestanding glass pane in front of the right wall.
+        list.fillRect(1300, 1080, 1306, 1180, mx.glass, .{});
+        // Brazier: a wooden stand under a flame.
+        list.fillRect(1268, 1166, 1292, 1180, mx.wood, .{});
+        // A little molten glass dripping into a cup on the far left wall.
+        list.fillRect(712, 1060, 740, 1066, m.stone, .{});
+        list.fillRect(714, 1054, 738, 1060, mx.molten_glass, .{});
+        // Steam pocket rising out of the shaft.
+        list.fillCircle(1250, 930, 10, mx.steam, .{ .only_air = true, .coverage = 150 });
+    }
+    // Brazier flame: spawned on the stand, deleted 26-34 px above it (the
+    // sim has no flame lifetime before M3), so it flickers in place.
+    list.fillCircle(1280, 1161, 5, mx.flame, .{ .only_air = true });
+    list.fillRect(1262, 1124, 1298, 1132, m.air, .{});
+    // Smoke vent beside the lava, rising through its light.
+    list.fillCircle(902, 1175, 4, m.smoke, .{ .only_air = true });
 }
 
 fn benchStatic(list: *commands.CommandList) void {

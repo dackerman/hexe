@@ -1,0 +1,52 @@
+#version 460
+// Light scene, mip 0: one texel per world pixel of the light region.
+//   rgb  emitted radiance (linear) of the cell: emissive materials, glow,
+//        burning, and point-light source discs
+//   a    opacity per world pixel: light absorbed by the cell, 0..1
+// Rays of the radiance cascades (rc_cascade.comp) march through this and
+// its mips (light_mip.comp).
+#include "common.glsl"
+#include "render/render.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PC {
+    uint frame_slot;
+} pc;
+
+#define FR g_render_frames[pc.frame_slot].f
+
+// Point lights are drawn as small emitting discs; radiance cascades give a
+// disc of radius a at distance d an irradiance of about L * a / (pi * d), so
+// L is chosen to give 1/4 of `color` at d = radius.
+float source_radius(float radius) { return clamp(radius / 12.0, 2.0, 6.0); }
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(p, FR.region_size))) return;
+    ivec2 wu = FR.region_origin + ivec2(p);
+    uint c = imageLoad(g_uimages[FR.cells_slot], wrap_coord(wu)).x;
+    RenderMaterial m = g_render_materials[FR.materials_slot].m[cell_material(c)];
+    vec3 albedo = ramp_color(m, ramp_index(m, cell_variant(c)));
+    vec3 e = cell_emission(FR, m, c, wrap_coord(wu), albedo) * FR.tuning3.x;
+    float a = rm_absorb(m);
+    if (cell_has(c, CELL_FLAG_BODY)) a = max(a, 0.9);
+    // Emitters need coverage for a ray to pick their light up.
+    if (e.r + e.g + e.b > 0.0) a = max(a, 0.35);
+
+    vec2 wp = vec2(wu) + 0.5;
+    for (uint i = 0u; i < FR.light_count; i++) {
+        LightGpu L = g_lights[FR.lights_slot].l[i];
+        vec2 d = wp - L.pos;
+        d -= round(d / float(WORLD_SIZE)) * float(WORLD_SIZE);
+        float r = source_radius(L.radius);
+        if (dot(d, d) <= r * r) {
+            // Opaque enough to stop rays inside the disc, below the 0.9
+            // "solid" threshold so the wall dilation leaves it alone.
+            e += L.color.rgb * (0.25 * 3.14159 * L.radius / r);
+            a = max(a, 0.85);
+        }
+    }
+    // Emission is stored premultiplied by coverage (mips average it).
+    imageStore(g_img_rgba16f[FR.scene_img[0]], ivec2(p), vec4(e * a, a));
+}

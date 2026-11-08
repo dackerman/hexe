@@ -74,6 +74,10 @@ pub const Frame = struct {
     command_base: u32,
     /// Activity tiles enabled: passes that change cells must mark tiles.
     sleep: bool,
+    /// Current debug overlay (OVERLAY_* in common.glsl, src/render/overlay.zig).
+    /// A pass that feeds an image overlay writes SLOT_IMG_DEBUG_OVERLAY only
+    /// while this equals its id.
+    overlay: u32 = 0,
 
     /// Run `func(args...)` between two timestamps named `name`.
     pub fn timed(self: *Frame, name: []const u8, comptime func: anytype, args: anytype) void {

@@ -17,6 +17,19 @@ const shader_sources = [_][]const u8{
     "render/fullscreen.vert",
     "render/world.frag",
     "render/hud.frag",
+    // ---- render (M8): lighting, sprites, post ----
+    "render/skyline.comp",
+    "render/light_scene.comp",
+    "render/light_mip.comp",
+    "render/rc_cascade.comp",
+    "render/light_resolve.comp",
+    "render/light_dilate.comp",
+    "render/quads.vert",
+    "render/quads.frag",
+    "render/bloom.comp",
+    "render/composite.frag",
+    "render/hud_text.vert",
+    "render/hud_text.frag",
 };
 
 pub fn build(b: *std.Build) void {
@@ -247,6 +260,7 @@ fn addHexe(b: *std.Build, o: HexeOptions) Hexe {
     });
     // Raw GLSL sources the CPU mirrors are checked against (see src/sim/cell.zig tests).
     module.addAnonymousImport("common_glsl", .{ .root_source_file = b.path("shaders/common.glsl") });
+    module.addAnonymousImport("render_glsl", .{ .root_source_file = b.path("shaders/render/render.glsl") });
     for (o.shared) |imp| module.addImport(imp.name, imp.module);
     const compile = b.addExecutable(.{ .name = o.name, .root_module = module });
     return .{ .compile = compile, .module = module };

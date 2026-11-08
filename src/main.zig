@@ -5,12 +5,18 @@
 //!        [--scene name] [--seed n] [--profile out.csv] [--no-sleep]
 //!   hexe --headless --bench                (zig build bench)
 //!   hexe --headless --verify-determinism   (zig build verify-determinism)
+//!   hexe --headless --bench-render         per-pass render GPU ms at 1920x1080
 const std = @import("std");
 const builtin = @import("builtin");
 const Engine = @import("engine.zig").Engine;
 const Crop = @import("engine.zig").Crop;
 const scenes = @import("sim/scenes.zig");
 const materials_builtin = @import("sim/materials_builtin.zig");
+const materials_extra = @import("sim/materials_extra.zig");
+const renderer_mod = @import("render/renderer.zig");
+const overlay = @import("render/overlay.zig");
+const demo = @import("render/demo.zig");
+const bench_render = @import("bench_render.zig");
 const Profile = @import("profile.zig").Profile;
 const app = @import("app.zig");
 const cell = @import("sim/cell.zig");
@@ -42,6 +48,20 @@ pub const Cli = struct {
     zoom: u32 = 2,
     /// World pixel at the center of the view (default: world center).
     center: ?[2]i32 = null,
+    // ---- render (M8) ----
+    bench_render: bool = false,
+    light_mode: ?renderer_mod.LightMode = null,
+    /// Cascade-0 probe spacing (quality knob).
+    spacing: ?u32 = null,
+    /// March steps per cascade interval (quality knob).
+    samples: ?u32 = null,
+    overlay: overlay.Mode = .none,
+    overlap: bool = true,
+    bloom: bool = true,
+    vignette: bool = true,
+    /// Windowed: quit after this many frames (0 = never).
+    frames: u32 = 0,
+    scene_set: bool = false,
 };
 
 fn usage() void {
@@ -54,7 +74,7 @@ fn usage() void {
         \\  --view-screenshot PATH  headless: write the window view with HUD (--size, --zoom, --center)
         \\  --zoom N                integer zoom (default 2)
         \\  --center X,Y            world pixel at the view center
-        \\  --scene NAME            empty|sandbox|determinism|bench_static|bench_active|bench_mixed|noise
+        \\  --scene NAME            empty|sandbox|determinism|bench_static|bench_active|bench_mixed|noise|lighting
         \\  --seed N                scene seed (default 1)
         \\  --profile PATH          per-tick per-pass GPU ms as CSV (tick,pass,ms)
         \\  --no-sleep              disable activity tiles (simulate every tile)
@@ -63,6 +83,14 @@ fn usage() void {
         \\  --size WxH              window size (default 1600x900)
         \\  --bench                 run the benchmark scenes (with --headless)
         \\  --verify-determinism    CPU reference vs GPU, bit for bit
+        \\  --bench-render          per-pass render GPU ms at 1920x1080 (with --headless)
+        \\  --light MODE            cascades|simple|off
+        \\  --spacing N             cascade-0 probe spacing in world px: 1, 2 (default), 4
+        \\  --samples N             march steps per cascade interval: 8, 16 (default), 32
+        \\  --overlay NAME          none|tiles|air_pressure|air_velocity|liquid_particles|bodies|temperature|particle_cells|light
+        \\  --no-overlap            render waits for the next tick (serial sim/render)
+        \\  --no-bloom, --no-vignette
+        \\  --frames N              windowed: quit after N frames and print frame timing
         \\
     , .{});
 }
@@ -103,6 +131,25 @@ fn parseCli(args: []const [:0]const u8) !Cli {
             cli.profile = try next(args, &i);
         } else if (std.mem.eql(u8, a, "--scene")) {
             cli.scene = std.meta.stringToEnum(scenes.Scene, try next(args, &i)) orelse return error.UnknownScene;
+            cli.scene_set = true;
+        } else if (std.mem.eql(u8, a, "--bench-render")) {
+            cli.bench_render = true;
+        } else if (std.mem.eql(u8, a, "--light")) {
+            cli.light_mode = std.meta.stringToEnum(renderer_mod.LightMode, try next(args, &i)) orelse return error.UnknownLightMode;
+        } else if (std.mem.eql(u8, a, "--spacing")) {
+            cli.spacing = try std.fmt.parseInt(u32, try next(args, &i), 10);
+        } else if (std.mem.eql(u8, a, "--samples")) {
+            cli.samples = try std.fmt.parseInt(u32, try next(args, &i), 10);
+        } else if (std.mem.eql(u8, a, "--overlay")) {
+            cli.overlay = std.meta.stringToEnum(overlay.Mode, try next(args, &i)) orelse return error.UnknownOverlay;
+        } else if (std.mem.eql(u8, a, "--no-overlap")) {
+            cli.overlap = false;
+        } else if (std.mem.eql(u8, a, "--no-bloom")) {
+            cli.bloom = false;
+        } else if (std.mem.eql(u8, a, "--no-vignette")) {
+            cli.vignette = false;
+        } else if (std.mem.eql(u8, a, "--frames")) {
+            cli.frames = try std.fmt.parseInt(u32, try next(args, &i), 10);
         } else if (std.mem.eql(u8, a, "--seed")) {
             cli.seed = try std.fmt.parseInt(u32, try next(args, &i), 10);
         } else if (std.mem.eql(u8, a, "--no-sleep")) {
@@ -141,21 +188,35 @@ pub fn main(init: std.process.Init) !u8 {
     const cli = parseCli(args) catch return 2;
 
     if (cli.verify) return verify.run(gpa, io, cli);
+    if (cli.bench_render) return bench_render.run(gpa, io, cli);
     if (cli.bench) return bench.run(gpa, io, cli);
     if (!cli.headless) return app.run(gpa, io, cli);
     return runHeadless(gpa, io, cli);
 }
 
+/// Apply the render options of the command line (after `demo.configure`).
+pub fn applyRenderCli(settings: *renderer_mod.Settings, cli: Cli) void {
+    demo.configure(cli.scene, settings);
+    if (cli.light_mode) |m| settings.light_mode = m;
+    if (cli.spacing) |s| settings.probe_spacing = s;
+    if (cli.samples) |s| settings.march_samples = s;
+    settings.overlay = cli.overlay;
+    settings.bloom = cli.bloom;
+    settings.vignette = cli.vignette;
+}
+
 fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
-    const table = materials_builtin.table();
+    const table = materials_extra.table();
     const engine = try gpa.create(Engine);
     defer gpa.destroy(engine);
     try engine.init(gpa, .{
         .table = &table,
         .validation = cli.validation orelse (builtin.mode == .debug),
         .pipeline = .{ .sleep = cli.sleep, .noise = cli.scene == .noise },
+        .overlap = cli.overlap,
     });
     defer engine.deinit();
+    applyRenderCli(&engine.renderer.settings, cli);
 
     var profile: Profile = .{};
     var file_buf: [64 * 1024]u8 = undefined;
@@ -185,13 +246,15 @@ fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
     std.debug.print("  {s:<10} {d:8.4} ms/tick, active tiles at end: {d}\n", .{ "grid", profile.gridMean(), engine.last.active_tiles });
     if (cli.screenshot) |path| try engine.screenshot(io, path, cli.crop);
     if (cli.view_screenshot) |path| {
-        const center = cli.center orelse .{ cell.world_size / 2, cell.world_size / 2 };
+        const default_center: [2]i32 = if (cli.scene == .lighting) scenes.lighting_center else .{ cell.world_size / 2, cell.world_size / 2 };
+        const center = cli.center orelse default_center;
         const view: View = .{
             .scale = cli.zoom,
             .camera_x = center[0] - @as(i32, @intCast(cli.width / 2 / cli.zoom)),
             .camera_y = center[1] - @as(i32, @intCast(cli.height / 2 / cli.zoom)),
         };
         engine.hud.clear();
+        demo.decorate(cli.scene, engine.tick, &engine.renderer, &engine.hud);
         app.fillHud(engine, &profile, .{
             .frame_ms = elapsed_ms / @as(f64, @floatFromInt(@max(cli.ticks, 1))),
             .material = "sand",
@@ -199,8 +262,10 @@ fn runHeadless(gpa: std.mem.Allocator, io: std.Io, cli: Cli) !u8 {
             .view = view,
             .cursor = center,
             .material_count = table.len,
+            .extent = .{ cli.width, cli.height },
         });
         try engine.screenshotView(io, path, view, cli.width, cli.height);
+        engine.renderer.clearDraws();
     }
     return 0;
 }
@@ -214,5 +279,10 @@ test {
     _ = @import("sim/scenes.zig");
     _ = @import("sim/reference/grid.zig");
     _ = @import("render/font.zig");
+    _ = @import("render/overlay.zig");
+    _ = @import("render/materials.zig");
+    _ = @import("render/lighting.zig");
+    _ = @import("render/sprites.zig");
+    _ = @import("sim/materials_extra.zig");
     _ = @import("util/png.zig");
 }
