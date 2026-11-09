@@ -151,6 +151,7 @@ pub const Engine = struct {
         };
         try self.ctx.init(gpa, .{
             .validation = opts.validation,
+            .get_instance_proc_addr = if (opts.window != null) try Window.vulkanGetInstanceProcAddr() else null,
             .window_extensions = if (opts.window != null) Window.instanceExtensions() else &.{},
             .surface = if (opts.window) |w| .{ .context = w, .create = Window.createSurface } else null,
         });

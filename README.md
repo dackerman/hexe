@@ -65,17 +65,18 @@ level shows every interaction. The game on top of it is not built yet.
 - **Engine extras**: oil floating on water (variable density), simple
   load-bearing for structures, two-way coupling between air and liquid,
   and a magic material class.
-- **Windows and macOS support** (see below) and tuning for weaker GPUs.
+- **Windows and macOS runtime testing** (see below) and tuning for weaker GPUs.
 
 The full plan is in [docs/05-milestones.md](docs/05-milestones.md). M0–M8
 are done; M9, the gameplay layer, is next.
 
 ## Build and play
 
-Hexe runs on **Linux only** for now. You need:
+Linux is the primary development platform. Windows and macOS have
+experimental build instructions below. On all platforms you need:
 
-- a GPU with a Vulkan 1.3 driver (the target is a 4090-class card; a
-  3060-class card is the minimum)
+- a GPU with Vulkan 1.3 support. On Linux, the performance target is a
+  4090-class card and the minimum is a 3060-class card.
 - SDL3
 - `glslc` (from shaderc or the Vulkan SDK)
 - Zig **0.17.1** (pinned in `.zigversion`)
@@ -134,21 +135,43 @@ zig build run -Doptimize=ReleaseFast -- --world --seed 7
 procedural cave (F5 saves). `--scene proving_grounds_auto --headless
 --demo-script shots/demo` renders the scripted showcase to PNGs.
 
-### Windows and macOS
+### Windows (x64)
 
-Not supported yet. Zig, SDL3 and Vulkan all work on both, but two pieces of
-the code are Linux-specific:
+Install a Vulkan-capable GPU driver and put `glslc.exe` from the
+[Vulkan SDK](https://vulkan.lunarg.com/sdk/home) on your PATH. Download the
+MinGW development archive from [SDL3 releases](https://github.com/libsdl-org/SDL/releases)
+and extract it. Set `$sdl` to the extracted `x86_64-w64-mingw32` directory
+containing `include`, `lib` and `bin`. From the Hexe checkout in PowerShell:
 
-- `src/gpu/context.zig` loads the Vulkan loader as `libvulkan.so.1`. It
-  would need `vulkan-1.dll` on Windows and `libvulkan.1.dylib` (MoltenVK)
-  on macOS, or it could get the loader from SDL.
-- `src/sim/bodies_sim.zig` calls Linux `clock_gettime` directly instead of
-  using `std.time`.
+```powershell
+zig build -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseFast "-Dsdl3-prefix=$sdl"
+.\zig-out\bin\hexe.exe
+```
 
-With those fixed, Windows with the LunarG Vulkan SDK should be close to
-working. macOS is harder: MoltenVK needs the portability-enumeration
-extension and may not cover every Vulkan 1.3 feature the compute passes
-rely on.
+The build copies `SDL3.dll` next to `hexe.exe`. To use `zig build run` or
+`zig build test`, pass the same target and SDL3 prefix and add the SDL3
+binary directory to PATH in that PowerShell session.
+
+```powershell
+$env:Path = "$sdl\bin;$env:Path"
+```
+
+### macOS (Apple Silicon)
+
+Install SDL3 and `glslc` with Homebrew, and install the
+[macOS Vulkan SDK](https://vulkan.lunarg.com/doc/view/latest/mac/getting_started.html)
+with MoltenVK. Use the SDK's system-wide runtime installation or source its
+`setup-env.sh` in the terminal where you launch Hexe. From the checkout:
+
+```bash
+brew install sdl3 shaderc
+zig build -Doptimize=ReleaseFast -Dsdl3-prefix="$(brew --prefix sdl3)"
+./zig-out/bin/hexe
+```
+
+The Windows x64 and Apple Silicon builds are experimental. The game still
+needs a native run on both platforms, including a check that MoltenVK
+supports Hexe's required Vulkan features and shaders.
 
 ## Tests
 

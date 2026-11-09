@@ -56,6 +56,14 @@ pub const Window = struct {
         c.SDL_Quit();
     }
 
+    pub fn vulkanGetInstanceProcAddr() !vk.PfnGetInstanceProcAddr {
+        const get_proc = c.SDL_Vulkan_GetVkGetInstanceProcAddr() orelse {
+            log.err("SDL_Vulkan_GetVkGetInstanceProcAddr: {s}", .{c.SDL_GetError()});
+            return error.VulkanLoaderMissing;
+        };
+        return @ptrCast(get_proc);
+    }
+
     /// Instance extensions SDL needs for surface creation.
     pub fn instanceExtensions() []const [*:0]const u8 {
         var count: u32 = 0;

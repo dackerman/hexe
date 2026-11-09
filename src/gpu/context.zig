@@ -6,6 +6,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const vk = @import("vulkan");
+const sdl = @import("sdl");
 const Descriptors = @import("descriptors.zig").Descriptors;
 const constants = @import("constants.zig");
 
@@ -28,6 +29,8 @@ pub const Options = struct {
     /// Enable VK_LAYER_KHRONOS_validation when it is installed. Silently
     /// skipped when it is not.
     validation: bool = builtin.mode == .debug,
+    /// Use the window system's loader when presenting to its surface.
+    get_instance_proc_addr: ?vk.PfnGetInstanceProcAddr = null,
     /// Instance extensions the window system needs; empty when headless.
     window_extensions: []const [*:0]const u8 = &.{},
     /// Null when headless: no surface, no swapchain extension.
@@ -35,10 +38,15 @@ pub const Options = struct {
 };
 
 const validation_layer = "VK_LAYER_KHRONOS_validation";
+const loader_name = switch (builtin.os.tag) {
+    .windows => "vulkan-1.dll",
+    .macos => "libvulkan.1.dylib",
+    else => "libvulkan.so.1",
+};
 
 pub const Context = struct {
     gpa: std.mem.Allocator,
-    lib: std.DynLib,
+    lib: ?*sdl.SDL_SharedObject,
     vkb: vk.BaseWrapper,
     vki: vk.InstanceWrapper,
     vkd: vk.DeviceWrapper,
@@ -72,10 +80,18 @@ pub const Context = struct {
         self.gpa = gpa;
         self.messenger = .null;
         self.surface = .null;
-        self.lib = std.DynLib.openZ("libvulkan.so.1") catch return error.VulkanLoaderMissing;
-        errdefer self.lib.close();
-        const get_proc = self.lib.lookup(vk.PfnGetInstanceProcAddr, "vkGetInstanceProcAddr") orelse
-            return error.VulkanLoaderMissing;
+        self.lib = null;
+        errdefer if (self.lib) |lib| sdl.SDL_UnloadObject(lib);
+        const get_proc = opts.get_instance_proc_addr orelse blk: {
+            const lib = sdl.SDL_LoadObject(loader_name) orelse {
+                log.err("could not load {s}: {s}", .{ loader_name, sdl.SDL_GetError() });
+                return error.VulkanLoaderMissing;
+            };
+            self.lib = lib;
+            const proc = sdl.SDL_LoadFunction(lib, "vkGetInstanceProcAddr") orelse
+                return error.VulkanLoaderMissing;
+            break :blk @as(vk.PfnGetInstanceProcAddr, @ptrCast(proc));
+        };
         self.vkb = vk.BaseWrapper.load(get_proc);
 
         try self.createInstance(opts);
@@ -128,7 +144,7 @@ pub const Context = struct {
         if (self.surface != .null) self.vki.destroySurfaceKHR(self.instance, self.surface, null);
         if (self.messenger != .null) self.vki.destroyDebugUtilsMessengerEXT(self.instance, self.messenger, null);
         self.vki.destroyInstance(self.instance, null);
-        self.lib.close();
+        if (self.lib) |lib| sdl.SDL_UnloadObject(lib);
     }
 
     pub fn waitIdle(self: *Context) void {
@@ -186,12 +202,23 @@ pub const Context = struct {
             if (layers.items.len == 0) log.debug("validation layer not installed; continuing without it", .{});
         }
         const inst_exts = try self.vkb.enumerateInstanceExtensionPropertiesAlloc(null, arena);
+        const portability_name = vk.instance_extensions.khr_portability_enumeration.name;
+        var portability = false;
+        // Older SDL versions may already include this extension.
+        for (exts.items) |name| {
+            if (std.mem.eql(u8, std.mem.span(name), portability_name)) portability = true;
+        }
         for (inst_exts) |e| {
-            if (std.mem.eql(u8, std.mem.sliceTo(&e.extension_name, 0), vk.instance_extensions.ext_debug_utils.name)) {
+            const name = std.mem.sliceTo(&e.extension_name, 0);
+            if (std.mem.eql(u8, name, vk.instance_extensions.ext_debug_utils.name)) {
                 if (layers.items.len > 0) {
                     try exts.append(arena, vk.instance_extensions.ext_debug_utils.name);
                     debug_utils = true;
                 }
+            }
+            if (builtin.os.tag == .macos and !portability and std.mem.eql(u8, name, portability_name)) {
+                try exts.append(arena, portability_name);
+                portability = true;
             }
         }
 
@@ -203,6 +230,7 @@ pub const Context = struct {
             .api_version = @bitCast(vk.API_VERSION_1_3),
         };
         self.instance = try self.vkb.createInstance(&.{
+            .flags = .{ .enumerate_portability_khr = portability },
             .p_application_info = &app_info,
             .enabled_layer_count = @intCast(layers.items.len),
             .pp_enabled_layer_names = layers.items.ptr,
@@ -329,11 +357,22 @@ pub const Context = struct {
         }
         const features2 = vk.PhysicalDeviceFeatures2{ .p_next = &f12, .features = f10 };
 
-        var exts: [1][*:0]const u8 = undefined;
+        var exts: [2][*:0]const u8 = undefined;
         var ext_count: u32 = 0;
         if (self.surface != .null) {
             exts[0] = vk.device_extensions.khr_swapchain.name;
             ext_count = 1;
+        }
+        // Vulkan requires enabling this extension when the chosen device advertises it.
+        const device_exts = try self.vki.enumerateDeviceExtensionPropertiesAlloc(self.pdev, null, self.gpa);
+        defer self.gpa.free(device_exts);
+        const portability_subset = vk.device_extensions.khr_portability_subset.name;
+        for (device_exts) |e| {
+            if (std.mem.eql(u8, std.mem.sliceTo(&e.extension_name, 0), portability_subset)) {
+                exts[ext_count] = portability_subset;
+                ext_count += 1;
+                break;
+            }
         }
 
         self.device = try self.vki.createDevice(self.pdev, &.{

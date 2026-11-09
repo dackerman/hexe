@@ -23,6 +23,7 @@
 //! here runs and no pass touches cells (the determinism scene).
 //! Decisions: docs/decisions/90-99.
 const std = @import("std");
+const sdl = @import("sdl");
 const bodies = @import("bodies");
 const gpu = @import("../gpu/gpu.zig");
 const cell = @import("cell.zig");
@@ -1420,9 +1421,7 @@ fn lineRegion(x0: f32, y0: f32, x1: f32, y1: f32, m: i32) Region {
 }
 
 pub fn nowNs() u64 {
-    var tspec: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.MONOTONIC, &tspec);
-    return @as(u64, @intCast(tspec.sec)) * std.time.ns_per_s + @as(u64, @intCast(tspec.nsec));
+    return sdl.SDL_GetTicksNS();
 }
 
 fn msSince(t0: u64) f64 {

@@ -98,6 +98,10 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const gpu_tests = b.option(bool, "gpu-tests", "Also run the GPU determinism check as part of `zig build test`") orelse false;
+    const sdl3_prefix = if (b.option([]const u8, "sdl3-prefix", "SDL3 installation with include/ and lib/ directories")) |prefix|
+        b.graph.cwdRelativePath(prefix)
+    else
+        null;
 
     const vk_xml = b.path("vendor/vulkan-headers/registry/vk.xml");
 
@@ -132,6 +136,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    if (sdl3_prefix) |prefix| sdl_c.addIncludePath(prefix.path(b, "include"));
 
     // ================= shared CPU modules (data, world, bodies) =================
     // --- data ---
@@ -188,10 +193,17 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .vk_xml = vk_xml,
         .sdl_c = sdl_c,
+        .sdl3_prefix = sdl3_prefix,
         .shaders_zig = shaders_zig,
         .shared = &shared_imports,
     });
     b.installArtifact(exe.compile);
+    if (target.result.os.tag == .windows) {
+        if (sdl3_prefix) |prefix| {
+            const dll = b.addInstallFileWithDir(prefix.path(b, "bin/SDL3.dll"), .bin, "SDL3.dll");
+            b.getInstallStep().dependOn(&dll.step);
+        }
+    }
 
     const run_cmd = b.addRunArtifact(exe.compile);
     run_cmd.step.dependOn(b.getInstallStep());
@@ -266,6 +278,7 @@ pub fn build(b: *std.Build) void {
         .optimize = .safe,
         .vk_xml = vk_xml,
         .sdl_c = sdl_c,
+        .sdl3_prefix = sdl3_prefix,
         .shaders_zig = shaders_zig,
         .shared = &verify_imports,
     });
@@ -298,6 +311,7 @@ pub fn build(b: *std.Build) void {
         .optimize = .fast,
         .vk_xml = vk_xml,
         .sdl_c = sdl_c,
+        .sdl3_prefix = sdl3_prefix,
         .shaders_zig = shaders_zig,
         .shared = &bench_imports,
     });
@@ -364,6 +378,7 @@ const HexeOptions = struct {
     optimize: std.builtin.Optimize,
     vk_xml: std.Build.LazyPath,
     sdl_c: *std.Build.Step.TranslateC,
+    sdl3_prefix: ?std.Build.LazyPath,
     shaders_zig: std.Build.LazyPath,
     shared: []const std.Build.Module.Import,
 };
@@ -381,7 +396,19 @@ fn addHexe(b: *std.Build, o: HexeOptions) Hexe {
         .optimize = o.optimize,
         .link_libc = true,
     });
-    sdl.linkSystemLibrary("SDL3", .{});
+    if (o.sdl3_prefix) |prefix| {
+        const lib_dir = prefix.path(b, "lib");
+        if (o.target.result.os.tag == .windows and o.target.result.abi == .gnu) {
+            // Zig's Windows system library search does not check the MinGW import library name.
+            sdl.addObjectFile(lib_dir.path(b, "libSDL3.dll.a"));
+        } else {
+            sdl.addLibraryPath(lib_dir);
+            if (o.target.result.os.tag == .macos) sdl.addRPath(lib_dir);
+            sdl.linkSystemLibrary("SDL3", .{ .use_pkg_config = .no });
+        }
+    } else {
+        sdl.linkSystemLibrary("SDL3", .{});
+    }
     const shaders = b.createModule(.{ .root_source_file = o.shaders_zig });
     const module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
