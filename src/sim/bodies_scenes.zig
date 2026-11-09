@@ -184,8 +184,8 @@ pub fn report(engine: anytype, gpa: std.mem.Allocator) !void {
     const b = &engine.pipeline.bodies;
     const sim = b.sim;
     const t = sim.totals;
-    std.debug.print("bodies: {d} live, {d} beams placed ({d} rejected), {d} destruction events, {d} loose components -> bodies, {d} -> rubble\n", .{
-        sim.bodyCount(), t.beams_placed, t.beams_rejected, t.events, t.extracted, t.rubble_components,
+    std.debug.print("bodies: {d} live, {d} beams placed ({d} rejected), {d} destruction events ({d} expired unprocessed), {d} loose components -> bodies, {d} -> rubble\n", .{
+        sim.bodyCount(), t.beams_placed, t.beams_rejected, t.events, t.expired, t.extracted, t.rubble_components,
     });
     std.debug.print("  breakup: {d} bodies broken, {d} dissolved, {d} rubble cells, {d} joint breaks, {d} sparks, {d} anchors released, {d} capacity drops\n", .{
         t.broken, t.dissolved, t.rubble_points, t.joint_breaks, t.sparks, t.anchors_released, t.dropped,

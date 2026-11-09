@@ -344,5 +344,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *const materials.L
     try engine.finish();
     const pa = &game.player.actor;
     std.debug.print("playtest done: witch hp {d:.0} deaths {d}, enemies {d} alive, {d} killed, {d} bodies, {d} tool uses; gameplay CPU {d:.4} ms/tick mean\n", .{ pa.health, game.player.deaths, game.enemies.len, game.enemies.kills, engine.pipeline.bodies.sim.bodyCount(), game.tools.uses, game.tick_ms_total / @as(f64, @floatFromInt(@max(game.ticks, 1))) });
+    const bt = engine.pipeline.bodies.sim.totals;
+    std.debug.print("  bodies layer: {d} destruction events, {d} connectivity runs (max {d:.3} ms), {d} loose components -> bodies, {d} -> rubble, {d} events queued at the end\n", .{ bt.events, bt.connectivity_runs, bt.connectivity_ms_max, bt.extracted, bt.rubble_components, engine.pipeline.bodies.sim.event_len });
     return 0;
 }

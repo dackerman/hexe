@@ -769,11 +769,11 @@ fn events(b: *B, s: Schedule, tick: u32) void {
 pub fn script(v: Variant, tick: u32, sim: *BodySim, list: *List) void {
     const r = sim.mats.roles;
     // The tick-0 build carves every room with air fills, which the bodies
-    // layer reads as destruction events. The level is built anchored (no
-    // loose piece; checked when it was laid out), and those events span
-    // the map: they would keep connectivity clusters queued forever and
-    // starve the real ones (a blown pillar would never come loose).
-    // Building is not destruction: drop them (decision 131).
+    // layer reads as destruction events. Building is not destruction: drop
+    // them (decision 131). The bodies layer no longer starves on such a
+    // backlog (decision 143: 21 connectivity runs without this drop, and the
+    // showcase's pillar comes loose); the drop only keeps two crumbs of
+    // under 4 px that the build leaves from turning into gravel.
     if (tick == 1) {
         sim.event_len = 0;
         sim.incoming_len = 0;
