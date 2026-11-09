@@ -135,18 +135,26 @@ uint react_cell(ivec2 p, uint c) {
     bool head_near = false;
     uint flame = MATERIALS[m].flame;
     bool self_gas = mat_phase(MATERIALS[m].move) == PHASE_GAS;
+    // A heat source (decision 142): an emitting liquid or solid (lava) at or
+    // below its spawn temperature loses no heat to solid neighbors, by
+    // conduction or by emission. It is fed from below: enclosed by rock it
+    // stays molten and keeps heating the rock; it still cools into liquids
+    // (water quenches it) and gases (an open surface crusts slowly).
+    bool source = MATERIALS[m].emits_heat != 0u && !self_gas && t <= int(MATERIALS[m].temperature);
     for (int i = 0; i < 4; i++) {
         uint nm = cell_material(n[i]);
         uint nflags = MATERIALS[nm].flags;
         int tn = int(cell_temperature(n[i]));
-        flow += int(min(k, MATERIALS[nm].conductivity)) * (tn - t);
+        uint nphase = mat_phase(MATERIALS[nm].move);
+        bool keep = source && tn < t && nphase <= PHASE_POWDER;
+        if (!keep) flow += int(min(k, MATERIALS[nm].conductivity)) * (tn - t);
         bool nburning = (nflags & MATERIAL_FLAG_FLAMMABLE) != 0u && cell_has(n[i], CELL_FLAG_BURNING);
         // Emission heats solids and liquids only (gases conduct): the hotter
         // cell of a pair of different materials gives, the other receives.
         if (tick_step && nm != m) {
             uint en = MATERIALS[nm].emits_heat + (nburning ? MATERIALS[nm].burn_heat : 0u);
             if (tn > t && !self_gas) emit += int(min(en, uint(tn - t) >> EMIT_GAP_SHIFT));
-            else if (t > tn && mat_phase(MATERIALS[nm].move) != PHASE_GAS) given += int(min(emit_self, uint(t - tn) >> EMIT_GAP_SHIFT));
+            else if (t > tn && nphase != PHASE_GAS && !keep) given += int(min(emit_self, uint(t - tn) >> EMIT_GAP_SHIFT));
         }
         extinguisher_near = extinguisher_near || (nflags & MATERIAL_FLAG_EXTINGUISHER) != 0u;
         fire_near = fire_near || nburning || (flame != MATERIAL_AIR && nm == flame);

@@ -1,0 +1,28 @@
+// Decision 142: a lava pool enclosed by rock stays molten; where it meets
+// air it crusts slowly; water crusts it at once (lava_water.zon).
+.{
+    .name = "lava_enclosed",
+    .description = "A 40x20 lava pool sealed in a stone block stays molten (rock at equilibrium with an emitter does not drain it); a 40x20 pool open to air on top crusts slowly, from the surface.",
+    .ticks = 3600,
+    .fills = .{
+        .{ .rect = .{ .x = 20, .y = 80, .w = 100, .h = 80 }, .material = "stone" },
+        .{ .rect = .{ .x = 50, .y = 110, .w = 40, .h = 20 }, .material = "lava" },
+        .{ .rect = .{ .x = 136, .y = 80, .w = 100, .h = 80 }, .material = "stone" },
+        .{ .rect = .{ .x = 166, .y = 80, .w = 40, .h = 30 }, .material = "air" },
+        .{ .rect = .{ .x = 166, .y = 110, .w = 40, .h = 20 }, .material = "lava" },
+    },
+    .assertions = .{
+        .{ .tick = 300, .count = .{ .material = "lava", .rect = .{ .x = 50, .y = 110, .w = 40, .h = 20 }, .min = 792 }, .label = "enclosed: molten at 300 (>= 99%)" },
+        .{ .tick = 600, .count = .{ .material = "lava", .rect = .{ .x = 50, .y = 110, .w = 40, .h = 20 }, .min = 792 }, .label = "enclosed: molten at 600" },
+        .{ .tick = 1200, .count = .{ .material = "lava", .rect = .{ .x = 50, .y = 110, .w = 40, .h = 20 }, .min = 792 }, .label = "enclosed: molten at 1200" },
+        .{ .tick = 3600, .count = .{ .material = "lava", .rect = .{ .x = 50, .y = 110, .w = 40, .h = 20 }, .min = 792 }, .label = "enclosed: molten at 3600 (>= 99%)" },
+        .{ .tick = 300, .count = .{ .material = "lava", .rect = .{ .x = 166, .y = 100, .w = 40, .h = 30 }, .min = 600 }, .label = "open: mostly molten at 300" },
+        .{ .tick = 3600, .count = .{ .material = "lava", .rect = .{ .x = 166, .y = 100, .w = 40, .h = 30 }, .min = 400 }, .label = "open: still half molten at 3600" },
+        .{ .tick = 300, .temperature = .{ .material = "lava", .rect = .{ .x = 50, .y = 110, .w = 40, .h = 20 }, .min = 1000 }, .label = "enclosed: mean temperature at 300" },
+        .{ .tick = 3600, .temperature = .{ .material = "lava", .rect = .{ .x = 50, .y = 110, .w = 40, .h = 20 }, .min = 1000 }, .label = "enclosed: mean temperature at 3600" },
+        .{ .tick = 300, .temperature = .{ .material = "lava", .rect = .{ .x = 166, .y = 100, .w = 40, .h = 30 }, .min = 700 }, .label = "open: mean temperature at 300" },
+        .{ .tick = 1200, .temperature = .{ .material = "lava", .rect = .{ .x = 166, .y = 100, .w = 40, .h = 30 }, .min = 700 }, .label = "open: mean temperature at 1200" },
+        .{ .tick = 3600, .temperature = .{ .material = "lava", .rect = .{ .x = 166, .y = 100, .w = 40, .h = 30 }, .min = 700 }, .label = "open: mean temperature at 3600" },
+        .{ .tick = 3600, .temperature = .{ .material = "lava", .rect = .{ .x = 166, .y = 110, .w = 40, .h = 1 }, .min = 700 }, .label = "open: surface row at 3600" },
+    },
+}

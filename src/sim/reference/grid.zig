@@ -395,18 +395,21 @@ pub const World = struct {
         var head_near = false;
         const flame = mt.flame;
         const self_gas = (mt.move & 0xff) == gas;
+        // reactions.comp: a heat source keeps its heat from solids (decision 142).
+        const source = mt.emits_heat != 0 and !self_gas and t <= @as(i32, @intCast(mt.temperature));
         for (n) |nc| {
             const nm = cell.material(nc);
             const nt = self.mat(nm);
             const nflags = nt.flags;
             const tn: i32 = @intCast(cell.temperature(nc));
-            flow += @as(i32, @intCast(@min(k, nt.conductivity))) * (tn - t);
+            const keep = source and tn < t and (nt.move & 0xff) <= powder;
+            if (!keep) flow += @as(i32, @intCast(@min(k, nt.conductivity))) * (tn - t);
             const nburning = nflags & Flag.flammable != 0 and cell.has(nc, cell.flag_burning);
             if (tick_step and nm != m) {
                 const en = nt.emits_heat + (if (nburning) nt.burn_heat else 0);
                 if (tn > t and !self_gas) {
                     emit += @intCast(@min(en, @as(u32, @intCast(tn - t)) >> rx.emit_gap_shift));
-                } else if (t > tn and (nt.move & 0xff) != gas) {
+                } else if (t > tn and (nt.move & 0xff) != gas and !keep) {
                     given += @intCast(@min(emit_self, @as(u32, @intCast(t - tn)) >> rx.emit_gap_shift));
                 }
             }

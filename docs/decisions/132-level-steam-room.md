@@ -43,3 +43,11 @@ concrete wall (the steam bursts broke the concrete side first).
 **Consequences**: the room is violent once it vents (lava and stone are
 thrown into the gallery and the walkway below). Runs are not bit-identical
 (ballistic landing order), so the exact vent tick moves by tens of ticks.
+
+**Update** (docs/decisions/142-polish-lava-heat-source.md): lava is now a
+heat source that loses no heat to rock, so enclosed lava stays molten and
+the generic upkeep (steam room floor, hut seep, arena pit repainted every
+20 ticks) is removed. Measured over 3600 ticks of `proving_grounds` without
+it: steam room floor 1800 of 1800 lava cells, hut seep 476 of 476. Kept as
+level design: the steam strip's crust remelt and the glassworks' 1256 C
+feed. With decision 140 the water resting on the divider now boils too.

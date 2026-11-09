@@ -333,6 +333,26 @@ fn countIn(def: *const scen.Def, cells: []const u32, rect: ?scen.Rect, material:
     return n;
 }
 
+/// Mean temperature (°C) of `material` cells in `rect`, or null if none.
+fn meanCelsius(def: *const scen.Def, cells: []const u32, rect: ?scen.Rect, material: u8) ?i32 {
+    const r = rect orelse scen.Rect{ .x = 0, .y = 0, .w = worldW(def), .h = worldH(def) };
+    var n: u64 = 0;
+    var sum: u64 = 0;
+    var y = r.y;
+    while (y < r.y + r.h) : (y += 1) {
+        var x = r.x;
+        while (x < r.x + r.w) : (x += 1) {
+            const c = cellAt(cells, x, y);
+            if (cell.material(c) != material) continue;
+            n += 1;
+            sum += cell.temperature(c);
+        }
+    }
+    if (n == 0) return null;
+    const mean: u8 = @intCast((sum + n / 2) / n);
+    return data.temperature.toCelsius(mean);
+}
+
 /// null = not evaluable in this build (reported as SKIP).
 /// Air density sampled at scenario cell (x, y) during the assertion's tick.
 fn pressureAt(engine: *Engine, x: i32, y: i32) ?f32 {
@@ -367,6 +387,11 @@ fn evaluate(lib: *const materials.Library, def: *const scen.Def, a: scen.Asserti
             const d = pressureAt(engine, p.x, p.y) orelse return null;
             return (p.min == null or d >= p.min.?) and (p.max == null or d <= p.max.?);
         },
+        .temperature => {
+            const t = a.temperature.?;
+            const c = meanCelsius(def, cells, t.rect, lib.id(t.material).?) orelse return false;
+            return (t.min == null or c >= t.min.?) and (t.max == null or c <= t.max.?);
+        },
         .deterministic => return null,
     }
 }
@@ -396,6 +421,11 @@ fn describe(buf: []u8, lib: *const materials.Library, def: *const scen.Def, a: s
             const p = a.pressure.?;
             const d = pressureAt(engine, p.x, p.y) orelse break :blk "no air sample (air field off?)";
             break :blk std.fmt.bufPrint(buf, "air density {d:.4} at ({d},{d})", .{ d, p.x, p.y }) catch "";
+        },
+        .temperature => blk: {
+            const t = a.temperature.?;
+            const c = meanCelsius(def, cells, t.rect, lib.id(t.material).?) orelse break :blk std.fmt.bufPrint(buf, "no {s} cells", .{t.material}) catch "";
+            break :blk std.fmt.bufPrint(buf, "{s} mean {d} C", .{ t.material, c }) catch "";
         },
         .deterministic => "",
     };
