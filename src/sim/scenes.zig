@@ -72,6 +72,8 @@ pub const Scene = enum {
     liquid_slosh,
     liquid_slosh_1m,
     liquid_basin,
+    /// Decision 140: awake solver water on a 2 px divider over lava boils.
+    liquid_boil,
     // ---- end liquid solver ----
     // ---- tech demo (src/game/level.zig); bodies and the liquid solver on ----
     /// The Proving Grounds level, left to the player.
@@ -104,6 +106,7 @@ pub fn emit(scene: Scene, tick: u32, seed: u32, m: *const Ids, list: *commands.C
         .liquid_slosh => liquid_scenes.emit(.slosh, tick, seed, m, list),
         .liquid_slosh_1m => liquid_scenes.emit(.slosh_1m, tick, seed, m, list),
         .liquid_basin => liquid_scenes.emit(.basin, tick, seed, m, list),
+        .liquid_boil => liquid_scenes.emit(.boil, tick, seed, m, list),
         .proving_grounds, .proving_grounds_auto, .proving_grounds_burst => level.emit(levelVariant(scene).?, tick, seed, m, list),
         .bench_mixed => if (tick == 0) {
             list.fillRect(0, 0, W, W, m.water, .{ .coverage = 80 });
@@ -180,7 +183,11 @@ fn determinismCommands(tick: u32, m: *const Ids, list: *commands.CommandList) vo
             list.setTemperature(ox + 150, oy + 190, 30, 600);
             list.setTemperature(0, 0, 12, -30);
         },
-        5 => list.igniteCircle(ox + 150, oy + 190, 20),
+        5 => {
+            // Gunpowder lit by the command sends its explode events (decision 141).
+            list.fillRect(ox + 140, oy + 176, ox + 150, oy + 180, m.gunpowder, .{});
+            list.igniteCircle(ox + 150, oy + 190, 20);
+        },
         7 => {
             list.eject(ox + 150, oy + 200, 30, 900); // sand pile and the floor under it
             list.eject(ox + 250, oy + 160, 18, 2000); // through the stone post

@@ -62,8 +62,10 @@ pub const Buf = enum(u32) {
     tile_count = 25,
     tile_scan = 26,
     tile_sums = 27,
+    pstate = 28, // + set
+    displaced = 30,
 };
-pub const buf_count = 28;
+pub const buf_count = 31;
 
 pub const St = struct {
     pub const count = 0;
@@ -86,6 +88,8 @@ pub const St = struct {
     pub const moved = 46;
     pub const triggers = 47;
     pub const grace = 64;
+    pub const total_bubbled = 65;
+    pub const total_bubbles_lost = 66;
     pub const words = 80;
 };
 
@@ -93,6 +97,7 @@ pub const mode_dead = 0;
 pub const mode_liquid = 1;
 pub const mode_ballistic = 2;
 pub const merge_ticks = 15;
+pub const bubble_rise = 64;
 pub const type_air = 0;
 pub const type_fluid = 1;
 pub const type_solid = 2;
@@ -252,6 +257,7 @@ const Kernel = enum {
     project,
     g2p,
     claim,
+    bubble,
     drop,
     settle,
     flush,
@@ -279,6 +285,7 @@ fn kernelCode(k: Kernel) gpu.pipelines.Spirv {
         .project => &shaders.sim_liquid_project_comp,
         .g2p => &shaders.sim_liquid_g2p_comp,
         .claim => &shaders.sim_liquid_claim_comp,
+        .bubble => &shaders.sim_liquid_bubble_comp,
         .drop => &shaders.sim_liquid_drop_comp,
         .settle => &shaders.sim_liquid_settle_comp,
         .flush => &shaders.sim_liquid_flush_comp,
@@ -324,6 +331,10 @@ pub const Stats = struct {
     triggers: [5]u32 = @splat(0),
     grace: u32 = 0,
     moved: u32 = 0,
+    /// Gas cells displaced by claiming particles and moved up to the first
+    /// air above (decision 140), and those with no air to go to (lost).
+    total_bubbled: u32 = 0,
+    total_bubbles_lost: u32 = 0,
 };
 
 pub const Liquid = struct {
@@ -384,6 +395,8 @@ pub const Liquid = struct {
             grid_cells * 4, grid_cells * 4, grid_cells * 4, grid_cells * 4, grid_cells * 4, grid_cells * 4, // u v u_old v_old uw vw
             mg_cells * 4, mg_cells * 4, mg_cells * 4, // mg type p b
             cell.tile_count * 4, cell.tile_count * 4, 16 * 4, // tile count scan sums
+            cap * 4, cap * 4, // pstate
+            cap * 4, // displaced
         };
         for (&self.buffers, sizes, 0..) |*b, size, i| {
             const usage: vk.BufferUsageFlags = .{ .transfer_dst = true, .transfer_src = true, .indirect_buffer = i == 0 };
@@ -460,6 +473,8 @@ pub const Liquid = struct {
             .triggers = w[St.triggers..][0..5].*,
             .grace = w[St.grace],
             .moved = w[St.moved],
+            .total_bubbled = w[St.total_bubbled],
+            .total_bubbles_lost = w[St.total_bubbles_lost],
         };
     }
 
@@ -756,6 +771,8 @@ pub const Liquid = struct {
                 bar(f);
             }
         }
+        self.run(f, .bubble, .{}, St.args_particles);
+        bar(f);
         self.run(f, .drop, .{ .mode = 0 }, St.args_particles);
         bar(f);
         self.run(f, .drop, .{ .mode = 1 }, St.args_particles);
@@ -773,39 +790,42 @@ test "liquid.glsl mirror" {
     var defines: [256]constants.Define = undefined;
     const n = constants.parseDefines(src, &defines);
     const mirrors = .{
-        .{ "LQ_GRID", grid },                         .{ "LQ_GRID_MASK", grid_mask },
-        .{ "LQ_GRID_SHIFT", grid_shift },             .{ "LQ_LEVELS", levels },
-        .{ "LQ_NONE", none },                         .{ "LQ_BIND_PENDING", bind_pending },
-        .{ "LQ_BUF_STATE", buf(.state) },             .{ "LQ_BUF_POS", buf(.pos) },
-        .{ "LQ_BUF_VEL", buf(.vel) },                 .{ "LQ_BUF_AFF", buf(.aff) },
-        .{ "LQ_BUF_INFO", buf(.info) },               .{ "LQ_BUF_BIND", buf(.bind) },
-        .{ "LQ_BUF_BIN_OF", buf(.bin_of) },           .{ "LQ_BUF_BIN_COUNT", buf(.bin_count) },
-        .{ "LQ_BUF_BIN_SCAN", buf(.bin_scan) },       .{ "LQ_BUF_BIN_SUMS", buf(.bin_sums) },
-        .{ "LQ_BUF_SORTED", buf(.sorted) },           .{ "LQ_BUF_U", buf(.u) },
-        .{ "LQ_BUF_V", buf(.v) },                     .{ "LQ_BUF_U_OLD", buf(.u_old) },
-        .{ "LQ_BUF_V_OLD", buf(.v_old) },             .{ "LQ_BUF_UW", buf(.uw) },
-        .{ "LQ_BUF_VW", buf(.vw) },                   .{ "LQ_BUF_MG_TYPE", buf(.mg_type) },
-        .{ "LQ_BUF_MG_P", buf(.mg_p) },               .{ "LQ_BUF_MG_B", buf(.mg_b) },
-        .{ "LQ_BUF_TILE_COUNT", buf(.tile_count) },   .{ "LQ_BUF_TILE_SCAN", buf(.tile_scan) },
-        .{ "LQ_BUF_TILE_SUMS", buf(.tile_sums) },     .{ "LQ_BUF_COUNT", buf_count },
-        .{ "LQ_ST_COUNT", St.count },                 .{ "LQ_ST_ARGS_PARTICLES", St.args_particles },
-        .{ "LQ_ST_ARGS_CELLS", St.args_cells },       .{ "LQ_ST_ARGS_SCAN", St.args_scan },
-        .{ "LQ_ST_ARGS_MG", St.args_mg },             .{ "LQ_ST_SPAWNED", St.spawned },
-        .{ "LQ_ST_REFUSED", St.refused },             .{ "LQ_ST_KILLED", St.killed },
-        .{ "LQ_ST_SLEPT", St.slept },                 .{ "LQ_ST_MERGED", St.merged },
-        .{ "LQ_ST_BALLISTIC", St.ballistic },         .{ "LQ_ST_ALIVE", St.alive },
-        .{ "LQ_ST_CANDIDATES", St.candidates },       .{ "LQ_ST_WORDS", St.words },
-        .{ "LQ_MODE_DEAD", mode_dead },               .{ "LQ_MODE_LIQUID", mode_liquid },
-        .{ "LQ_MODE_BALLISTIC", mode_ballistic },     .{ "LQ_MERGE_TICKS", merge_ticks },
-        .{ "LQ_AIR", type_air },                      .{ "LQ_FLUID", type_fluid },
-        .{ "LQ_SOLID", type_solid },                  .{ "LQ_WAKE_HOPS_COMMAND", wake_hops_command },
-        .{ "LQ_WAKE_HOPS_POWDER", wake_hops_powder }, .{ "LQ_WAKE_HOPS_PARTICLE", wake_hops_particle },
-        .{ "LQ_WAKE_HOPS_FLOW", wake_hops_flow },     .{ "LQ_ST_GRID_VALID", St.grid_valid },
-        .{ "LQ_ST_TOTAL_MERGED", St.total_merged },   .{ "LQ_ST_MOVED", St.moved },
-        .{ "LQ_ST_GRACE", St.grace },                 .{ "LQ_ST_TRIGGERS", St.triggers },
-        .{ "LQ_ST_TOTAL_KILLED", St.total_killed },   .{ "LQ_ST_TOTAL_SLEPT", St.total_slept },
-        .{ "LQ_PC_MARK_TILES", pc_mark_tiles },       .{ "LQ_PC_OVERLAY", pc_overlay },
-        .{ "LQ_PC_NO_SPAWN", pc_no_spawn },           .{ "LQ_PC_HANDOFF", pc_handoff },
+        .{ "LQ_GRID", grid },                             .{ "LQ_GRID_MASK", grid_mask },
+        .{ "LQ_GRID_SHIFT", grid_shift },                 .{ "LQ_LEVELS", levels },
+        .{ "LQ_NONE", none },                             .{ "LQ_BIND_PENDING", bind_pending },
+        .{ "LQ_BUF_STATE", buf(.state) },                 .{ "LQ_BUF_POS", buf(.pos) },
+        .{ "LQ_BUF_VEL", buf(.vel) },                     .{ "LQ_BUF_AFF", buf(.aff) },
+        .{ "LQ_BUF_INFO", buf(.info) },                   .{ "LQ_BUF_BIND", buf(.bind) },
+        .{ "LQ_BUF_BIN_OF", buf(.bin_of) },               .{ "LQ_BUF_BIN_COUNT", buf(.bin_count) },
+        .{ "LQ_BUF_BIN_SCAN", buf(.bin_scan) },           .{ "LQ_BUF_BIN_SUMS", buf(.bin_sums) },
+        .{ "LQ_BUF_SORTED", buf(.sorted) },               .{ "LQ_BUF_U", buf(.u) },
+        .{ "LQ_BUF_V", buf(.v) },                         .{ "LQ_BUF_U_OLD", buf(.u_old) },
+        .{ "LQ_BUF_V_OLD", buf(.v_old) },                 .{ "LQ_BUF_UW", buf(.uw) },
+        .{ "LQ_BUF_VW", buf(.vw) },                       .{ "LQ_BUF_MG_TYPE", buf(.mg_type) },
+        .{ "LQ_BUF_MG_P", buf(.mg_p) },                   .{ "LQ_BUF_MG_B", buf(.mg_b) },
+        .{ "LQ_BUF_TILE_COUNT", buf(.tile_count) },       .{ "LQ_BUF_TILE_SCAN", buf(.tile_scan) },
+        .{ "LQ_BUF_TILE_SUMS", buf(.tile_sums) },         .{ "LQ_BUF_PSTATE", buf(.pstate) },
+        .{ "LQ_BUF_DISPLACED", buf(.displaced) },         .{ "LQ_BUF_COUNT", buf_count },
+        .{ "LQ_ST_TOTAL_BUBBLED", St.total_bubbled },     .{ "LQ_ST_TOTAL_BUBBLES_LOST", St.total_bubbles_lost },
+        .{ "LQ_BUBBLE_RISE", bubble_rise },               .{ "LQ_ST_COUNT", St.count },
+        .{ "LQ_ST_ARGS_PARTICLES", St.args_particles },   .{ "LQ_ST_ARGS_CELLS", St.args_cells },
+        .{ "LQ_ST_ARGS_SCAN", St.args_scan },             .{ "LQ_ST_ARGS_MG", St.args_mg },
+        .{ "LQ_ST_SPAWNED", St.spawned },                 .{ "LQ_ST_REFUSED", St.refused },
+        .{ "LQ_ST_KILLED", St.killed },                   .{ "LQ_ST_SLEPT", St.slept },
+        .{ "LQ_ST_MERGED", St.merged },                   .{ "LQ_ST_BALLISTIC", St.ballistic },
+        .{ "LQ_ST_ALIVE", St.alive },                     .{ "LQ_ST_CANDIDATES", St.candidates },
+        .{ "LQ_ST_WORDS", St.words },                     .{ "LQ_MODE_DEAD", mode_dead },
+        .{ "LQ_MODE_LIQUID", mode_liquid },               .{ "LQ_MODE_BALLISTIC", mode_ballistic },
+        .{ "LQ_MERGE_TICKS", merge_ticks },               .{ "LQ_AIR", type_air },
+        .{ "LQ_FLUID", type_fluid },                      .{ "LQ_SOLID", type_solid },
+        .{ "LQ_WAKE_HOPS_COMMAND", wake_hops_command },   .{ "LQ_WAKE_HOPS_POWDER", wake_hops_powder },
+        .{ "LQ_WAKE_HOPS_PARTICLE", wake_hops_particle }, .{ "LQ_WAKE_HOPS_FLOW", wake_hops_flow },
+        .{ "LQ_ST_GRID_VALID", St.grid_valid },           .{ "LQ_ST_TOTAL_MERGED", St.total_merged },
+        .{ "LQ_ST_MOVED", St.moved },                     .{ "LQ_ST_GRACE", St.grace },
+        .{ "LQ_ST_TRIGGERS", St.triggers },               .{ "LQ_ST_TOTAL_KILLED", St.total_killed },
+        .{ "LQ_ST_TOTAL_SLEPT", St.total_slept },         .{ "LQ_PC_MARK_TILES", pc_mark_tiles },
+        .{ "LQ_PC_OVERLAY", pc_overlay },                 .{ "LQ_PC_NO_SPAWN", pc_no_spawn },
+        .{ "LQ_PC_HANDOFF", pc_handoff },
     };
     for (defines[0..n]) |d| {
         var found = false;

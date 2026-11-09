@@ -14,5 +14,6 @@ void main() {
     LQ_VEL(pc.dst)[k] = LQ_VEL(pc.src)[j];
     LQ_AFF(pc.dst)[k] = LQ_AFF(pc.src)[j];
     LQ_INFO(pc.dst)[k] = LQ_INFO(pc.src)[j];
+    LQ_PSTATE(pc.dst)[k] = LQ_PSTATE(pc.src)[j];
     LQ_BIND(pc.dst)[k] = LQ_NONE;
 }

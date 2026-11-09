@@ -1,0 +1,17 @@
+# A gunpowder pile lit all at once by an ignite command (as the level's
+# corridor charge and the fire bolt's impact light it): every lit cell sends
+# its explode event (decision 141). On main these cells burnt to smoke
+# without one explosion.
+scene empty
+spawn 900 1100
+ticks 160
+zoom 3
+at 0 fill stone 600 1100 1500 1160
+at 0 fill gunpowder 980 1086 1010 1100
+at 20 census 975 1070 40 30
+at 30 ignite 995 1093 20
+at 33 shot lit
+at 60 census 975 1070 40 30
+at 61 census 940 1100 110 30
+at 61 shot after
+at 150 shot settled

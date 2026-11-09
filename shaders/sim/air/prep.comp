@@ -13,7 +13,8 @@
 //   (docs/decisions/117-integrate-air-soft-walls.md). Walls with body
 //   pixels move no air (117: a falling body would carry its displaced air
 //   inside it and squeeze it into the cracks it lands on); rock that opens
-//   (dug, burnt, blasted) starts at the mean without a debt;
+//   (dug, burnt) starts at the mean without a debt, rock the blast broke
+//   at ambient (decision 144);
 // - every other mass source of the tick (AIR_SOURCE: gas created or
 //   removed by reactions) moves into the pending store too, so a steam
 //   puff condensing under a pane does not implode and throw its droplets;
@@ -143,6 +144,14 @@ void main() {
                 }
             }
             float rho = k > 0 ? sum / float(k) : 1.0;
+            // Rock the blast broke opens at ambient density, not at the mean
+            // (decision 144): a sealed crater that grows by breaking its
+            // walls then dilutes its overpressure like a gas filling more
+            // volume, and stops growing once its wall load falls under the
+            // rock's threshold. Starting at the mean created the air of
+            // every broken cell at the crater's pressure, so a confined
+            // charge kept breaking stone for hundreds of ticks.
+            if ((old & NODE_BLASTED) != 0u) rho = 1.0;
             // The debt, for liquid only. None for debris the blast threw out
             // (the particles stand in for the volume, and each blown-out
             // layer would leave a vacuum that throws the next), a body that

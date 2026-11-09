@@ -17,6 +17,9 @@
 //                   variant 20-23 | temperature 24-31
 //   binding   uint  pixel this particle owns in the cell image
 //                   (x | y << 16), or LQ_NONE
+//   pstate    uint  the state byte of its cell (boil count, charge phase,
+//                   lifetime...), carried from lift to claim so per-cell
+//                   counters survive re-rasterization (decision 140)
 #ifndef HEXE_LIQUID_SOLVER_GLSL
 #define HEXE_LIQUID_SOLVER_GLSL
 #include "common.glsl"
@@ -53,7 +56,11 @@
 #define LQ_BUF_TILE_COUNT 25u
 #define LQ_BUF_TILE_SCAN 26u
 #define LQ_BUF_TILE_SUMS 27u
-#define LQ_BUF_COUNT 28u
+#define LQ_BUF_PSTATE 28u
+// A gas cell a claiming particle overwrote this tick (0: none), per
+// particle; bubble.comp moves it up (decision 140).
+#define LQ_BUF_DISPLACED 30u
+#define LQ_BUF_COUNT 31u
 
 // ---- STATE words ----
 // 0 particle count, 1-3 particle dispatch, 4-6 gated 1024^2 cell dispatch
@@ -85,6 +92,10 @@
 #define LQ_ST_TRIGGERS 47u
 // Ticks left of solving after the last activity (finalize).
 #define LQ_ST_GRACE 64u
+// Totals since start: gas cells moved up out of the liquid, and lost (no
+// air within LQ_BUBBLE_RISE above them).
+#define LQ_ST_TOTAL_BUBBLED 65u
+#define LQ_ST_TOTAL_BUBBLES_LOST 66u
 #define LQ_ST_WORDS 80u
 
 // ---- particle info word ----
@@ -93,6 +104,8 @@
 #define LQ_MODE_BALLISTIC 2u
 // Ticks without a pixel before an extra particle is merged (deleted).
 #define LQ_MERGE_TICKS 15u
+// How far up through liquid a displaced gas cell looks for air.
+#define LQ_BUBBLE_RISE 64
 
 // ---- multigrid cell word: type 0-1 | W_left 8-15 | W_top 16-23 | liquid particles 24-31 ----
 // Face weights count open half-faces: at the finest level a face between two
@@ -162,6 +175,7 @@ HEXE_BUFFER(LqVec4Block, , vec4 d[];, lq_vec4);
 #define LQ_AFF(s) lq_vec4[pc.buf + LQ_BUF_AFF + (s)].d
 #define LQ_INFO(s) lq_u32[pc.buf + LQ_BUF_INFO + (s)].d
 #define LQ_BIND(s) lq_u32[pc.buf + LQ_BUF_BIND + (s)].d
+#define LQ_PSTATE(s) lq_u32[pc.buf + LQ_BUF_PSTATE + (s)].d
 #define LQ_U32(k) lq_u32[pc.buf + (k)].d
 #define LQ_F32(k) lq_f32[pc.buf + (k)].d
 

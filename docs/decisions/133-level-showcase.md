@@ -42,3 +42,10 @@ frame 4.6 ms, GPU 2.3 ms/tick (sum of pass means), dominated by
 `lq_project` (0.92 ms mean, 2.2 ms max), then the render (0.33 ms) and
 cascades (0.19 ms); bodies CPU 0.28 ms mean (1.3 max) plus a 1.7 ms mean
 synchronous terrain readback.
+
+**Update** (polish, decisions 141 and 144): ignite commands now send
+gunpowder's explode event, so the corridor charge would explode without
+being heated (kept as is); a confined charge in stone now stops breaking
+rock once the pulse has passed (128 cells in the air-test's corridor
+instead of the whole block), so the corridor and field could be carved in
+stone again (left in bedrock).

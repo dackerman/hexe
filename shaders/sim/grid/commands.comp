@@ -145,6 +145,11 @@ void main() {
             if (hit && cell != old) {
                 imageStore(CELLS, w, uvec4(cell, 0u, 0u, 0u));
                 changed = true;
+                // Lighting a material with an ignition event (gunpowder's
+                // explode) appends it, like ignition by heat or contact in
+                // the reactions pass: decision 141.
+                uint om = cell_material(old);
+                if (((c.kind >> CMD_ACTION_SHIFT) & 0xffu) == CMD_ACTION_IGNITE && MATERIALS[om].burn_event != 0u) emit_event(w, MATERIALS[om].burn_event, om);
             }
         }
         if (changed) s_changed = true;

@@ -16,7 +16,8 @@
 //   mode 2 resolve  the winner writes the cell (round 1 winners move to the
 //                   new pixel's center: the separation push); round 1 losers
 //                   count an overlap tick and are merged (deleted) after
-//                   LQ_MERGE_TICKS.
+//                   LQ_MERGE_TICKS. A winner that overwrites a gas other
+//                   than air records it for bubble.comp.
 // pc.level is the round.
 #include "sim/liquid/liquid.glsl"
 
@@ -31,6 +32,7 @@ void main() {
     uint round_ = pc.level;
 
     if (pc.mode == 0u) {
+        if (round_ == 0u) LQ_U32(LQ_BUF_DISPLACED)[k] = 0u;
         if (round_ == 1u && b != LQ_NONE) return; // won round 0
         ivec2 p = pixel_of(LQ_POS(pc.dst)[k]);
         ivec2 target = ivec2(-1);
@@ -94,8 +96,14 @@ void main() {
     }
     // resolve
     if (imageLoad(OWNER, target).x == k) {
-        MaterialGpu m = MATERIALS[info_material(info)];
-        imageStore(CELLS, target, uvec4(cell_make(info_material(info), info_temp(info), mat_initial_state(m), CELL_FLAG_PARTICLE, info_variant(info)), 0u, 0u, 0u));
+        // The cell keeps the state byte the particle carried from its last
+        // pixel (boil count, charge phase): decision 140.
+        uint state = LQ_PSTATE(pc.dst)[k] & 0xffu;
+        // A gas other than air in the pixel (steam boiled off the bottom of
+        // a pool) is displaced, not destroyed: bubble.comp moves it up.
+        uint old = imageLoad(CELLS, target).x;
+        if (cell_material(old) != MATERIAL_AIR) LQ_U32(LQ_BUF_DISPLACED)[k] = old;
+        imageStore(CELLS, target, uvec4(cell_make(info_material(info), info_temp(info), state, CELL_FLAG_PARTICLE, info_variant(info)), 0u, 0u, 0u));
         LQ_BIND(pc.dst)[k] = pack_pixel(target);
         if (round_ == 1u) LQ_POS(pc.dst)[k] = vec2(target) + 0.5;
         LQ_INFO(pc.dst)[k] = info_with_overlap(info, 0u);

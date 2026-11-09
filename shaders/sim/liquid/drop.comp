@@ -30,8 +30,13 @@ void main() {
     ivec2 p = unpack_pixel(b & ~LQ_BIND_PENDING);
     ivec2 q = wrap_coord(p + ivec2(0, 1));
     uint c = imageLoad(CELLS, p).x;
+    uint below = imageLoad(CELLS, q).x;
     imageStore(CELLS, q, uvec4(c, 0u, 0u, 0u));
-    imageStore(CELLS, p, uvec4(cell_make(MATERIAL_AIR, cell_temperature(c), 0u, 0u, 0u), 0u, 0u, 0u));
+    // A gas other than air in the hole (steam boiled off the bottom of the
+    // pool) swaps up instead of being overwritten: it rises one pixel per
+    // tick through awake liquid like a bubble (decision 140).
+    uint up = cell_material(below) != MATERIAL_AIR ? below : cell_make(MATERIAL_AIR, cell_temperature(c), 0u, 0u, 0u);
+    imageStore(CELLS, p, uvec4(up, 0u, 0u, 0u));
     imageStore(OWNER, q, uvec4(k, 0u, 0u, 0u));
     LQ_BIND(pc.dst)[k] = pack_pixel(q);
     vec2 pos = LQ_POS(pc.dst)[k];

@@ -100,6 +100,7 @@ Each has exactly one kind and an optional `.label` printed on failure.
 | `.none` | `.material`, `.rect` (default world) | no cell of `material` in the rect |
 | `.particles` | `.rect` (default world), `.min = 0`, `.max` | the number of particle-backed (awake liquid) cells is within range; `.max = 0` means asleep |
 | `.pressure` | `.x, .y`, `.min` and/or `.max` | air-field density at the cell, relative to ambient 1.0, is within range |
+| `.temperature` | `.material`, `.rect` (default world), `.min` and/or `.max` (°C) | the mean temperature of the `material` cells in the rect is within range (fails when there are none) |
 | `.deterministic` | `.runs = 2` | running the whole scenario `runs` times from scratch gives bit-identical cell images at the tick |
 
 Assertion rects and points must lie inside the world.
@@ -111,6 +112,7 @@ Assertion rects and points must lie inside the world.
 | `sand_pile.zon` | powder fall and slide, mass conservation |
 | `water_spreads_flat.zon` | liquid spread to a level layer, sleep after settling |
 | `lava_water.zon` | water + lava → stone + steam |
+| `lava_enclosed.zon` | lava sealed in rock stays molten; an open surface cools slowly (decision 142) |
 | `wood_burns.zon` | burning: wood → charcoal → ash with smoke |
 | `sand_lava_glass.zon` | sand + lava → molten glass → glass on cooling |
 | `u_tube.zon` | 04-fluids scenario 1: U-tube equalizes within 2 s |

@@ -1,0 +1,52 @@
+# Decision 143: a build-sized pile of air fills must not starve real
+# destruction events. Tick 0 carves a stone mass with a map-wide fill (a
+# build: no event) and a lattice of 1400 px corridors and 1300 px shafts
+# (26 events, more connectivity clusters than one tick's 1 ms budget runs,
+# each crossing the others' regions; the blocks between them come loose
+# as bodies). At tick 60 a pillar in a room at the lower right is cut; the
+# slab on it must come loose and fall: the census at tick 151 finds no
+# stone where it was. On main the corridors' events stayed queued forever
+# (each waited while any queued cluster overlapped its footprint):
+# hundreds of connectivity runs, 21 events still queued at the end, and
+# the slab never fell (1000 stone cells at tick 151).
+scene empty
+spawn 300 595
+ticks 160
+zoom 2
+at 0 fill stone 0 600 2048 2040
+at 0 fill air 0 500 2048 600
+at 0 fill air 100 650 1500 660
+at 0 fill air 548 730 1948 740
+at 0 fill air 100 820 1500 830
+at 0 fill air 548 900 1948 910
+at 0 fill air 100 990 1500 1000
+at 0 fill air 548 1070 1948 1080
+at 0 fill air 100 1160 1500 1170
+at 0 fill air 548 1240 1948 1250
+at 0 fill air 100 1330 1500 1340
+at 0 fill air 548 1410 1948 1420
+at 0 fill air 100 1500 1500 1510
+at 0 fill air 548 1580 1948 1590
+at 0 fill air 100 1670 1500 1680
+at 0 fill air 548 1750 1948 1760
+at 0 fill air 100 1840 1500 1850
+at 0 fill air 548 1920 1948 1930
+at 0 fill air 150 650 160 1950
+at 0 fill air 350 650 360 1950
+at 0 fill air 550 650 560 1950
+at 0 fill air 750 650 760 1950
+at 0 fill air 950 650 960 1950
+at 0 fill air 1150 650 1160 1950
+at 0 fill air 1350 650 1360 1950
+at 0 fill air 1550 650 1560 1950
+at 0 fill air 1750 1700 1950 1900
+at 40 fill stone 1846 1840 1854 1900
+at 40 fill stone 1800 1830 1900 1840
+at 59 shot before_cut
+at 60 fill air 1844 1862 1856 1878
+at 61 note pillar cut
+at 100 center 1850 1850
+at 100 shot after_cut
+at 150 center 1850 1850
+at 150 shot settled
+at 151 census 1800 1826 100 14

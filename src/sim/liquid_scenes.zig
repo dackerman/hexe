@@ -13,7 +13,7 @@ const Ids = @import("materials.zig").Ids;
 pub const origin = [2]i32{ 896, 896 };
 pub const box = 256;
 
-pub const Kind = enum { utube, dam, pool, slosh, slosh_1m, basin };
+pub const Kind = enum { utube, dam, pool, slosh, slosh_1m, basin, boil };
 
 const List = commands.CommandList;
 
@@ -42,6 +42,7 @@ pub fn emit(kind: Kind, tick: u32, seed: u32, m: *const Ids, list: *List) void {
         .slosh => slosh(tick, m, list),
         .slosh_1m => slosh1m(tick, m, list),
         .basin => basin(tick, m, list),
+        .boil => boil(tick, m, list),
     }
 }
 
@@ -126,4 +127,22 @@ fn basin(tick: u32, m: *const Ids, list: *List) void {
         list.fillRect(1040, 1330, 1484, 1400, m.water, .{});
     }
     if (tick >= 30 and tick < 400 and tick % 2 == 0) list.fillCircle(1400, 1000, 6, m.water, .{ .only_air = true });
+}
+
+/// Decision 140: a solver-water pool kept awake (a wake command every 8
+/// ticks, like water stirred by a pour) on a 2 px stone divider over a
+/// lava bath. Awake water carries its cell's state byte across
+/// re-rasterization, so it reaches the boil latency and makes steam.
+pub const boil_water: [4]i32 = .{ 20, 150, 216, 48 }; // x, y, w, h
+fn boil(tick: u32, m: *const Ids, list: *List) void {
+    if (tick == 0) {
+        frame(m, list);
+        rect(list, 16, 240, 224, 8, m.stone, .{});
+        rect(list, 16, 100, 4, 140, m.stone, .{});
+        rect(list, 236, 100, 4, 140, m.stone, .{});
+        rect(list, 20, 200, 216, 40, m.lava, .{});
+        rect(list, 20, 198, 216, 2, m.stone, .{});
+        rect(list, boil_water[0], boil_water[1], boil_water[2], boil_water[3], m.water, .{});
+    }
+    if (tick >= 1 and tick % 8 == 1) list.wakeLiquid(origin[0] + 128, origin[1] + 174, 120, 1);
 }

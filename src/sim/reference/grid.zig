@@ -166,6 +166,13 @@ pub const World = struct {
                         if (v != old) {
                             self.set(wx, wy, v);
                             changed = true;
+                            // commands.comp: an ignite that lights a material
+                            // with an ignition event appends it (decision 141).
+                            if (!is_eject and c.kind >> commands.action_shift == @backingInt(commands.Action.ignite)) {
+                                const om = cell.material(old);
+                                const bev = self.mat(om).burn_event;
+                                if (bev != 0) try self.events.append(self.gpa, .{ .tick = self.tick, .event = .init(wx, wy, @fromBackingInt(@intCast(bev)), om) });
+                            }
                         }
                     }
                 }
@@ -366,7 +373,8 @@ pub const World = struct {
                 if (fire and e.flags & materials.ReactionFlag.has_catalyst != 0) fire = self.catalystNear(fx, fy, ddx, ddy, e.catalyst);
                 if (fire) {
                     const r: u32 = e.self_result;
-                    if (e.flags & materials.ReactionFlag.emits_event != 0 and e.event != 0 and (m != mq or first)) out.emit(x, y, e.event, m, tick);
+                    const sent = mflags & Flag.flammable != 0 and cell.has(c, cell.flag_burning) and mt.burn_event == e.event;
+                    if (e.flags & materials.ReactionFlag.emits_event != 0 and e.event != 0 and (m != mq or first) and !sent) out.emit(x, y, e.event, m, tick);
                     if (r != m) return self.spawnCell(r, variant);
                 }
             }
@@ -387,18 +395,21 @@ pub const World = struct {
         var head_near = false;
         const flame = mt.flame;
         const self_gas = (mt.move & 0xff) == gas;
+        // reactions.comp: a heat source keeps its heat from solids (decision 142).
+        const source = mt.emits_heat != 0 and !self_gas and t <= @as(i32, @intCast(mt.temperature));
         for (n) |nc| {
             const nm = cell.material(nc);
             const nt = self.mat(nm);
             const nflags = nt.flags;
             const tn: i32 = @intCast(cell.temperature(nc));
-            flow += @as(i32, @intCast(@min(k, nt.conductivity))) * (tn - t);
+            const keep = source and tn < t and (nt.move & 0xff) <= powder;
+            if (!keep) flow += @as(i32, @intCast(@min(k, nt.conductivity))) * (tn - t);
             const nburning = nflags & Flag.flammable != 0 and cell.has(nc, cell.flag_burning);
             if (tick_step and nm != m) {
                 const en = nt.emits_heat + (if (nburning) nt.burn_heat else 0);
                 if (tn > t and !self_gas) {
                     emit += @intCast(@min(en, @as(u32, @intCast(tn - t)) >> rx.emit_gap_shift));
-                } else if (t > tn and (nt.move & 0xff) != gas) {
+                } else if (t > tn and (nt.move & 0xff) != gas and !keep) {
                     given += @intCast(@min(emit_self, @as(u32, @intCast(t - tn)) >> rx.emit_gap_shift));
                 }
             }
@@ -424,7 +435,12 @@ pub const World = struct {
                     burning = false;
                     tu = @min(tu, mt.ignite_at);
                 } else if (tick_step and tick % mt.burn_period == 0) {
-                    if (life <= 1) return self.burnOut(mt.burns_to, tu, variant);
+                    if (life <= 1) {
+                        const r = self.burnOut(mt.burns_to, tu, variant);
+                        const bev = self.mat(mt.burns_to).burn_event;
+                        if (cell.has(r, cell.flag_burning) and bev != 0) out.emit(x, y, bev, mt.burns_to, tick);
+                        return r;
+                    }
                     life -= 1;
                 }
             } else if (!doused) {

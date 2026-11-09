@@ -18,6 +18,7 @@
 //!     aim X Y / aimrel DX DY   cursor in world px / relative to the witch
 //!     aimenemy DX DY        cursor relative to the first enemy
 //!     fill MAT X0 Y0 X1 Y1 / circle MAT X Y R / ignite X Y R / charge X Y R
+//!     wake X Y R            wake solver liquid in a circle (it becomes FLIP particles)
 //!     explode X Y R STRENGTH
 //!     enemy walker|flyer X Y   (feet / bottom center)
 //!     center X Y / center player   screenshot camera
@@ -54,6 +55,7 @@ const Verb = union(enum) {
     circle: struct { m: u8, x: i32, y: i32, r: i32 },
     ignite: [3]i32,
     charge: [3]i32,
+    wake: [3]i32,
     explode: struct { x: i32, y: i32, r: i32, s: f32 },
     enemy: struct { kind: game_mod.EnemyKind, x: f32, y: f32 },
     center: ?[2]i32,
@@ -137,6 +139,8 @@ pub const Script = struct {
                 .{ .ignite = .{ try int(i32, &it), try int(i32, &it), try int(i32, &it) } }
             else if (std.mem.eql(u8, verb, "charge"))
                 .{ .charge = .{ try int(i32, &it), try int(i32, &it), try int(i32, &it) } }
+            else if (std.mem.eql(u8, verb, "wake"))
+                .{ .wake = .{ try int(i32, &it), try int(i32, &it), try int(i32, &it) } }
             else if (std.mem.eql(u8, verb, "explode"))
                 .{ .explode = .{ .x = try int(i32, &it), .y = try int(i32, &it), .r = try int(i32, &it), .s = try float(&it) } }
             else if (std.mem.eql(u8, verb, "enemy"))
@@ -183,6 +187,7 @@ fn printCensus(engine: *Engine, lib: *const materials.Library, cells: []u32, r: 
     var counts: [256]u32 = @splat(0);
     var burning: u32 = 0;
     var body: u32 = 0;
+    var particle: u32 = 0;
     var y = r[1];
     while (y < r[1] + r[3]) : (y += 1) {
         var x = r[0];
@@ -191,11 +196,12 @@ fn printCensus(engine: *Engine, lib: *const materials.Library, cells: []u32, r: 
             counts[cell.material(c)] += 1;
             burning += @intFromBool(cell.has(c, cell.flag_burning));
             body += @intFromBool(cell.has(c, cell.flag_body));
+            particle += @intFromBool(cell.has(c, cell.flag_particle));
         }
     }
     std.debug.print("  [tick {d}] census {d},{d} {d}x{d}:", .{ t, r[0], r[1], r[2], r[3] });
     for (counts, 0..) |n, m| if (n > 0 and m != 0) std.debug.print(" {s} {d}", .{ lib.name(@intCast(m)), n });
-    std.debug.print(" (burning {d}, body-owned {d})\n", .{ burning, body });
+    std.debug.print(" (burning {d}, body-owned {d}, particle-backed {d})\n", .{ burning, body, particle });
 }
 
 fn setKey(in: *Input, k: Key, down: bool) void {
@@ -288,6 +294,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *const materials.L
                 .circle => |c| list.fillCircle(c.x, c.y, c.r, c.m, .{}),
                 .ignite => |c| list.igniteCircle(c[0], c[1], c[2]),
                 .charge => |c| list.chargeCircle(c[0], c[1], c[2]),
+                .wake => |c| list.wakeLiquid(c[0], c[1], c[2], 1),
                 .explode => |e| {
                     game_mod.explode.explode(&list, e.x, e.y, e.r, e.s, .{ .air = engine.pipeline.config.air, .liquid = engine.pipeline.config.liquid });
                     game.blasts.add(.{ .x = @floatFromInt(e.x), .y = @floatFromInt(e.y), .radius = @floatFromInt(e.r), .strength = e.s });
@@ -338,5 +345,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *const materials.L
     try engine.finish();
     const pa = &game.player.actor;
     std.debug.print("playtest done: witch hp {d:.0} deaths {d}, enemies {d} alive, {d} killed, {d} bodies, {d} tool uses; gameplay CPU {d:.4} ms/tick mean\n", .{ pa.health, game.player.deaths, game.enemies.len, game.enemies.kills, engine.pipeline.bodies.sim.bodyCount(), game.tools.uses, game.tick_ms_total / @as(f64, @floatFromInt(@max(game.ticks, 1))) });
+    const bt = engine.pipeline.bodies.sim.totals;
+    std.debug.print("  bodies layer: {d} destruction events, {d} connectivity runs (max {d:.3} ms), {d} loose components -> bodies, {d} -> rubble, {d} events queued at the end\n", .{ bt.events, bt.connectivity_runs, bt.connectivity_ms_max, bt.extracted, bt.rubble_components, engine.pipeline.bodies.sim.event_len });
     return 0;
 }

@@ -161,6 +161,10 @@ pub const Particles = struct { rect: ?Rect = null, min: u32 = 0, max: ?u32 = nul
 /// Air-field density at a cell, relative to ambient (1.0).
 pub const Pressure = struct { x: i32, y: i32, min: ?f32 = null, max: ?f32 = null };
 
+/// Mean temperature (°C) of the `material` cells in `rect` (whole world if
+/// null) in min…max; fails when there is no such cell.
+pub const Temperature = struct { material: []const u8, rect: ?Rect = null, min: ?i32 = null, max: ?i32 = null };
+
 /// Run the scenario `runs` times from scratch and require identical cell
 /// images at the assertion tick.
 pub const Deterministic = struct { runs: u32 = 2 };
@@ -175,9 +179,10 @@ pub const Assertion = struct {
     none: ?None = null,
     particles: ?Particles = null,
     pressure: ?Pressure = null,
+    temperature: ?Temperature = null,
     deterministic: ?Deterministic = null,
 
-    pub const Kind = enum { count, at, none, particles, pressure, deterministic };
+    pub const Kind = enum { count, at, none, particles, pressure, temperature, deterministic };
 
     pub fn kind(a: Assertion) Kind {
         if (a.count != null) return .count;
@@ -185,6 +190,7 @@ pub const Assertion = struct {
         if (a.none != null) return .none;
         if (a.particles != null) return .particles;
         if (a.pressure != null) return .pressure;
+        if (a.temperature != null) return .temperature;
         return .deterministic;
     }
 };
@@ -276,6 +282,7 @@ pub fn checkMaterials(s: *const Scenario, set: *const materials.MaterialSet, dia
         if (as.count) |c| try V.material(set, "assertions", i, "count.material", c.material);
         if (as.at) |c| try V.material(set, "assertions", i, "at.material", c.material);
         if (as.none) |c| try V.material(set, "assertions", i, "none.material", c.material);
+        if (as.temperature) |c| try V.material(set, "assertions", i, "temperature.material", c.material);
     }
     return diag.messages.items.len == before;
 }
@@ -398,9 +405,9 @@ fn validate(s: *const Scenario, diag: *Diagnostics) Allocator.Error!void {
     for (d.assertions, 0..) |as, i| {
         const n = @as(u8, @intFromBool(as.count != null)) + @intFromBool(as.at != null) +
             @intFromBool(as.none != null) + @intFromBool(as.particles != null) +
-            @intFromBool(as.pressure != null) + @intFromBool(as.deterministic != null);
+            @intFromBool(as.pressure != null) + @intFromBool(as.temperature != null) + @intFromBool(as.deterministic != null);
         if (n != 1) {
-            try v.fail("assertions", i, "", "needs exactly one of .count, .at, .none, .particles, .pressure, .deterministic (has {d})", .{n});
+            try v.fail("assertions", i, "", "needs exactly one of .count, .at, .none, .particles, .pressure, .temperature, .deterministic (has {d})", .{n});
             continue;
         }
         if (as.tick) |t| if (t > d.ticks or t == 0)
@@ -424,6 +431,13 @@ fn validate(s: *const Scenario, diag: *Diagnostics) Allocator.Error!void {
                 if (p.min == null and p.max == null) try v.fail("assertions", i, "pressure", "needs .min or .max", .{});
                 if (p.min != null and p.max != null and p.min.? > p.max.?)
                     try v.fail("assertions", i, "pressure", ".min is above .max", .{});
+            },
+            .temperature => {
+                const t = as.temperature.?;
+                try v.rectInside("assertions", i, "temperature.rect", t.rect);
+                if (t.min == null and t.max == null) try v.fail("assertions", i, "temperature", "needs .min or .max", .{});
+                if (t.min != null and t.max != null and t.min.? > t.max.?)
+                    try v.fail("assertions", i, "temperature", ".min is above .max", .{});
             },
             .deterministic => if (as.deterministic.?.runs < 2)
                 try v.fail("assertions", i, "deterministic.runs", "needs at least 2 runs", .{}),

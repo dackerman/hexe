@@ -2,7 +2,8 @@
 // Lift: take last tick's rasterized particles out of the cell image so the
 // solver sees the world without them. A particle whose pixel still holds
 // its own particle-backed cell turns that pixel back into air (keeping the
-// cell's temperature, which heat may have changed). A particle whose pixel
+// cell's temperature and state byte, which heat, boiling and charge may have
+// changed: claim writes them back, decision 140). A particle whose pixel
 // was changed by another pass (a reaction turned the water into steam, a
 // command painted over it, an erase) dies: this is the reactions coupling,
 // with no list shared between passes.
@@ -22,6 +23,7 @@ void main() {
     bool ours = cell_has(c, CELL_FLAG_PARTICLE) && imageLoad(OWNER, p).x == i && cell_material(c) == info_material(info);
     if (ours) {
         info = info_with_temp(info, cell_temperature(c));
+        LQ_PSTATE(pc.src)[i] = cell_state(c);
         imageStore(CELLS, p, uvec4(cell_make(MATERIAL_AIR, cell_temperature(c), 0u, 0u, 0u), 0u, 0u, 0u));
     } else {
         info = info_with_mode(info, LQ_MODE_DEAD);

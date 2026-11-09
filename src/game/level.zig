@@ -290,15 +290,14 @@ const glass_magma_temp: u8 = 162;
 /// Ticks between refreshes of the level's lava bodies.
 const magma_period = 20;
 
-/// Lava enclosed by cold rock gives its heat away and freezes to stone in a
-/// few seconds. The level's lava is fed from below: every `magma_period`
-/// ticks each lava body's lava cells are repainted as fresh lava (fill only
-/// over lava, so crust that already froze and lava that flowed out stay as
-/// they are; docs/decisions/132-level-steam-room.md).
+/// The level's magma feed (docs/decisions/132-level-steam-room.md). Lava
+/// bodies no longer need repainting to stay molten: lava is a heat source
+/// that loses no heat to rock (docs/decisions/142-polish-lava-heat-source.md).
+/// What stays is level design: every `magma_period` ticks the steam room's
+/// open strip remelts the crust water leaves on it, and the glassworks is
+/// fed magma hotter than lava's spawn temperature.
 fn magma(b: *B, tick: u32, sched: ?Schedule) void {
     const m = b.m;
-    const o: commands.Options = .{ .only = m.lava };
-    b.rectO(steam.x0, steam.y1 - 18, steam.x1, steam.y1, m.lava, o);
     // The steam room's open strip: the crust that water leaves on it melts
     // again, so it keeps flashing water to steam while water arrives.
     b.rectO(steam.x1 - steam_strip - 4, steam.y1 - 20, steam.x1 - 4, steam.y1, m.lava, .{ .only = m.stone });
@@ -311,8 +310,6 @@ fn magma(b: *B, tick: u32, sched: ?Schedule) void {
     // the melt cools and glass shows.
     const pit_hot = if (sched) |s| tick < s.gate + 420 else true;
     if (pit_hot) b.rectO(sand_pit.x0, lava_tank.y1 + 8, sand_pit.x1, sand_pit.y1, m.lava, .{ .only = m.lava, .temperature = glass_magma_temp });
-    b.rectO(814, ground - 40, hut1.x0 - 4, ground - 6, m.lava, o);
-    b.rectO(1070, 1430, 1280, 1470, m.lava, o);
 }
 
 const B = struct {
@@ -772,11 +769,11 @@ fn events(b: *B, s: Schedule, tick: u32) void {
 pub fn script(v: Variant, tick: u32, sim: *BodySim, list: *List) void {
     const r = sim.mats.roles;
     // The tick-0 build carves every room with air fills, which the bodies
-    // layer reads as destruction events. The level is built anchored (no
-    // loose piece; checked when it was laid out), and those events span
-    // the map: they would keep connectivity clusters queued forever and
-    // starve the real ones (a blown pillar would never come loose).
-    // Building is not destruction: drop them (decision 131).
+    // layer reads as destruction events. Building is not destruction: drop
+    // them (decision 131). The bodies layer no longer starves on such a
+    // backlog (decision 143: 21 connectivity runs without this drop, and the
+    // showcase's pillar comes loose); the drop only keeps two crumbs of
+    // under 4 px that the build leaves from turning into gravel.
     if (tick == 1) {
         sim.event_len = 0;
         sim.incoming_len = 0;

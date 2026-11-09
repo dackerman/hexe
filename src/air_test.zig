@@ -164,6 +164,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, shipped: *const materia
     var failures: u32 = 0;
     failures += try sealedRoom(&ctx);
     failures += try corridorBlast(&ctx);
+    failures += try confinedCrater(&ctx);
     failures += try floodRoom(&ctx);
     failures += try quietScenes(&ctx);
     if (failures == 0) {
@@ -177,6 +178,56 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, shipped: *const materia
 fn check(ok: bool, comptime fmt: []const u8, args: anytype) u32 {
     std.debug.print("  [{s}] " ++ fmt ++ "\n", .{if (ok) "ok" else "FAIL"} ++ args);
     return if (ok) 0 else 1;
+}
+
+// ---------------------------------------------------------------------------
+// Decision 144: a confined charge in stone stops breaking rock
+// ---------------------------------------------------------------------------
+
+/// The player's blast charge (explosion r 6, strength 1) in the middle of a
+/// 400 px, 3 px corridor through a block of plain stone. The crater forms
+/// with the pulse; once the pulse has dissipated it must stop growing.
+/// Before decision 144 the broken rock opened at the crater's pressure, so
+/// the sealed crater kept its overpressure while it grew and ate the whole
+/// 400 x 200 block within 120 ticks.
+fn confinedCrater(ctx: *Ctx) !u32 {
+    const ids = ctx.ids;
+    const ox: i32 = 800;
+    const oy: i32 = 900;
+    const engine = try ctx.newEngine();
+    defer ctx.freeEngine(engine);
+    std.debug.print("\n== confined charge: blast charge in a 3 px corridor through stone, 600 ticks\n", .{});
+    var list: commands.CommandList = .{};
+    const marks = [_]u32{ 30, 60, 120, 300, 600 };
+    var broken: [marks.len]u32 = @splat(0);
+    var stone0: u32 = 0;
+    var t: u32 = 0;
+    var mi: usize = 0;
+    while (t <= 600) : (t += 1) {
+        list.begin(t);
+        if (t == 0) {
+            list.fillRect(ox, oy, ox + 400, oy + 200, ids.stone, .{});
+            list.fillRect(ox, oy + 99, ox + 400, oy + 102, materials.air, .{});
+        }
+        if (t == 10) list.explosion(ox + 200, oy + 100, 6, 1.0);
+        try engine.frame(1, .{ .scene = .empty, .extra = list.slice() }, null);
+        if (t == 5 or (mi < marks.len and t == marks[mi])) {
+            try engine.finish();
+            try engine.readbackCells(ctx.cells);
+            const n = ctx.count(ids.stone, ox, oy, 400, 200);
+            if (t == 5) {
+                stone0 = n;
+            } else {
+                broken[mi] = stone0 - n;
+                mi += 1;
+            }
+        }
+    }
+    std.debug.print("  stone broken since the charge (of {d}): t=30 {d}  t=60 {d}  t=120 {d}  t=300 {d}  t=600 {d}\n", .{ stone0, broken[0], broken[1], broken[2], broken[3], broken[4] });
+    var fails: u32 = 0;
+    fails += check(broken[1] > 0, "the charge cracks the stone around it ({d} cells by tick 60)", .{broken[1]});
+    fails += check(broken[4] - broken[1] <= 16, "the crater stops growing after the pulse: {d} more cells broken between ticks 60 and 600 (<= 16)", .{broken[4] - broken[1]});
+    return fails;
 }
 
 // ---------------------------------------------------------------------------

@@ -60,6 +60,11 @@ pub const DestructionEvent = struct {
     /// the radius (`Config.blast_per_radius`).
     strength: ?f32 = null,
     tick: u32 = 0,
+    /// Cluster this event joined in the current tick's `buildClusters`
+    /// (`no_cluster`: not ready, or no cluster slot left).
+    cluster: u16 = no_cluster,
+
+    pub const no_cluster = std.math.maxInt(u16);
 
     /// Same test as commands.comp applies to the pixel containing (px, py).
     pub fn contains(e: DestructionEvent, px: f32, py: f32) bool {
@@ -136,6 +141,13 @@ pub const Config = struct {
     /// Terrain around sleeping bodies is re-read every this many ticks.
     sleeping_refresh: u32 = 4,
     max_events: u32 = 512,
+    /// A destruction event the connectivity pass has not finished this many
+    /// ticks after the readback caught up with it is dropped (decision 143):
+    /// a backlog of events can delay real ones by at most this much.
+    max_event_age: u32 = 60,
+    /// An erase whose footprint spans this many pixels in x or y (the whole
+    /// window) is a build, not a destruction: no event (decision 143).
+    build_extent: u32 = cell.world_size,
     max_beam_requests: u32 = 64,
     max_pending: u32 = 256,
     pending_bytes: u32 = 1 << 20,
@@ -189,6 +201,8 @@ pub const Totals = struct {
     sparks: u32 = 0,
     rubble_points: u32 = 0,
     dropped: u32 = 0,
+    /// Destruction events dropped unprocessed after `max_event_age`.
+    expired: u32 = 0,
 };
 
 const BeamRequest = struct { x0: f32, y0: f32, x1: f32, y1: f32, material: u8, thickness: u16 };
@@ -429,7 +443,7 @@ pub const BodySim = struct {
             const erase = c.kind >> commands.action_shift == @backingInt(commands.Action.fill) and c.material & 0xff == materials.air;
             switch (shape) {
                 .fill_circle => if (erase) self.notifyEvent(.{ .x = c.x0, .y = c.y0, .radius = c.x1 }),
-                .fill_rect => if (erase) {
+                .fill_rect => if (erase and c.x1 - c.x0 < self.cfg.build_extent and c.y1 - c.y0 < self.cfg.build_extent) {
                     const hw = @divTrunc(c.x1 - c.x0, 2);
                     const hh = @divTrunc(c.y1 - c.y0, 2);
                     self.notifyEvent(.{ .x = c.x0 + hw, .y = c.y0 + hh, .radius = @intFromFloat(@sqrt(@as(f32, @floatFromInt(hw * hw + hh * hh)))), .rect = .{ c.x0, c.y0, c.x1, c.y1 } });
@@ -639,30 +653,40 @@ pub const BodySim = struct {
         }
     }
 
+    /// The connectivity region of one event: `connectivity_region` square
+    /// around it, grown to cover its footprint, clamped to
+    /// `max_connectivity_region` per side (centered on the event).
+    fn eventRegion(self: *const BodySim, e: DestructionEvent) Region {
+        const side: i32 = @intCast(self.cfg.connectivity_region);
+        const max_side = self.cfg.max_connectivity_region;
+        const half = @divTrunc(side, 2);
+        var r: Region = .{ .x = e.x - half, .y = e.y - half, .w = @intCast(side), .h = @intCast(side) };
+        r = r.merge(e.bounds().grow(32));
+        if (r.w > max_side) r = .{ .x = e.x - @as(i32, @intCast(max_side / 2)), .y = r.y, .w = max_side, .h = r.h };
+        if (r.h > max_side) r = .{ .x = r.x, .y = e.y - @as(i32, @intCast(max_side / 2)), .w = r.w, .h = max_side };
+        return r;
+    }
+
     /// Group the events the readback has caught up with into regions.
     fn buildClusters(self: *BodySim, read_tick: u32) void {
         self.cluster_len = 0;
-        const side: i32 = @intCast(self.cfg.connectivity_region);
         const max_side = self.cfg.max_connectivity_region;
-        for (self.events[0..self.event_len]) |e| {
+        for (self.events[0..self.event_len]) |*e| {
+            e.cluster = DestructionEvent.no_cluster;
             if (e.tick >= read_tick) continue;
-            const half = @divTrunc(side, 2);
-            var r: Region = .{ .x = e.x - half, .y = e.y - half, .w = @intCast(side), .h = @intCast(side) };
-            r = r.merge(e.bounds().grow(32));
-            if (r.w > max_side) r = .{ .x = e.x - @as(i32, @intCast(max_side / 2)), .y = r.y, .w = max_side, .h = r.h };
-            if (r.h > max_side) r = .{ .x = r.x, .y = e.y - @as(i32, @intCast(max_side / 2)), .w = r.w, .h = max_side };
-            var merged = false;
-            for (self.clusters[0..self.cluster_len]) |*c| {
+            const r = self.eventRegion(e.*);
+            for (self.clusters[0..self.cluster_len], 0..) |*c, ci| {
                 if (!c.overlaps(r)) continue;
                 const m = c.merge(r);
                 if (m.w <= max_side and m.h <= max_side) {
                     c.* = m;
-                    merged = true;
+                    e.cluster = @intCast(ci);
                     break;
                 }
             }
-            if (!merged and self.cluster_len < self.clusters.len) {
+            if (e.cluster == DestructionEvent.no_cluster and self.cluster_len < self.clusters.len) {
                 self.clusters[self.cluster_len] = r;
+                e.cluster = @intCast(self.cluster_len);
                 self.cluster_len += 1;
             }
         }
@@ -725,11 +749,17 @@ pub const BodySim = struct {
             self.connectivity(self.clusters[done]);
             done += 1;
         }
-        const left = self.clusters[done..self.cluster_len];
         var n: usize = 0;
         for (self.events[0..self.event_len]) |e| {
-            var keep = e.tick >= read_tick;
-            for (left) |c| keep = keep or c.overlaps(e.bounds());
+            // Kept until the cluster that holds its (clamped) region has run.
+            // It used to wait while any queued cluster overlapped its whole
+            // footprint, so a map-wide carve was never done and kept
+            // connectivity busy forever (decision 143).
+            var keep = e.tick >= read_tick or e.cluster == DestructionEvent.no_cluster or e.cluster >= done;
+            if (keep and e.tick < read_tick and read_tick - e.tick > self.cfg.max_event_age) {
+                keep = false;
+                self.totals.expired += 1;
+            }
             if (keep) {
                 self.events[n] = e;
                 n += 1;

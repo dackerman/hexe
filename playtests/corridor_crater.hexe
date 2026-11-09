@@ -1,0 +1,22 @@
+# Decision 144: a standard blast charge (explosion r 6, strength 1: the
+# player's blast charge) in a 3 px corridor through plain stone. The crater
+# forms with the pulse and must stop growing once it has dissipated
+# (decision 133 saw a confined charge in stone keep breaking rock for
+# hundreds of ticks, a crater 500 px wide). Census of the rock around the
+# charge at ticks 30, 60, 120, 300 and 600.
+scene empty
+spawn 300 995
+ticks 601
+zoom 2
+at 0 fill stone 0 1000 2048 1400
+at 0 fill air 700 1200 1300 1203
+at 20 explode 1000 1201 6 1
+at 30 census 800 1100 400 200
+at 60 census 800 1100 400 200
+at 120 census 800 1100 400 200
+at 300 census 800 1100 400 200
+at 600 census 800 1100 400 200
+at 61 center 1000 1200
+at 61 shot crater_60
+at 599 center 1000 1200
+at 599 shot crater_600

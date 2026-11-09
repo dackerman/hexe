@@ -1,0 +1,28 @@
+# A fire bolt into a gunpowder pile: the ignite command lights the powder
+# and every lit cell sends its explode event (decision 141), so the pile
+# blows up: debris thrown, a crater in the floor, the witch knocked back.
+# A second pile 10 px away goes up from the first (chain: the event
+# explosion is a fireball that lights flammables within 12 px).
+scene empty
+spawn 900 1100
+ticks 240
+zoom 3
+at 0 fill stone 600 1100 1500 1160
+at 0 fill gunpowder 960 1086 990 1100
+at 0 fill gunpowder 1000 1086 1030 1100
+at 10 tool 1
+at 10 aim 975 1092
+at 27 census 950 1070 45 30
+at 28 census 995 1070 45 30
+at 29 census 940 1100 130 20
+at 30 tap primary
+at 34 shot bolt_flying
+at 40 shot impact
+at 46 shot blast
+at 59 census 950 1070 45 30
+at 60 census 995 1070 45 30
+at 60 shot after
+at 119 census 995 1070 45 30
+at 120 census 940 1100 130 20
+at 200 census 600 800 900 360
+at 230 shot settled
