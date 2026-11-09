@@ -124,12 +124,20 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cli: Cli, name: []const u8, lib: 
         try reaction(&c);
         ran = true;
     }
+    if (all or std.mem.eql(u8, name, "boil")) {
+        try boil(&c, true);
+        ran = true;
+    }
+    if (std.mem.eql(u8, name, "boil_cellular")) {
+        try boil(&c, false);
+        ran = true;
+    }
     if (all or std.mem.eql(u8, name, "determinism")) {
         try determinism(&c);
         ran = true;
     }
     if (!ran) {
-        std.debug.print("unknown liquid test '{s}' (utube|dam|pool|reaction|determinism|all|residual)\n", .{name});
+        std.debug.print("unknown liquid test '{s}' (utube|dam|pool|reaction|boil|determinism|all|residual)\n", .{name});
         return 2;
     }
     std.debug.print("liquid-test: {s} ({d} failures)\n", .{ if (c.failures == 0) "PASS" else "FAIL", c.failures });
@@ -287,6 +295,37 @@ fn reaction(c: *Ctx) !void {
     const after = count(c, m.water, whole);
     const left = particleCells(c, whole);
     c.check(left == 0 and after + 8 >= before, "solver off: {d} -> {d} water cells, {d} particle-backed left", .{ before, after, left });
+}
+
+/// Decision 140: awake solver water over a 2 px stone divider above lava
+/// boils. The pool is woken every 8 ticks, so most of it is particles the
+/// whole time; each tick it is lifted and re-rasterized, and its cells must
+/// keep their boil count (the state byte) across that or they never reach
+/// the 40-tick latency.
+fn boil(c: *Ctx, solver: bool) !void {
+    std.debug.print("boil: awake water on a 2 px stone divider over lava, 600 ticks\n", .{});
+    const e = try c.engine();
+    defer c.destroy(e);
+    if (!solver) e.pipeline.config.liquid = false;
+    const wr = liquid_scenes.boil_water;
+    const above: Rect = .{ .x = 20, .y = 0, .w = 216, .h = 198 };
+    var steam_max: u32 = 0;
+    var first: ?u32 = null;
+    var awake_min: u32 = std.math.maxInt(u32);
+    var t: u32 = 50;
+    while (t <= 600) : (t += 25) {
+        try advance(e, .liquid_boil, c.cli.seed, t);
+        try snapshot(c, e);
+        const steam = count(c, m.steam, whole);
+        const awake = particleCells(c, .{ .x = wr[0], .y = wr[1], .w = wr[2], .h = wr[3] });
+        if (t >= 100) awake_min = @min(awake_min, awake);
+        steam_max = @max(steam_max, steam);
+        if (first == null and steam >= 20) first = t;
+        if (t % 100 == 0) std.debug.print("    tick {d:3}: {d} steam, {d} water above the divider, {d} awake water cells, {d} lava\n", .{ t, steam, count(c, m.water, above), awake, count(c, m.lava, whole) });
+    }
+    c.check(awake_min >= 2000, "the pool stayed awake (at least {d} particle-backed water cells from tick 100)", .{awake_min});
+    const ls = e.pipeline.liquid.stats();
+    c.check(steam_max >= 50, "awake water boiled: up to {d} steam cells (>= 50; 20 first seen at tick {?d}); {d} gas cells bubbled up past claiming particles", .{ steam_max, first, ls.total_bubbled });
 }
 
 /// Scenario 6: the same seed gives identical cell and owner images after

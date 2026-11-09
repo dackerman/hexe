@@ -1,0 +1,41 @@
+#version 460
+// Bubbles (decision 140), after the claim rounds: a gas cell that a claiming
+// particle overwrote (steam boiled off the bottom of an awake pool, smoke
+// under a wave) moves straight up through the liquid to the first air pixel
+// within LQ_BUBBLE_RISE, like a bubble rising faster than a tick. Cellular
+// gas rules move gas through plain liquid but never through awake water
+// (movement treats particle-backed cells as static), so without this the
+// gas was destroyed and awake water could not boil. Air cells are taken
+// with a compare-and-swap, so two bubbles in one column stack; which of two
+// different gases ends up higher depends on scheduling (rare; the cells,
+// counts and masses do not). Blocked by a solid: the gas is lost (counted).
+#include "sim/liquid/liquid.glsl"
+
+layout(local_size_x = 256) in;
+
+void main() {
+    uint k = gl_GlobalInvocationID.x;
+    if (k >= LQ_STATE[LQ_ST_COUNT]) return;
+    uint g = LQ_U32(LQ_BUF_DISPLACED)[k];
+    if (g == 0u) return;
+    LQ_U32(LQ_BUF_DISPLACED)[k] = 0u;
+    uint b = LQ_BIND(pc.dst)[k];
+    if (info_mode(LQ_INFO(pc.dst)[k]) == LQ_MODE_DEAD || b == LQ_NONE) return;
+    ivec2 p = unpack_pixel(b & ~LQ_BIND_PENDING);
+    for (int dy = 1; dy <= LQ_BUBBLE_RISE; dy++) {
+        ivec2 q = wrap_coord(p - ivec2(0, dy));
+        uint c = imageLoad(CELLS, q).x;
+        for (int attempt = 0; attempt < 4 && cell_material(c) == MATERIAL_AIR && (c & (CELL_FLAG_PARTICLE | CELL_FLAG_BODY)) == 0u; attempt++) {
+            uint prev = imageAtomicCompSwap(CELLS, q, c, g);
+            if (prev == c) {
+                atomicAdd(LQ_STATE[LQ_ST_TOTAL_BUBBLED], 1u);
+                if ((pc.flags & LQ_PC_MARK_TILES) != 0u) mark_pixel_tile(q);
+                return;
+            }
+            c = prev; // another bubble took it: look further up
+        }
+        uint ph = mat_phase_of(cell_material(c));
+        if ((c & CELL_FLAG_BODY) != 0u || (ph != PHASE_LIQUID && ph != PHASE_GAS)) break;
+    }
+    atomicAdd(LQ_STATE[LQ_ST_TOTAL_BUBBLES_LOST], 1u);
+}

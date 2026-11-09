@@ -34,3 +34,7 @@ several ticks. The first version (random free 8-neighbor) pumped energy.
 **Consequences**: a particle that is unclaimed in the tick the solver is
 switched off (flush) is dropped. Rasterized cells take the material's
 initial state byte; the state byte is not carried by particles.
+
+**Superseded in part** by docs/decisions/140-polish-awake-water-state.md:
+particles carry their cell's state byte, and gas in a claimed or dropped-into
+pixel is displaced upward instead of overwritten.

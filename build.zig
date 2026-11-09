@@ -70,6 +70,7 @@ const shader_sources = [_][]const u8{
     "sim/liquid/project.comp",
     "sim/liquid/g2p.comp",
     "sim/liquid/claim.comp",
+    "sim/liquid/bubble.comp",
     "sim/liquid/drop.comp",
     "sim/liquid/settle.comp",
     "sim/liquid/flush.comp",

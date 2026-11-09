@@ -1,0 +1,32 @@
+# lightning_water with the liquid solver on and the pool awake (FLIP
+# particles, re-rasterized every tick): the charge pulse must run through
+# awake water too (decision 140). The pool is woken every few ticks.
+scene empty
+spawn 932 1030
+ticks 300
+zoom 3
+liquid on
+at 0 fill stone 600 1100 1500 1160
+at 0 fill stone 840 1030 940 1100
+at 0 fill stone 940 1060 950 1140
+at 0 fill stone 1190 1060 1200 1140
+at 0 fill air 950 1060 1190 1130
+at 0 fill water 950 1080 1190 1130
+at 0 fill stone 940 1130 1200 1160
+at 2 enemy walker 1120 1130
+at 10 tool 7
+at 10 aim 1000 1084
+at 60 wake 1070 1105 140
+at 70 wake 1070 1105 140
+at 80 wake 1070 1105 140
+at 80 shot walker_in_pool
+at 86 wake 1070 1105 140
+at 89 census 950 1080 240 50
+at 90 tap primary
+at 92 shot zap
+at 96 wake 1070 1105 140
+at 104 wake 1070 1105 140
+at 109 census 950 1080 240 50
+at 110 tap primary
+at 140 shot after
+at 290 shot corpse

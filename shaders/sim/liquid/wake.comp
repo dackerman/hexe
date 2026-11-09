@@ -215,6 +215,7 @@ void main() {
                 LQ_AFF(pc.src)[idx] = vec4(0.0);
                 LQ_INFO(pc.src)[idx] = info_make(cell_material(c), LQ_MODE_LIQUID, cell_variant(c), temp);
                 LQ_BIND(pc.src)[idx] = LQ_NONE;
+                LQ_PSTATE(pc.src)[idx] = cell_state(c);
                 imageStore(CELLS, p, uvec4(cell_make(MATERIAL_AIR, temp, 0u, 0u, 0u), 0u, 0u, 0u));
                 if (hops[k] > 1u) {
                     uint code = liquid_wake_code(hops[k] - 1u) << next_shift;
