@@ -183,7 +183,11 @@ fn determinismCommands(tick: u32, m: *const Ids, list: *commands.CommandList) vo
             list.setTemperature(ox + 150, oy + 190, 30, 600);
             list.setTemperature(0, 0, 12, -30);
         },
-        5 => list.igniteCircle(ox + 150, oy + 190, 20),
+        5 => {
+            // Gunpowder lit by the command sends its explode events (decision 141).
+            list.fillRect(ox + 140, oy + 176, ox + 150, oy + 180, m.gunpowder, .{});
+            list.igniteCircle(ox + 150, oy + 190, 20);
+        },
         7 => {
             list.eject(ox + 150, oy + 200, 30, 900); // sand pile and the floor under it
             list.eject(ox + 250, oy + 160, 18, 2000); // through the stone post

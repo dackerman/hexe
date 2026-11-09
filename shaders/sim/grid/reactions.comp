@@ -109,7 +109,12 @@ uint react_cell(ivec2 p, uint c) {
             if (fire) {
                 uint r = e.x & 0xffu;
                 uint ev = (e.y >> 16) & 0xffu;
-                if ((eflags & REACTION_FLAG_EMITS_EVENT) != 0u && ev != 0u && (m != mq || first)) emit_event(p, ev, m);
+                // A burning cell already sent its ignition event; the same
+                // event from a pair reaction would be a second one
+                // (gunpowder lit by the ignite command, then touched by
+                // flame): decision 141, once per cell.
+                bool sent = (mflags & MATERIAL_FLAG_FLAMMABLE) != 0u && cell_has(c, CELL_FLAG_BURNING) && MATERIALS[m].burn_event == ev;
+                if ((eflags & REACTION_FLAG_EMITS_EVENT) != 0u && ev != 0u && (m != mq || first) && !sent) emit_event(p, ev, m);
                 if (r != m) return spawn_cell(r, variant);
             }
         }
@@ -166,7 +171,13 @@ uint react_cell(ivec2 p, uint c) {
                 burning = false;
                 tu = min(tu, MATERIALS[m].ignite_at);
             } else if (tick_step && pc.tick % MATERIALS[m].burn_period == 0u) {
-                if (life <= 1u) return burn_out(MATERIALS[m].burns_to, tu, variant);
+                if (life <= 1u) {
+                    // A flammable product starts burning: its ignition.
+                    uint b = MATERIALS[m].burns_to;
+                    uint r = burn_out(b, tu, variant);
+                    if (cell_has(r, CELL_FLAG_BURNING) && MATERIALS[b].burn_event != 0u) emit_event(p, MATERIALS[b].burn_event, b);
+                    return r;
+                }
                 life -= 1u;
             }
         } else if (!doused) {

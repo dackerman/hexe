@@ -13,7 +13,8 @@
 //!     cells still fly.
 //! `Explosions.drain` turns the GPU's EVENT_EXPLODE (gunpowder and any
 //! material rule with `.event = .explode`) into `explode` calls, one tick
-//! late, through the readback mirror.
+//! late, through the readback mirror, each with a fireball that lights
+//! flammables around it (chains between gunpowder piles, decision 141).
 const std = @import("std");
 const commands = @import("../sim/commands.zig");
 const readback = @import("../sim/readback.zig");
@@ -31,6 +32,10 @@ pub const Options = struct {
 pub const eject_speed: f32 = 900;
 /// Radius of a material-event explosion (one gunpowder cell), pixels.
 pub const event_radius = 6;
+/// A material-event explosion is a fireball: it lights what is flammable
+/// within this radius (decision 141), so gunpowder next to an exploding pile
+/// goes up too (each lit gunpowder cell sends its own explode event once).
+pub const event_fireball = 12;
 
 pub fn explode(list: *commands.CommandList, x: i32, y: i32, radius: i32, strength: f32, opts: Options) void {
     const r = @max(radius, 1);
@@ -63,6 +68,7 @@ pub const Explosions = struct {
                 for (evs) |e| {
                     if (e.kind() != .explode or n >= self.max_per_drain) continue;
                     explode(list, e.x, e.y, event_radius, 1.0, opts);
+                    list.igniteCircle(e.x, e.y, event_fireball);
                     n += 1;
                 }
             }
@@ -103,5 +109,9 @@ test "drain explodes each event once" {
     list.begin(0);
     try std.testing.expectEqual(@as(u32, 1), ex.drain(&m, &list, .{}));
     try std.testing.expectEqual(@as(i32, 10), list.items[0].x0);
+    // The fireball: an ignite command at the event.
+    try std.testing.expectEqual(@as(u32, 2), list.len);
+    try std.testing.expectEqual(@as(u32, @backingInt(commands.Action.ignite)), list.items[1].kind >> commands.action_shift);
+    try std.testing.expectEqual(@as(i32, 10), list.items[1].x0);
     try std.testing.expectEqual(@as(u32, 0), ex.drain(&m, &list, .{}));
 }
