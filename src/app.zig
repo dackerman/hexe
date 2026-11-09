@@ -103,7 +103,9 @@ fn runSandbox(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *materials.Libr
     }
     const scene = if (cli.world) .empty else cli.scene;
 
-    const win_w, const win_h = window.pixelSize();
+    // Re-read every frame: the window manager may tile or resize the window
+    // after it opens, and the camera is centered on this size.
+    var win_w, var win_h = window.pixelSize();
     var view: View = .{ .scale = cli.zoom };
     const scene_center: [2]i32 = if (cli.scene == .lighting) @import("sim/scenes.zig").lighting_center else .{ cell.world_size / 2, cell.world_size / 2 };
     const start = if (session) |s| (cli.center orelse s.spawn()) else (cli.center orelse scene_center);
@@ -136,6 +138,7 @@ fn runSandbox(gpa: std.mem.Allocator, io: std.Io, cli: Cli, lib: *materials.Libr
         try engine.poll(); // newest readback before building this frame's commands
         const input = window.poll();
         if (input.quit or input.wasPressed(c.SDL_SCANCODE_ESCAPE)) break;
+        if (input.resized) win_w, win_h = window.pixelSize();
 
         const now = std.Io.Timestamp.now(io, .awake);
         const dt = prev.durationTo(now).nanoseconds;
@@ -414,7 +417,9 @@ fn runPlay(gpa: std.mem.Allocator, io: std.Io, cli_in: Cli, lib: *materials.Libr
     populate(game, scene);
     game.debug_spawn = cli.spawn_enemies;
 
-    const win_w, const win_h = window.pixelSize();
+    // Re-read every frame (see the sandbox loop): a stale size centers the
+    // camera on a view the swapchain does not show.
+    var win_w, var win_h = window.pixelSize();
     var view: View = .{ .scale = if (cli.zoom_set) cli.zoom else 3 };
     var cam = [2]f32{ spawn[0], spawn[1] - 20 };
     var input: game_mod.Input = .{ .aim = spawn };
@@ -436,6 +441,7 @@ fn runPlay(gpa: std.mem.Allocator, io: std.Io, cli_in: Cli, lib: *materials.Libr
         try engine.poll();
         const sdl = window.poll();
         if (sdl.quit or sdl.wasPressed(c.SDL_SCANCODE_ESCAPE)) break;
+        if (sdl.resized) win_w, win_h = window.pixelSize();
         const now = std.Io.Timestamp.now(io, .awake);
         const dt = prev.durationTo(now).nanoseconds;
         prev = now;
