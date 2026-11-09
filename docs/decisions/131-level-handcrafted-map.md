@@ -30,3 +30,9 @@ fills (no way to make air without an air fill).
 same connectivity starvation; worth a fix in bodies_sim (expire events whose
 cluster was processed once). Reopen if the level moves into the streamed
 world.
+
+**Update** (docs/decisions/143-polish-connectivity-backlog.md): fixed in
+bodies_sim: an event drops once its own clamped cluster has run, stale
+events expire after 60 ticks, and a window-wide erase is no event. Without
+the tick-1 drop the build now costs 21 connectivity runs and leaves 0 loose
+bodies (2 crumbs under 4 px become gravel); the drop is kept for those.
