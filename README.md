@@ -34,8 +34,9 @@ charge, burn the village and watch smoke follow the air, shoot the thin
 wooden dam and the steam-room plug, set off the gunpowder at both mouths
 of the corridor and compare it with the open field, pour lava on the sand
 pit, cut the steel beams in the ruin with the cutter and blow out the
-pillar under the watchtower, then put lightning into the pool with the
-walker standing in it.
+pillar under the watchtower, put lightning into the pool with the
+walker standing in it, pile up gunpowder with tool 9 and light it with a
+fire bolt, and pour water onto the lava in the steam room to boil it.
 
 Other modes: `--sandbox` (paint materials, pan), `--world --seed N`
 (endless procedural caves, F5 saves), `--scene proving_grounds_auto

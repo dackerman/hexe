@@ -9,7 +9,7 @@ sandbox and `-- --world` the streamed world (keys in
 
 This is a single-sitting review of the implementation decisions agents made
 while building M0-M9 and the demo level, and integrating the branches on
-`main`. It covers the 112 files in [decisions/](decisions/) (01-133, with
+`main`. It covers the 117 files in [decisions/](decisions/) (01-144, with
 gaps) and the integration fixes noted in the merge commits. The design-level decisions D1-D10 in
 [06-decisions.md](06-decisions.md) are only mentioned where the build
 departed from them.
@@ -21,7 +21,8 @@ verified, and where decision files disagree. Every entry links to its decision f
 alternatives and measurements. Where decision files disagree, the higher
 number usually supersedes the lower; the integration files 110-119 win over
 everything before them, and the later fixes 106-108 win over the
-integration files where they say so.
+integration files where they say so, and the polish files 140-144 win over
+everything they name.
 
 Nothing here was re-measured or re-run for this review. Numbers are as the agents
 recorded them on the RTX 4090.
@@ -72,11 +73,11 @@ recorded them on the RTX 4090.
 | 40 | 04: entity knockback from pressure-gradient samples | Knockback from the rise of overpressure at the character's center (1500 px/s per unit rise along the wind, +45 % up); damage above 0.08 overpressure; air off falls back to the bodies' radial falloff | The LBM gradient is small and noisy; the rise is robust | [125](decisions/125-gameplay-blast-knockback.md) |
 | 41 | 07: level loaded into the streamed window with procedural caves around it | Handcrafted 2048 x 1536 map in the scene window, open sky above y 400, bedrock below y 1536 and at the x seam; no streaming. The witch is not wired to `--world` | Fewer moving parts; the stream would have to carry the level's commands | [131](decisions/131-level-handcrafted-map.md), [129](decisions/129-gameplay-app-modes.md) |
 | 42 | Building the world is ordinary commands | The whole map is emitted at tick 0 (~600 of 1024 commands) and its destruction events are dropped at tick 1 | Walls built later blasted huts; map-spanning carve events stayed queued and starved connectivity (a blown pillar never came loose) | [131](decisions/131-level-handcrafted-map.md) |
-| 43 | Lava keeps lighting and heating its rooms | The level repaints every lava body as fresh lava every 20 ticks ("fed from below"); glassworks lava fed at 1256 °C | Lava enclosed by cold rock froze to stone in ~300 ticks (emission drains the emitter) | [132](decisions/132-level-steam-room.md) |
-| 44 | 07 steam room: lava floor, water tank, wooden plug | Lava under a 2 px stone divider that stops short of the east wall, leaving a 16 px open-lava strip where water flashes to steam; wood wall health 12, ending 44 px above the floor | Awake FLIP water cannot boil: rasterization resets the state byte that holds the boil counter. Water poured straight on lava crusts it | [132](decisions/132-level-steam-room.md) |
+| 43 | Lava keeps lighting and heating its rooms | The level repaints every lava body as fresh lava every 20 ticks ("fed from below"); glassworks lava fed at 1256 °C | Lava enclosed by cold rock froze to stone in ~300 ticks (emission drains the emitter). Fixed: lava at or below its spawn temperature loses no heat to rock, and the repaint is gone; only the strip remelt and the hot feed remain | [132](decisions/132-level-steam-room.md), [142](decisions/142-polish-lava-heat-source.md) |
+| 44 | 07 steam room: lava floor, water tank, wooden plug | Lava under a 2 px stone divider that stops short of the east wall, leaving a 16 px open-lava strip where water flashes to steam; wood wall health 12, ending 44 px above the floor | Awake FLIP water could not boil: rasterization reset the state byte that holds the boil counter. Fixed: particles carry the state byte and steam bubbles up through the pool. Water poured straight on lava still crusts it | [132](decisions/132-level-steam-room.md), [140](decisions/140-polish-awake-water-state.md) |
 | 45 | 07 glassworks: a gate the player can open | Steel floor gate, plus a sand silo with a wooden gate | Wood under lava burns through by itself | [132](decisions/132-level-steam-room.md) |
-| 46 | 07 pressure corridor: sand plugs every 64 px | Plugs every 32 px; corridor and open field carved in bedrock; each charge is the standard blast on a pile of gunpowder heated past ignition | 64 px left 1-2 plugs to compare; stone next to a fresh crater kept breaking for hundreds of ticks | [133](decisions/133-level-showcase.md) |
-| 47 | Ignition (any source) makes gunpowder explode | `ignite` commands set the burning flag without the ignition event, so command-ignited gunpowder never explodes; only heat or flame ignition emits EVENT_EXPLODE | Found by the level agent; not changed | [133](decisions/133-level-showcase.md) |
+| 46 | 07 pressure corridor: sand plugs every 64 px | Plugs every 32 px; corridor and open field carved in bedrock; each charge is the standard blast on a pile of gunpowder heated past ignition | 64 px left 1-2 plugs to compare; stone next to a fresh crater kept breaking for hundreds of ticks. The crater growth is fixed (blasted rock opens at ambient); the corridor and field are still bedrock, and the charge is still heated (harmless now) | [133](decisions/133-level-showcase.md), [144](decisions/144-polish-confined-crater.md) |
+| 47 | Ignition (any source) makes gunpowder explode | Fixed: the ignite command, heat, flame contact and burn-out all send the material's `burn_event`, exactly once per cell; each explode event also lights a 12 px fireball so piles chain | Found by the level agent; fixed in polish | [133](decisions/133-level-showcase.md), [141](decisions/141-polish-ignition-events.md) |
 | 48 | Weapons are command emitters; flying things are particles | Fire bolt, spit and blast charge are 64 CPU projectiles ray-marched against the mirror, one tick late | GPU particles give no impact callback and no character hits | [124](decisions/124-gameplay-projectiles.md) |
 
 ## 2. Decisions by subsystem
@@ -243,7 +244,19 @@ Tuning knobs: gravity 760, jump 270 px/s, 45 % on release, coyote 0.10 s, buffer
 - [132](decisions/132-level-steam-room.md) Lava upkeep, steam room and glassworks (departures 43-45). No material file was changed. Once vented the room throws lava and stone into the gallery.
 - [133](decisions/133-level-showcase.md) Showcase schedules, corridor in bedrock with 32 px plugs (departure 46), ruin beams and watchtower inside the 256 px connectivity region. Corridor plugs gone to 290-320 px vs 100-130 px in the field 140 ticks after the charge.
 
-Tuning knobs: lava repaint period 20 ticks, glassworks lava 1256 °C, steam-room wood health 12 and open-lava strip 16 px, plug spacing 32 px, charge `explosion(r 6, strength 1)`, field charge 60 ticks after the corridor's, glass cool-down 420 ticks, ruin beam 4 px over 240 px.
+Tuning knobs: glassworks lava 1256 °C (the generic lava repaint is gone, [142](decisions/142-polish-lava-heat-source.md)), steam-strip crust remelt, steam-room wood health 12 and open-lava strip 16 px, plug spacing 32 px, charge `explosion(r 6, strength 1)`, field charge 60 ticks after the corridor's, glass cool-down 420 ticks, ruin beam 4 px over 240 px.
+
+### Polish (140-144)
+
+Five engine fixes for things the level had to work around (rows 43, 44, 46, 47 above and the open items they left). Each one was measured against `main` before and after, with a new check in the matching harness.
+
+- [140](decisions/140-polish-awake-water-state.md) Liquid particles carry the cell's state byte in a new `pstate` array (lift, sort, wake, claim), so the boil latency and charge phase survive rasterization; supersedes 84's "state not carried". Gas is displaced, not destroyed: `drop.comp` swaps a gas pixel up, and the new `bubble.comp` moves gas a winner overwrote up to the first air pixel within 64 px. `liquid-test` check `boil`: 0 steam on main, 187 peak now (cellular reference 149); a lightning bolt now electrocutes a walker in fully awake water. 8 MB more VRAM at 1M particles. Droplets handed to the ballistic buffer still lose their state (P_META has no spare byte).
+- [141](decisions/141-polish-ignition-events.md) Every ignition path (ignite command, heat, flame contact, burn-out into a flammable) sends the material's `burn_event`, once per cell; the CPU reference matches (verify-determinism now lights a gunpowder patch: 40 explode + 3 eject events on both). `Explosions.drain` adds a radius-12 ignite (`event_fireball`) per material explosion so neighboring piles chain; blast charges and scene explosions do not ignite. `gunpowder_ignite` playtest: a 414-cell pile burnt to smoke before, now craters the floor and knocks the witch back. Not retuned: one standard blast per gunpowder cell, so an 840-cell pair breaks about 7500 stone pixels.
+- [142](decisions/142-polish-lava-heat-source.md) A non-gas emitter (lava) at or below its spawn temperature loses no heat to colder static or powder neighbors (neither conduction nor emission drain); it still heats them, still cools into liquids and gases, and cools normally above spawn. New `scenarios/lava_enclosed.zon` with a `.temperature` assertion: sealed pool 800 of 800 cells and 1104 °C at tick 3600 (main: 0 cells); open pool surface 816 °C at 3600, crusting around tick 5000. The level's lava repaint is removed; 3600 ticks of `proving_grounds` keep every lava cell. Side effect: lava the player sprays stays molten until its surface crusts.
+- [143](decisions/143-polish-connectivity-backlog.md) Destruction events compute their region once (clamped to 448 px per side), remember their cluster and are dropped once it ran; events 60 ticks past readback expire and are counted (`Totals.expired`); an erase spanning the window is a build. `bodies_backlog` playtest: 322-473 connectivity runs and a slab that never fell on main, 18 runs and the slab falls now. An island cut free by a carve wider than 448 px far from its center is found only by another event's region.
+- [144](decisions/144-polish-confined-crater.md) A lattice cell opened by blast damage (NODE_BLASTED) starts at ambient density instead of its neighbors' mean (107), so a sealed crater dilutes its own overpressure as it grows. `air-test` "confined charge": 7986 / 41042 / 77339 stone cells broken at ticks 30 / 60 / 120 on main, 128 at every tick now; open-air blasts unchanged (8 cells). Dug and burnt rock still opens at the mean.
+
+Tuning knobs: boil latency 40 ticks (unchanged, now effective in awake water), bubble reach 64 px, `event_fireball` radius 12, `max_event_age` 60 ticks, event region clamp 448 px, `build_extent` 2048.
 
 ## 3. Open items
 
@@ -269,14 +282,14 @@ Tuning knobs: lava repaint period 20 ticks, glassworks lava 1256 °C, steam-room
 - [ ] GPU procgen. ([12](decisions/12-world-procgen.md))
 - [ ] Minimum-spec profile: render memory and capacities not reduced. ([100](decisions/100-render-pipeline.md), [72](decisions/72-air-lbm-parameters.md))
 - [ ] Vulkan validation layers not installed; no run has been validated. ([20](decisions/20-vulkan-bindings.md))
-- [ ] Awake FLIP water cannot boil: rasterization writes the material's initial state, resetting the boil counter in the state byte. Liquid layer, `shaders/sim/liquid/claim.comp` (state not carried by particles, [84](decisions/84-liquid-rasterization.md)). ([132](decisions/132-level-steam-room.md))
-- [ ] `ignite` commands do not emit the ignition event, so command-ignited gunpowder never explodes. `shaders/sim/grid/commands.comp` / `reactions.comp`. ([133](decisions/133-level-showcase.md))
-- [ ] Destruction events whose region spans the map stay queued while any cluster overlaps them and starve connectivity. Suggested fix: expire an event once its cluster ran, in `src/sim/bodies_sim.zig`. The level works around it at tick 1. ([131](decisions/131-level-handcrafted-map.md))
-- [ ] Stone next to a fresh crater keeps breaking for hundreds of ticks after a confined charge (reported as engine behavior; the level uses bedrock). ([133](decisions/133-level-showcase.md))
-- [ ] Enclosed lava freezes in ~300 ticks because emission drains the emitter; the level repaints it. Heat model in `reactions.comp` ([41](decisions/41-reactions-pass.md), [132](decisions/132-level-steam-room.md))
+- [x] Awake FLIP water cannot boil. Fixed by [140](decisions/140-polish-awake-water-state.md). Left: droplets in the shared ballistic buffer land with the initial state byte (`P_META` has no spare byte); the `lq_raster` cost of the new bubble pass was not compared against main (0.057 ms in the burst scene before).
+- [x] `ignite` commands do not emit the ignition event. Fixed by [141](decisions/141-polish-ignition-events.md). Left: each gunpowder cell is still one standard blast charge ([115](decisions/115-integrate-explode.md)), so large piles are very strong now that every cell fires; worth a design pass on per-cell strength or a per-pile cap.
+- [x] Destruction events starve connectivity. Fixed by [143](decisions/143-polish-connectivity-backlog.md). The level keeps its tick-1 drop (two sub-4 px crumbs would turn to gravel without it).
+- [x] Stone next to a fresh crater keeps breaking. Fixed by [144](decisions/144-polish-confined-crater.md). Left: the level's pressure corridor and open field are still carved in bedrock and could go back to stone.
+- [x] Enclosed lava freezes in ~300 ticks. Fixed by [142](decisions/142-polish-lava-heat-source.md); the level's repaint is removed. Left: energy is not conserved around lava (rock next to a pool heats toward lava's temperature without the lava cooling).
 - [ ] The witch is not wired to `--world`; it keeps the sandbox. ([129](decisions/129-gameplay-app-modes.md))
 - [ ] Explosion drain caps at 64 per drain; the showcase staggers charges to avoid it. ([115](decisions/115-integrate-explode.md), [133](decisions/133-level-showcase.md))
-- [ ] Four 5.7 MB `playtest-*.png` files were committed at the repository root by the level merge (`9b597a8`); probably accidental.
+- [x] Four 5.7 MB `playtest-*.png` files committed at the repository root by the level merge: removed and ignored in `0b32226`.
 
 ## 4. Verification status
 
@@ -286,16 +299,16 @@ Build targets (from [08-engineering.md](08-engineering.md)):
 |---|---|---|
 | `zig build test` | CPU unit tests: packing, hash, torus, ZON validation, layout vs GLSL text, CPU reference behaviors, Box2D wrappers, procgen seams | required before every report (08); no failure recorded |
 | `zig build verify-determinism` | GPU grid + reactions vs CPU reference, 300 ticks, sleep on/off, event sets; `determinism_commands` for command kinds. Air, liquid, bodies off; no particles | 0 differences |
-| `zig build scenarios` | `scenarios/*.zon` headless | 8 pass, 3 skip |
+| `zig build scenarios` | `scenarios/*.zon` headless, now with `.temperature` assertions | 9 pass, 3 skip (`lava_enclosed` added by [142](decisions/142-polish-lava-heat-source.md)) |
 | `zig build gpu-test` | particles land and conserve cells, mirror, events one tick late | eject test loses 0-1 of 15 489 cells ([51](decisions/51-ballistic-pass.md)) |
-| `zig build air-test` | sealed room, corridor blast, `air_flood`, zero-eject checks over flowing liquid and bodies | all PASS after 107: corridor 152 px vs open 40 px, flood 1.93 at 3/4 full (Boyle 2.02), 0 fake ejects ([107](decisions/107-air-soft-wall-compression.md)) |
-| `zig build liquid-test` | U-tube, dam break, pool sleep, reactions coupling, determinism (air off, hand-off off) | U-tube within 4 px from tick 710; dam keeps 99.3 % of its water; determinism 0 differences |
+| `zig build air-test` | sealed room, corridor blast, `air_flood`, zero-eject checks over flowing liquid and bodies | all PASS after 107: corridor 152 px vs open 40 px, flood 1.93 at 3/4 full (Boyle 2.02), 0 fake ejects ([107](decisions/107-air-soft-wall-compression.md)); "confined charge" 128 stone cells at every tick ([144](decisions/144-polish-confined-crater.md)) |
+| `zig build liquid-test` | U-tube, dam break, pool sleep, reactions coupling, determinism (air off, hand-off off) | U-tube within 4 px from tick 710; dam keeps 99.3 % of its water; determinism 0 differences; `boil` >= 50 steam cells in awake water ([140](decisions/140-polish-awake-water-state.md)) |
 | `zig build stream-test` | upload, dirty bits, download, save, reload (`--world-selftest`) | no result restated in the decision files |
 | `zig build bench`, `bench-render` | per-pass GPU ms, overlap | numbers in the decision files |
 | `zig build bodies-demo` | CPU beam bend and snap (ASCII) | matches 17 |
 | `zig build worldgen`, `docs`, `shaders` | tools | build |
-| `--script playtests/NAME.hexe` | headless scripted play with view screenshots | looked at, not pass/fail ([128](decisions/128-gameplay-playtests.md)) |
-| `--demo-script PREFIX`, `--bench-demo` | level showcase screenshots; every event in 5 s, timed | 2.6 ms wall per tick with a 1080p render, GPU 2.3 ms, `lq_project` 0.92 ms mean ([133](decisions/133-level-showcase.md)) |
+| `--script playtests/NAME.hexe` | headless scripted play with view screenshots; 16 scripts, the bodies-layer totals printed at the end | looked at, not pass/fail ([128](decisions/128-gameplay-playtests.md)); the five polish playtests record before/after censuses in 140-144 |
+| `--demo-script PREFIX`, `--bench-demo` | level showcase screenshots; every event in 5 s, timed | 2.6 ms wall per tick with a 1080p render, GPU 2.3 ms, `lq_project` 0.92 ms mean ([133](decisions/133-level-showcase.md)); 2.52 ms wall, worst frame 5.4 ms after polish ([144](decisions/144-polish-confined-crater.md)) |
 
 Verified headless: everything in the table, the `bodies_*` scenes (headless reports with cell census), lighting and overlays via `--view-screenshot` PNGs the agents looked at, `--world` streaming with camera paths and the world self-test.
 
@@ -329,7 +342,10 @@ Recorded, not resolved, except where marked.
 20. Tick-0 walls: 131 builds the map in tick 0 because walls built later "push their air out as blasts". That was measured before 107, which routes static walls through the store too.
 21. Defaults overtaken by the merge: 129 sets `default_scene = .lighting` until the level lands and 130 says the camera starts at the world center until the spawn is wired; the level merge sets `.proving_grounds` and uses `level.spawn_point`.
 22. Gravity: D9 says all solvers share units so falls agree; 122 gives characters 760 px/s² against 196 for everything else.
+23. State byte and particles: 84 says the state byte is not carried by liquid particles; 140 carries it in `pstate`. 84's text stands for the shared ballistic buffer only.
+24. Lava cooling: 41 drains a quarter of emitted heat from every emitter so lava does not stay hot forever; 142 exempts a non-gas emitter at or below spawn temperature from losing heat to rock. 142 wins; 41's drain still applies above spawn and into liquids and gases.
+25. Opened rock and air density: 107 says rock that opens starts at its fluid neighbors' mean density; 144 starts blast-opened rock at ambient. Both hold, split by the NODE_BLASTED bit.
 
 ## 6. Later decisions
 
-Decisions after 133 are appended by later agents and are not covered here.
+Decisions 140-144 (polish) are covered above in section 2 and marked in sections 1, 3, 4 and 5. Decisions after 144 are appended by later agents and are not covered here.
