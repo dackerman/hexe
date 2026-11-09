@@ -102,6 +102,10 @@ pub fn build(b: *std.Build) void {
         b.graph.cwdRelativePath(prefix)
     else
         null;
+    const vulkan_prefix = if (b.option([]const u8, "vulkan-prefix", "Vulkan loader installation with a lib/ directory (macOS runtime search path)")) |prefix|
+        b.graph.cwdRelativePath(prefix)
+    else
+        null;
 
     const vk_xml = b.path("vendor/vulkan-headers/registry/vk.xml");
 
@@ -194,6 +198,7 @@ pub fn build(b: *std.Build) void {
         .vk_xml = vk_xml,
         .sdl_c = sdl_c,
         .sdl3_prefix = sdl3_prefix,
+        .vulkan_prefix = vulkan_prefix,
         .shaders_zig = shaders_zig,
         .shared = &shared_imports,
     });
@@ -279,6 +284,7 @@ pub fn build(b: *std.Build) void {
         .vk_xml = vk_xml,
         .sdl_c = sdl_c,
         .sdl3_prefix = sdl3_prefix,
+        .vulkan_prefix = vulkan_prefix,
         .shaders_zig = shaders_zig,
         .shared = &verify_imports,
     });
@@ -312,6 +318,7 @@ pub fn build(b: *std.Build) void {
         .vk_xml = vk_xml,
         .sdl_c = sdl_c,
         .sdl3_prefix = sdl3_prefix,
+        .vulkan_prefix = vulkan_prefix,
         .shaders_zig = shaders_zig,
         .shared = &bench_imports,
     });
@@ -379,6 +386,7 @@ const HexeOptions = struct {
     vk_xml: std.Build.LazyPath,
     sdl_c: *std.Build.Step.TranslateC,
     sdl3_prefix: ?std.Build.LazyPath,
+    vulkan_prefix: ?std.Build.LazyPath,
     shaders_zig: std.Build.LazyPath,
     shared: []const std.Build.Module.Import,
 };
@@ -421,6 +429,9 @@ fn addHexe(b: *std.Build, o: HexeOptions) Hexe {
             .{ .name = "shaders", .module = shaders },
         },
     });
+    if (o.target.result.os.tag == .macos) {
+        if (o.vulkan_prefix) |prefix| module.addRPath(prefix.path(b, "lib"));
+    }
     // Raw GLSL sources the CPU mirrors are checked against (see src/sim/cell.zig tests).
     module.addAnonymousImport("common_glsl", .{ .root_source_file = b.path("shaders/common.glsl") });
     module.addAnonymousImport("bodies_glsl", .{ .root_source_file = b.path("shaders/sim/bodies/bodies.glsl") });

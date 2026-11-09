@@ -158,20 +158,29 @@ $env:Path = "$sdl\bin;$env:Path"
 
 ### macOS (Apple Silicon)
 
-Install SDL3 and `glslc` with Homebrew, and install the
-[macOS Vulkan SDK](https://vulkan.lunarg.com/doc/view/latest/mac/getting_started.html)
-with MoltenVK. Use the SDK's system-wide runtime installation or source its
-`setup-env.sh` in the terminal where you launch Hexe. From the checkout:
+Install Zig 0.17.1, SDL3, `glslc`, and the Vulkan runtime with Homebrew.
+From the checkout:
 
 ```bash
-brew install sdl3 shaderc
-zig build -Doptimize=ReleaseFast -Dsdl3-prefix="$(brew --prefix sdl3)"
+brew install zig sdl3 shaderc molten-vk vulkan-loader
+zig build -Doptimize=ReleaseFast \
+  -Dsdl3-prefix="$(brew --prefix sdl3)" \
+  -Dvulkan-prefix="$(brew --prefix vulkan-loader)"
 ./zig-out/bin/hexe
 ```
 
-The Windows x64 and Apple Silicon builds are experimental. The game still
-needs a native run on both platforms, including a check that MoltenVK
-supports Hexe's required Vulkan features and shaders.
+The prefixes embed library search paths for SDL3 and the dynamically loaded
+Vulkan loader. Pass the same options to `zig build run`, `zig build test`,
+and GPU test targets. Alternatively, install the
+[macOS Vulkan SDK](https://vulkan.lunarg.com/doc/view/latest/mac/getting_started.html)
+with MoltenVK and source its `setup-env.sh` before building and launching;
+`-Dvulkan-prefix` is optional when the loader is already discoverable.
+
+Apple Silicon is experimental: the ReleaseFast build, 138 CPU tests, a
+headless simulation with PNG output, and a short windowed Proving Grounds
+run have passed on an Apple M3 Max with MoltenVK 1.4.2. This is a startup
+smoke check, not a full GPU regression or performance qualification.
+Windows x64 still needs a native run.
 
 ## Tests
 
